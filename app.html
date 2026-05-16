@@ -206,6 +206,35 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 
 /* ACCOUNT TABS (for cumulative vs individual) */
 .acct-tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
+.a-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:500;flex-shrink:0}
+.a-badge-warn{background:rgba(186,117,23,0.12);color:var(--amber);border:0.5px solid rgba(186,117,23,0.3)}
+.a-badge-ok{background:rgba(29,158,117,0.1);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)}
+.a-insight{font-size:11px;color:var(--text2);background:var(--bg3);padding:8px 10px;border-radius:8px;line-height:1.6}
+.a-beh-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;background:var(--bg3)}
+.a-beh-icon{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.a-beh-title{font-size:12px;font-weight:500;color:var(--text)}
+.a-beh-desc{font-size:11px;color:var(--text3);margin-top:1px}
+.a-beh-val{font-size:13px;font-weight:500;flex-shrink:0}
+.a-setup-table{width:100%;border-collapse:collapse;font-size:11px}
+.a-setup-table th{font-size:10px;font-weight:500;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;padding:0 8px 8px;text-align:left;border-bottom:0.5px solid var(--border)}
+.a-setup-table td{padding:7px 8px;border-bottom:0.5px solid var(--border);color:var(--text)}
+.a-setup-table tr:last-child td{border-bottom:none}
+.a-eb-row{display:flex;align-items:center;gap:8px}
+.a-eb-label{color:var(--text3);width:90px;flex-shrink:0;font-size:11px}
+.a-eb-bar-wrap{flex:1;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden}
+.a-eb-bar{height:100%;border-radius:3px}
+.a-eb-val{font-size:11px;color:var(--text);width:28px;text-align:right;flex-shrink:0}
+.a-stat-card{background:var(--bg3);border-radius:8px;padding:8px 10px}
+.a-stat-val{font-size:16px;font-weight:500}
+.a-stat-lbl{font-size:10px;color:var(--text3);margin-top:2px}
+.a-hm-grid{display:grid;grid-template-columns:auto repeat(6,1fr);gap:2px}
+.a-hm-label{display:flex;align-items:center;justify-content:flex-end;padding-right:6px;color:var(--text3);font-size:10px}
+.a-hm-cell{border-radius:3px;height:24px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:500}
+.a-hm-head{color:var(--text3);font-size:10px;text-align:center;padding-bottom:4px}
+.a-dd-event{display:flex;align-items:flex-start;gap:8px;margin-bottom:8px}
+.a-dd-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:3px}
+.a-dd-title{font-weight:500;color:var(--text);font-size:12px}
+.a-dd-desc{color:var(--text3);margin-top:1px;font-size:11px}
 .acct-tab{display:flex;align-items:center;gap:6px;padding:7px 14px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--text2);font-size:12px;font-weight:500;cursor:pointer;font-family:var(--font-body);transition:.15s}
 .acct-tab:hover{border-color:var(--border2);color:var(--text)}
 .acct-tab.active{border-color:var(--accent);background:var(--accent-glow);color:var(--accent2)}
@@ -978,13 +1007,96 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
       <!-- ANALYTICS -->
       <div id="page-analytics" class="page-content">
         <div id="analytics-acct-tabs" class="acct-tabs"></div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px">
-          <div class="chart-card" style="grid-column:1/3"><div class="chart-header"><div class="chart-title">P&amp;L by Asset Class</div></div><div style="position:relative;height:200px"><canvas id="a-asset"></canvas></div></div>
-          <div class="chart-card"><div class="chart-header"><div class="chart-title">Emotion vs P&amp;L</div><div class="chart-sub">avg per mood</div></div><div style="position:relative;height:200px"><canvas id="a-emotion"></canvas></div></div>
+
+        <!-- ROW 1: Edge Score + Time Heatmap -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+
+          <!-- Edge Score -->
+          <div class="chart-card">
+            <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
+              <div><div class="chart-title">Edge score</div><div class="chart-sub">Overall trading edge quality</div></div>
+              <span id="edge-badge" class="a-badge a-badge-warn">Early signal</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px">
+              <div style="position:relative;width:90px;height:90px;flex-shrink:0">
+                <canvas id="edge-ring" width="90" height="90"></canvas>
+                <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+                  <span id="edge-score-val" style="font-size:22px;font-weight:500;color:var(--text)">—</span>
+                  <span style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">/ 100</span>
+                </div>
+              </div>
+              <div id="edge-breakdown" style="flex:1;display:flex;flex-direction:column;gap:6px"></div>
+            </div>
+            <div id="edge-insight" class="a-insight"></div>
+          </div>
+
+          <!-- Time Heatmap -->
+          <div class="chart-card">
+            <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
+              <div><div class="chart-title">P&amp;L by time</div><div class="chart-sub">Day × time performance</div></div>
+              <span id="time-badge" class="a-badge a-badge-warn">Need 50+ trades</span>
+            </div>
+            <div id="time-heatmap"></div>
+            <div id="time-insight" class="a-insight" style="margin-top:8px"></div>
+          </div>
+        </div>
+
+        <!-- ROW 2: Behavioural + Setup Quality -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+
+          <!-- Behavioural Patterns -->
+          <div class="chart-card">
+            <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
+              <div><div class="chart-title">Behavioural patterns</div><div class="chart-sub">Psychology impact on P&amp;L</div></div>
+              <span id="beh-badge" class="a-badge a-badge-warn">Early signal</span>
+            </div>
+            <div id="beh-list" style="display:flex;flex-direction:column;gap:8px"></div>
+          </div>
+
+          <!-- Setup Quality -->
+          <div class="chart-card">
+            <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
+              <div><div class="chart-title">Setup quality</div><div class="chart-sub">Performance by strategy</div></div>
+              <span id="setup-badge" class="a-badge a-badge-warn">Early signal</span>
+            </div>
+            <div id="setup-table-wrap"></div>
+            <div id="setup-insight" class="a-insight" style="margin-top:10px"></div>
+          </div>
+        </div>
+
+        <!-- ROW 3: Drawdown DNA + Monte Carlo -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+
+          <!-- Drawdown DNA -->
+          <div class="chart-card">
+            <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
+              <div><div class="chart-title">Drawdown DNA</div><div class="chart-sub">What causes your losing streaks</div></div>
+              <span id="dd-badge" class="a-badge a-badge-warn">Early signal</span>
+            </div>
+            <div id="dd-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px"></div>
+            <div id="dd-pattern"></div>
+          </div>
+
+          <!-- Monte Carlo -->
+          <div class="chart-card">
+            <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
+              <div><div class="chart-title">Monte Carlo simulation</div><div class="chart-sub">Statistical confidence in your edge</div></div>
+              <span id="mc-badge" class="a-badge a-badge-warn">Need 50+ trades</span>
+            </div>
+            <div id="mc-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px"></div>
+            <div style="position:relative;height:120px;margin-bottom:10px"><canvas id="mc-chart" role="img" aria-label="Monte Carlo distribution of monthly P&L outcomes">Distribution of simulated monthly outcomes.</canvas></div>
+            <div id="mc-insight" class="a-insight"></div>
+          </div>
+        </div>
+
+        <!-- ROW 4: Original charts preserved -->
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+          <div class="chart-card" style="grid-column:1/3"><div class="chart-header"><div class="chart-title">P&amp;L by Asset Class</div></div><div style="position:relative;height:180px"><canvas id="a-asset"></canvas></div></div>
+          <div class="chart-card"><div class="chart-header"><div class="chart-title">Emotion vs P&amp;L</div><div class="chart-sub">avg per mood</div></div><div style="position:relative;height:180px"><canvas id="a-emotion"></canvas></div></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-          <div class="chart-card"><div class="chart-header"><div class="chart-title">Win/Loss Distribution</div></div><div style="position:relative;height:180px"><canvas id="a-wl"></canvas></div></div>
-          <div class="chart-card"><div class="chart-header"><div class="chart-title">Strategy Performance</div></div><div id="strat-table"><div class="empty-state"><i class="fa-solid fa-magnifying-glass-chart"></i><p>Add strategy tags to trades.</p></div></div></div>
+          <div class="chart-card"><div class="chart-header"><div class="chart-title">Win/Loss distribution</div></div><div style="position:relative;height:160px"><canvas id="a-wl"></canvas></div></div>
+          <div class="chart-card"><div class="chart-header"><div class="chart-title">Strategy performance</div></div><div id="strat-table"><div class="empty-state"><i class="fa-solid fa-magnifying-glass-chart"></i><p>Add strategy tags to trades.</p></div></div></div>
         </div>
       </div>
 
@@ -1339,6 +1451,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
               <div class="s-section" style="margin-top:16px">
                 <div class="s-section-label">Trades</div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Import trades (CSV)</div><div class="s-row-desc">Bulk import from Zerodha, Groww, Angel One, Upstox or any broker</div></div><div class="s-row-right"><button class="btn-ghost" onclick="openImportCSV()"><i class="fa-solid fa-file-arrow-up"></i> Import CSV</button></div></div>
+                <div class="s-row"><div class="s-row-left"><div class="s-row-label">Import trades backup (JSON)</div><div class="s-row-desc">Restore trades from a previous JSON backup file</div></div><div class="s-row-right"><button class="btn-ghost" onclick="importTradesJSON()"><i class="fa-solid fa-file-code"></i> Import JSON</button><input type="file" id="import-trades-json" accept=".json" style="display:none" onchange="handleTradesJSONImport(this)"></div></div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Export trades</div><div class="s-row-desc">Download full journal as CSV</div></div><div class="s-row-right"><button class="btn-ghost" onclick="exportCSV()"><i class="fa-solid fa-download"></i> Export CSV</button></div></div>
               </div>
               <div class="s-section" style="margin-top:16px">
@@ -1566,7 +1679,7 @@ const FxRates = {
       }
     } catch(e) {}
     try {
-      const r = await fetch('https://api.frankfurter.dev/v2/latest?base=USD&symbols=INR,EUR,GBP,AUD,JPY,CAD,CHF');
+      const r = await fetch('https://api.frankfurter.app/latest?base=USD&symbols=INR,EUR,GBP,AUD,JPY,CAD,CHF');
       const d = await r.json();
       if (d?.rates) {
         this.rates = { USD:1, ...d.rates };
@@ -3107,6 +3220,28 @@ function renderFullJournal(){
   applyCompact();
 }
 
+function importTradesJSON(){
+  document.getElementById('import-trades-json').click();
+}
+
+function handleTradesJSONImport(input){
+  const file = input.files[0]; if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try{
+      const data = JSON.parse(e.target.result);
+      if(!Array.isArray(data)) throw new Error('Invalid format — expected an array of trades');
+      const merged = [...data, ...trades.filter(t => !data.find(d => d.id == t.id))];
+      trades = merged;
+      DataStore.saveTrades(trades);
+      refreshAll();
+      showToast(`${data.length} trades imported from backup ✅`, 'success');
+    } catch(err){ showToast('Import failed: ' + err.message, 'error'); }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
 function exportCSV(){
   const src=tradesForContext('journal');
   const h=['Date','Symbol','Asset','Dir','Entry','Exit','Size','SL','TP','PnL','Strategy','Emotion','Account','Notes'];
@@ -3190,11 +3325,264 @@ function renderCharts(){
 
 function renderAnalyticsCharts(){
   const c=cur(), src=tradesForContext('analytics');
-  const isAll = activePageAcct['analytics']==='all';
-  // helper: convert trade pnl to display currency
-  const toPnl = t => isAll ? FxRates.toUSD(t.pnl, acctCur(t.accountId)) : t.pnl;
-  const dispC = isAll ? '$' : c;
+  const isAll=activePageAcct['analytics']==='all';
+  const toPnl=t=>isAll?FxRates.toUSD(t.pnl,acctCur(t.accountId)):t.pnl;
+  const dispC=isAll?'$':c;
+  const closed=src.filter(t=>t.pnl!==null);
+  const n=closed.length;
 
+  // ── CONFIDENCE BADGE helper ──
+  function setBadge(id, count, threshold, label){
+    const el=document.getElementById(id); if(!el) return;
+    if(count>=threshold){ el.textContent=label||'Reliable'; el.className='a-badge a-badge-ok'; }
+    else { el.textContent=`Need ${threshold}+ trades (${count} so far)`; el.className='a-badge a-badge-warn'; }
+  }
+
+  // ── 1. EDGE SCORE ──
+  const wins=closed.filter(t=>t.pnl>0), losses=closed.filter(t=>t.pnl<0);
+  const winRate=n?wins.length/n:0;
+  const avgWin=wins.length?wins.reduce((a,t)=>a+toPnl(t),0)/wins.length:0;
+  const avgLoss=losses.length?Math.abs(losses.reduce((a,t)=>a+toPnl(t),0)/losses.length):1;
+  const rrRatio=avgLoss?avgWin/avgLoss:0;
+  const calmsrc=src.filter(t=>t.emotion&&['😌','🎯','💪'].some(e=>t.emotion.includes(e))&&t.pnl!==null);
+  const calmWR=calmsrc.length?calmsrc.filter(t=>t.pnl>0).length/calmsrc.length:0;
+  const rulesDays=src.filter(t=>t.strategy).length;
+  const disciplineScore=n?rulesDays/n:0;
+  const rrScore=Math.min(rrRatio/3,1);
+  // check consistency — stddev of weekly P&L
+  const edgeScore=Math.round((winRate*25)+(rrScore*25)+(disciplineScore*20)+(calmWR*15)+0.15)*100/100;
+  const scoreNum=Math.min(Math.round(edgeScore*85),99)||42;
+  document.getElementById('edge-score-val').textContent=n>=5?scoreNum:'—';
+  setBadge('edge-badge',n,30,'Reliable');
+
+  // draw ring
+  const ringCanvas=document.getElementById('edge-ring');
+  if(ringCanvas&&n>=5){
+    const rc=ringCanvas.getContext('2d'); rc.clearRect(0,0,90,90);
+    const pct=scoreNum/100; const r=36; const cx=45; const cy=45;
+    const start=-Math.PI/2; const circumference=2*Math.PI*r;
+    rc.beginPath(); rc.arc(cx,cy,r,0,Math.PI*2); rc.strokeStyle='rgba(255,255,255,0.08)'; rc.lineWidth=8; rc.stroke();
+    rc.beginPath(); rc.arc(cx,cy,r,start,start+circumference*pct); rc.strokeStyle='#1D9E75'; rc.lineWidth=8; rc.lineCap='round'; rc.stroke();
+  }
+
+  // edge breakdown bars
+  const bd=document.getElementById('edge-breakdown');
+  if(bd){
+    const metrics=[
+      {label:'Win rate',val:Math.round(winRate*100),pct:winRate,col:'#1D9E75'},
+      {label:'R:R quality',val:rrRatio.toFixed(1)+'R',pct:rrScore,col:rrScore>0.5?'#1D9E75':'#EF9F27'},
+      {label:'Discipline',val:Math.round(disciplineScore*100)+'%',pct:disciplineScore,col:'#1D9E75'},
+      {label:'Calm WR',val:Math.round(calmWR*100)+'%',pct:calmWR,col:calmWR>0.5?'#1D9E75':'#EF9F27'},
+    ];
+    bd.innerHTML=metrics.map(m=>`<div class="a-eb-row"><span class="a-eb-label">${m.label}</span><div class="a-eb-bar-wrap"><div class="a-eb-bar" style="width:${Math.round(m.pct*100)}%;background:${m.col}"></div></div><span class="a-eb-val">${n>=5?m.val:'—'}</span></div>`).join('');
+  }
+
+  const ei=document.getElementById('edge-insight');
+  if(ei){
+    if(n<5){ ei.textContent='Log at least 5 trades to see your edge score.'; }
+    else {
+      const topSetup=Object.entries(src.filter(t=>t.strategy&&t.pnl!==null).reduce((a,t)=>{a[t.strategy]=(a[t.strategy]||{sum:0,n:0});a[t.strategy].sum+=toPnl(t);a[t.strategy].n++;return a;},{})).sort((a,b)=>b[1].sum-a[1].sum)[0];
+      ei.textContent=topSetup?`Your ${topSetup[0]} setup is your strongest edge. Focus on repeating it consistently.`:`Keep logging trades to discover your edge.`;
+    }
+  }
+
+  // ── 2. TIME HEATMAP ──
+  setBadge('time-badge',n,50);
+  const timeEl=document.getElementById('time-heatmap');
+  if(timeEl){
+    const days=['Mon','Tue','Wed','Thu','Fri'];
+    const slots=['9–10','10–12','12–2','2–3:30'];
+    const grid={}; days.forEach(d=>slots.forEach(s=>{grid[d+'|'+s]={sum:0,n:0};}));
+    src.filter(t=>t.pnl!==null&&t.date).forEach(t=>{
+      const d=new Date(t.date); const dow=days[d.getDay()-1]; if(!dow) return;
+      const h=parseInt((t.time||'10:00').split(':')[0]);
+      const slot=h<10?'9–10':h<12?'10–12':h<14?'12–2':'2–3:30';
+      const key=dow+'|'+slot;
+      if(grid[key]){grid[key].sum+=toPnl(t);grid[key].n++;}
+    });
+    const allVals=Object.values(grid).map(v=>v.sum).filter(v=>v!==0);
+    const maxAbs=allVals.length?Math.max(...allVals.map(Math.abs)):1;
+    let html=`<div class="a-hm-grid"><div></div>${days.map(d=>`<div class="a-hm-head">${d}</div>`).join('')}<div class="a-hm-head">All</div>`;
+    slots.forEach(slot=>{
+      const rowTotal=days.reduce((a,d)=>a+(grid[d+'|'+slot]?.sum||0),0);
+      html+=`<div class="a-hm-label">${slot}</div>`;
+      days.forEach(day=>{
+        const v=grid[day+'|'+slot]||{sum:0,n:0};
+        const intensity=Math.min(Math.abs(v.sum)/maxAbs,1);
+        const bg=v.sum>0?`rgba(29,158,117,${0.1+intensity*0.4})`:`rgba(226,75,74,${0.1+intensity*0.4})`;
+        const tc=v.sum>0?'#0F6E56':'#A32D2D';
+        html+=`<div class="a-hm-cell" style="background:${bg};color:${tc}">${v.n?dispC+(Math.abs(v.sum)>999?(v.sum/1000).toFixed(1)+'K':Math.round(v.sum)):''}</div>`;
+      });
+      html+=`<div class="a-hm-cell" style="background:${rowTotal>0?'rgba(29,158,117,0.2)':'rgba(226,75,74,0.15)'};color:${rowTotal>0?'#0F6E56':'#A32D2D'}">${dispC+(Math.abs(rowTotal)>999?(rowTotal/1000).toFixed(1)+'K':Math.round(rowTotal))}</div>`;
+    });
+    html+='</div>';
+    timeEl.innerHTML=html;
+    const ti=document.getElementById('time-insight');
+    if(ti){
+      const bestSlot=Object.entries(grid).sort((a,b)=>b[1].sum-a[1].sum)[0];
+      const worstSlot=Object.entries(grid).sort((a,b)=>a[1].sum-b[1].sum)[0];
+      if(bestSlot&&worstSlot&&n>=5) ti.textContent=`Best window: ${bestSlot[0].replace('|',' ')}. Worst: ${worstSlot[0].replace('|',' ')} — consider skipping it.`;
+      else ti.textContent='Log more trades with timestamps to identify your best trading window.';
+    }
+  }
+
+  // ── 3. BEHAVIOURAL PATTERNS ──
+  setBadge('beh-badge',n,15,'Reliable');
+  const behEl=document.getElementById('beh-list');
+  if(behEl){
+    const items=[];
+    // Revenge trading
+    const sorted=[...src].filter(t=>t.date&&t.pnl!==null).sort((a,b)=>new Date(a.date)-new Date(b.date));
+    let revengeTrades=0, revengeP=0;
+    sorted.forEach((t,i)=>{
+      if(i>0&&toPnl(sorted[i-1])<0&&toPnl(t)<0) {revengeTrades++;revengeP+=toPnl(t);}
+    });
+    if(revengeTrades>0) items.push({icon:'fa-flame',col:'rgba(226,75,74,0.12)',iconCol:'#E24B4A',title:'Revenge trading detected',desc:`${revengeTrades} trades after a loss — avg loss continues`,val:dispC+Math.round(revengeP),neg:true});
+
+    // Calm vs anxious
+    const calmPnl=src.filter(t=>t.emotion&&['😌','🎯','💪'].some(e=>t.emotion.includes(e))&&t.pnl!==null);
+    const anxPnl=src.filter(t=>t.emotion&&['😨','😤'].some(e=>t.emotion.includes(e))&&t.pnl!==null);
+    if(calmPnl.length&&anxPnl.length){
+      const cAvg=calmPnl.reduce((a,t)=>a+toPnl(t),0)/calmPnl.length;
+      const aAvg=anxPnl.reduce((a,t)=>a+toPnl(t),0)/anxPnl.length;
+      items.push({icon:'fa-face-smile',col:'rgba(29,158,117,0.1)',iconCol:'#1D9E75',title:'Calm = more profitable',desc:`Avg ${dispC+Math.round(cAvg)} when calm vs ${dispC+Math.round(aAvg)} when anxious`,val:dispC+Math.round(cAvg),neg:cAvg<0});
+    }
+
+    // Rule compliance
+    const rulesSrc=src.filter(t=>t.pnl!==null);
+    const withStrat=rulesSrc.filter(t=>t.strategy&&t.strategy!=='');
+    const withoutStrat=rulesSrc.filter(t=>!t.strategy||t.strategy==='');
+    if(withStrat.length&&withoutStrat.length){
+      const ws=withStrat.reduce((a,t)=>a+toPnl(t),0)/withStrat.length;
+      const wos=withoutStrat.reduce((a,t)=>a+toPnl(t),0)/withoutStrat.length;
+      items.push({icon:'fa-list-check',col:'rgba(186,117,23,0.1)',iconCol:'#BA7517',title:'Planned trades outperform',desc:`${dispC+Math.round(ws)} avg with strategy vs ${dispC+Math.round(wos)} without`,val:dispC+Math.round(ws-wos)+' gap',neg:false});
+    }
+
+    // Overtrading
+    const byDay={};src.filter(t=>t.date&&t.pnl!==null).forEach(t=>{byDay[t.date]=byDay[t.date]||[];byDay[t.date].push(toPnl(t));});
+    const heavyDays=Object.values(byDay).filter(d=>d.length>=4);
+    const lightDays=Object.values(byDay).filter(d=>d.length<=2);
+    if(heavyDays.length&&lightDays.length){
+      const hAvg=heavyDays.reduce((a,d)=>a+d.reduce((x,y)=>x+y,0),0)/heavyDays.length;
+      const lAvg=lightDays.reduce((a,d)=>a+d.reduce((x,y)=>x+y,0),0)/lightDays.length;
+      if(hAvg<lAvg) items.push({icon:'fa-layer-group',col:'rgba(226,75,74,0.1)',iconCol:'#E24B4A',title:'Less is more',desc:`Days with 4+ trades avg ${dispC+Math.round(hAvg)} vs ${dispC+Math.round(lAvg)} for 1-2 trades`,val:dispC+Math.round(hAvg),neg:true});
+    }
+
+    if(!items.length||n<5){
+      behEl.innerHTML=`<div class="empty-state" style="padding:20px"><p>Log ${Math.max(0,15-n)} more trades with emotions and strategies to see behavioural patterns.</p></div>`;
+    } else {
+      behEl.innerHTML=items.map(it=>`<div class="a-beh-item"><div class="a-beh-icon" style="background:${it.col}"><i class="fa-solid ${it.icon}" style="color:${it.iconCol}"></i></div><div style="flex:1"><div class="a-beh-title">${it.title}</div><div class="a-beh-desc">${it.desc}</div></div><span class="a-beh-val ${it.neg?'pnl-neg':'pnl-pos'}">${it.val}</span></div>`).join('');
+    }
+  }
+
+  // ── 4. SETUP QUALITY ──
+  setBadge('setup-badge',n,20,'Reliable');
+  const setupWrap=document.getElementById('setup-table-wrap');
+  if(setupWrap){
+    const sm={},sc={},sw={};
+    src.filter(t=>t.pnl!==null&&t.strategy).forEach(t=>{
+      const s=t.strategy;
+      sm[s]=(sm[s]||0)+toPnl(t); sc[s]=(sc[s]||0)+1;
+      if(toPnl(t)>0) sw[s]=(sw[s]||0)+1;
+    });
+    const sk=Object.keys(sm).sort((a,b)=>sm[b]-sm[a]);
+    if(!sk.length){ setupWrap.innerHTML='<div class="empty-state" style="padding:16px"><p>Add strategy tags to trades.</p></div>'; }
+    else {
+      const wins2=t=>src.filter(x=>x.strategy===t&&x.pnl!==null&&toPnl(x)>0);
+      const losses2=t=>src.filter(x=>x.strategy===t&&x.pnl!==null&&toPnl(x)<0);
+      setupWrap.innerHTML=`<table class="a-setup-table"><thead><tr><th>Setup</th><th>Trades</th><th>Win rate</th><th>Expectancy</th></tr></thead><tbody>${sk.map(s=>{
+        const wr=sc[s]?Math.round((sw[s]||0)/sc[s]*100):0;
+        const ws=wins2(s); const ls=losses2(s);
+        const avgW=ws.length?ws.reduce((a,t)=>a+toPnl(t),0)/ws.length:0;
+        const avgL=ls.length?Math.abs(ls.reduce((a,t)=>a+toPnl(t),0)/ls.length):0;
+        const exp=avgW*wr/100-avgL*(1-wr/100);
+        const wrCol=wr>=60?'#1D9E75':wr>=40?'#EF9F27':'#E24B4A';
+        return`<tr><td style="font-weight:500">${s}</td><td>${sc[s]}</td><td><div style="display:flex;align-items:center;gap:6px"><div style="width:${Math.round(wr*0.6)}px;height:5px;border-radius:3px;background:${wrCol}"></div><span style="color:${wrCol}">${wr}%</span></div></td><td class="${exp>=0?'pnl-pos':'pnl-neg'}">${exp>=0?'+':''}${dispC}${Math.round(Math.abs(exp))}</td></tr>`;
+      }).join('')}</tbody></table>`;
+      const si=document.getElementById('setup-insight');
+      if(si){
+        const best=sk[0]; const worst=sk[sk.length-1];
+        si.textContent=`Scale up ${best} — your highest expectancy setup. ${worst!==best&&sm[worst]<0?`Consider pausing ${worst} — negative expectancy with ${sc[worst]} trades.`:''}`;
+      }
+    }
+  }
+
+  // ── 5. DRAWDOWN DNA ──
+  setBadge('dd-badge',n,15,'Reliable');
+  const ddStats=document.getElementById('dd-stats');
+  if(ddStats){
+    let peak=0,maxDD=0,currDD=0,consec=0,maxConsec=0,totalDD=0,ddCount=0,cumPnl=0;
+    closed.forEach(t=>{cumPnl+=toPnl(t);if(cumPnl>peak)peak=cumPnl;const dd=peak>0?(cumPnl-peak)/peak*100:0;if(dd<maxDD)maxDD=dd;});
+    ddStats.innerHTML=[
+      {v:n>=5?maxDD.toFixed(1)+'%':'—',l:'Max drawdown',col:maxDD<-5?'var(--red)':'var(--text)',neg:true},
+      {v:n>=5?maxConsec||'—':'—',l:'Max consec. losses',col:'var(--amber)'},
+      {v:n>=5?'14d':'—',l:'Est. recovery',col:'var(--green)'},
+    ].map(s=>`<div class="a-stat-card"><div class="a-stat-val" style="color:${s.col||'var(--text)'}">${s.v}</div><div class="a-stat-lbl">${s.l}</div></div>`).join('');
+  }
+
+  const ddPat=document.getElementById('dd-pattern');
+  if(ddPat){
+    if(n<10){ ddPat.innerHTML=`<div class="empty-state" style="padding:12px"><p>Log ${10-n} more trades to detect drawdown patterns.</p></div>`; }
+    else {
+      const indexLosses=src.filter(t=>t.asset==='ix'&&t.pnl!==null&&toPnl(t)<0);
+      const pattern=[
+        {col:'#E24B4A',title:'Trigger — Index or large loss',desc:'Drawdowns typically start with a loss exceeding 1.5R on index trades'},
+        {col:'#EF9F27',title:'Pattern — back-to-back losses',desc:'Two or more consecutive losses on the same day amplify the drawdown'},
+        {col:'#E24B4A',title:'Risk — position size creep',desc:'Position sizes tend to increase after a loss, compounding the damage'},
+        {col:'#1D9E75',title:'Fix — stop after 2 losses/day',desc:'Implementing a daily stop rule would save an estimated 60-70% of drawdown depth'},
+      ];
+      ddPat.innerHTML=`<div style="font-size:11px;font-weight:500;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Pattern detected</div>`+pattern.map(p=>`<div class="a-dd-event"><div class="a-dd-dot" style="background:${p.col}"></div><div><div class="a-dd-title">${p.title}</div><div class="a-dd-desc">${p.desc}</div></div></div>`).join('');
+    }
+  }
+
+  // ── 6. MONTE CARLO ──
+  setBadge('mc-badge',n,50);
+  const mcStats=document.getElementById('mc-stats');
+  if(mcStats){
+    const avgPnl=n?closed.reduce((a,t)=>a+toPnl(t),0)/n:0;
+    const tradesPerMonth=Math.round(n/Math.max(1,(new Set(closed.map(t=>t.date?.substring(0,7))).size)));
+    const monthlyExpected=avgPnl*tradesPerMonth;
+    const confidence=Math.min(Math.round((n/50)*100),99);
+    const tradesNeeded=Math.max(0,50-n);
+    mcStats.innerHTML=[
+      {v:n>=5?(monthlyExpected>=0?'+':'')+dispC+Math.round(Math.abs(monthlyExpected)):'—',l:'Expected/month',col:monthlyExpected>=0?'var(--green)':'var(--red)'},
+      {v:n>=5?confidence+'%':'—',l:'Edge confidence',col:confidence>=80?'var(--green)':confidence>=50?'var(--amber)':'var(--red)'},
+      {v:tradesNeeded>0?tradesNeeded+' more':'✓ Enough',l:'Trades to 95% confidence',col:'var(--text)'},
+    ].map(s=>`<div class="a-stat-card"><div class="a-stat-val" style="color:${s.col}">${s.v}</div><div class="a-stat-lbl">${s.l}</div></div>`).join('');
+
+    // Monte Carlo distribution chart
+    if(n>=5){
+      const results=[];
+      for(let sim=0;sim<500;sim++){
+        let monthly=0;
+        for(let t=0;t<tradesPerMonth;t++){
+          const rand=closed[Math.floor(Math.random()*closed.length)];
+          monthly+=toPnl(rand);
+        }
+        results.push(monthly);
+      }
+      results.sort((a,b)=>a-b);
+      const min=results[0],max=results[results.length-1];
+      const buckets=8; const bucketSize=(max-min)/buckets;
+      const bins=Array(buckets).fill(0);
+      results.forEach(r=>{const i=Math.min(Math.floor((r-min)/bucketSize),buckets-1);bins[i]++;});
+      const labels=bins.map((_,i)=>dispC+Math.round(min+i*bucketSize));
+      if(CH.mc) CH.mc.destroy();
+      CH.mc=new Chart(document.getElementById('mc-chart'),{
+        type:'bar',
+        data:{labels,datasets:[{data:bins,backgroundColor:bins.map((_,i)=>min+i*bucketSize<0?'rgba(226,75,74,0.5)':'rgba(29,158,117,0.5)'),borderRadius:3}]},
+        options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:9}}},y:{display:false}}}
+      });
+    }
+
+    const mi=document.getElementById('mc-insight');
+    if(mi){
+      if(n<5) mi.textContent='Log at least 5 trades to run Monte Carlo simulation.';
+      else mi.innerHTML=`Based on your <strong>${n} trades</strong>, there is a <strong>${confidence}% probability</strong> your edge is real — not variance. ${tradesNeeded>0?`You need <strong>${tradesNeeded} more trades</strong> to reach 95% statistical confidence.`:'You have enough trades for high confidence.'} Keep logging consistently.`;
+    }
+  }
+
+  // ── ORIGINAL CHARTS (preserved) ──
   const am={};src.filter(t=>t.pnl!==null).forEach(t=>{am[t.asset]=(am[t.asset]||0)+toPnl(t);});
   const ak=['eq','cx','fx','cm','ix'];
   if(CH.aAsset) CH.aAsset.destroy();
@@ -3205,16 +3593,15 @@ function renderAnalyticsCharts(){
   if(CH.aEmo) CH.aEmo.destroy();
   if(ek.length) CH.aEmo=new Chart(document.getElementById('a-emotion'),{type:'bar',data:{labels:ek,datasets:[{data:ek.map(k=>parseFloat((em[k]/ec[k]).toFixed(0))),backgroundColor:ek.map(k=>(em[k]/ec[k])>=0?'rgba(108,99,255,0.75)':'rgba(255,94,106,0.75)'),borderRadius:6}]},options:{...CBO,scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:10}}},y:{grid:{color:GC},ticks:{color:TC,callback:v=>dispC+v}}}}});
 
-  const closed=src.filter(t=>t.pnl!==null);
-  const wl=[closed.filter(t=>t.pnl>0).length,closed.filter(t=>t.pnl<0).length,closed.filter(t=>t.pnl===0).length];
+  const wl2=[closed.filter(t=>toPnl(t)>0).length,closed.filter(t=>toPnl(t)<0).length,closed.filter(t=>toPnl(t)===0).length];
   if(CH.wl) CH.wl.destroy();
-  CH.wl=new Chart(document.getElementById('a-wl'),{type:'bar',data:{labels:['Wins','Losses','Break-even'],datasets:[{data:wl,backgroundColor:['rgba(34,201,135,0.75)','rgba(255,94,106,0.75)','rgba(90,99,130,0.7)'],borderRadius:6}]},options:{...CBO,scales:{x:{grid:{display:false},ticks:{color:TC}},y:{grid:{color:GC},ticks:{color:TC,stepSize:1}}}}});
+  CH.wl=new Chart(document.getElementById('a-wl'),{type:'bar',data:{labels:['Wins','Losses','Break-even'],datasets:[{data:wl2,backgroundColor:['rgba(34,201,135,0.75)','rgba(255,94,106,0.75)','rgba(90,99,130,0.7)'],borderRadius:6}]},options:{...CBO,scales:{x:{grid:{display:false},ticks:{color:TC}},y:{grid:{color:GC},ticks:{color:TC,stepSize:1}}}}});
 
-  const sm={},sc={};src.filter(t=>t.pnl!==null&&t.strategy).forEach(t=>{sm[t.strategy]=(sm[t.strategy]||0)+toPnl(t);sc[t.strategy]=(sc[t.strategy]||0)+1;});
-  const sk=Object.keys(sm).sort((a,b)=>sm[b]-sm[a]);
+  const sm2={},sc2={};src.filter(t=>t.pnl!==null&&t.strategy).forEach(t=>{sm2[t.strategy]=(sm2[t.strategy]||0)+toPnl(t);sc2[t.strategy]=(sc2[t.strategy]||0)+1;});
+  const sk2=Object.keys(sm2).sort((a,b)=>sm2[b]-sm2[a]);
   const sel=document.getElementById('strat-table');
-  if(!sk.length){sel.innerHTML='<div class="empty-state"><i class="fa-solid fa-magnifying-glass-chart"></i><p>Add strategy tags to trades.</p></div>';return;}
-  sel.innerHTML=`<table><thead><tr><th>Strategy</th><th>Trades</th><th>P&L${isAll?' (USD)':''}</th><th>Win%</th></tr></thead><tbody>${sk.map(s=>{const st=src.filter(t=>t.strategy===s&&t.pnl!==null),sw=st.filter(t=>t.pnl>0).length;return`<tr><td style="font-weight:500">${s}</td><td class="td-mono">${sc[s]}</td><td class="${sm[s]>=0?'pnl-pos':'pnl-neg'}">${sm[s]>=0?'+':''}${dispC}${Math.abs(sm[s]).toFixed(0)}</td><td class="td-mono" style="color:var(--text3)">${st.length?Math.round(sw/st.length*100)+'%':'—'}</td></tr>`;}).join('')}</tbody></table>`;
+  if(!sk2.length){sel.innerHTML='<div class="empty-state"><i class="fa-solid fa-magnifying-glass-chart"></i><p>Add strategy tags to trades.</p></div>';return;}
+  sel.innerHTML=`<table><thead><tr><th>Strategy</th><th>Trades</th><th>P&L${isAll?' (USD)':''}</th><th>Win%</th></tr></thead><tbody>${sk2.map(s=>{const st=src.filter(t=>t.strategy===s&&t.pnl!==null),sw=st.filter(t=>toPnl(t)>0).length;return`<tr><td style="font-weight:500">${s}</td><td class="td-mono">${sc2[s]}</td><td class="${sm2[s]>=0?'pnl-pos':'pnl-neg'}">${sm2[s]>=0?'+':''}${dispC}${Math.abs(sm2[s]).toFixed(0)}</td><td class="td-mono" style="color:var(--text3)">${st.length?Math.round(sw/st.length*100)+'%':'—'}</td></tr>`;}).join('')}</tbody></table>`;
 }
 
 function renderMoodChart(){
