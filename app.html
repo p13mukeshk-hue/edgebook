@@ -206,7 +206,15 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 
 /* ACCOUNT TABS (for cumulative vs individual) */
 .acct-tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
-.a-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:20px;font-size:10px;font-weight:500;flex-shrink:0}
+.a-info-btn{width:18px;height:18px;border-radius:50%;border:0.5px solid var(--border2);background:none;color:var(--text3);font-size:10px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:var(--font-mono);transition:.15s;margin-left:6px}
+.a-info-btn:hover{background:var(--bg3);color:var(--text);border-color:var(--accent)}
+.a-tooltip-wrap{position:relative;display:inline-flex;align-items:center}
+.a-tooltip{display:none;position:absolute;top:calc(100% + 8px);right:0;width:260px;background:var(--bg2);border:0.5px solid var(--border2);border-radius:10px;padding:12px 14px;z-index:200;box-shadow:0 4px 20px rgba(0,0,0,0.15)}
+.a-tooltip.left{right:auto;left:0}
+.a-tooltip-wrap:hover .a-tooltip,.a-tooltip-wrap.open .a-tooltip{display:block}
+.a-tooltip-title{font-size:12px;font-weight:500;color:var(--text);margin-bottom:6px}
+.a-tooltip-body{font-size:11px;color:var(--text2);line-height:1.6;margin-bottom:8px}
+.a-tooltip-action{font-size:11px;color:var(--green);font-weight:500;padding-top:6px;border-top:0.5px solid var(--border)}
 .a-badge-warn{background:rgba(186,117,23,0.12);color:var(--amber);border:0.5px solid rgba(186,117,23,0.3)}
 .a-badge-ok{background:rgba(29,158,117,0.1);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)}
 .a-insight{font-size:11px;color:var(--text2);background:var(--bg3);padding:8px 10px;border-radius:8px;line-height:1.6}
@@ -1014,7 +1022,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <!-- Edge Score -->
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
-              <div><div class="chart-title">Edge score</div><div class="chart-sub">Overall trading edge quality</div></div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div><div class="chart-title">Edge score</div><div class="chart-sub">Overall trading edge quality</div></div>
+                <div class="a-tooltip-wrap">
+                  <button class="a-info-btn" aria-label="What is Edge Score">?</button>
+                  <div class="a-tooltip">
+                    <div class="a-tooltip-title">What is Edge Score?</div>
+                    <div class="a-tooltip-body">A single number (0–100) that summarises the overall quality of your trading edge. It combines 5 sub-scores: win rate, R:R ratio, discipline (how often you trade with a strategy), emotional control (win rate when calm), and consistency.</div>
+                    <div class="a-tooltip-action">🎯 Above 60 = real edge. Below 40 = focus on one setup until it's consistent.</div>
+                  </div>
+                </div>
+              </div>
               <span id="edge-badge" class="a-badge a-badge-warn">Early signal</span>
             </div>
             <div style="display:flex;align-items:center;gap:20px;margin-bottom:12px">
@@ -1033,7 +1051,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <!-- Time Heatmap -->
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
-              <div><div class="chart-title">P&amp;L by time</div><div class="chart-sub">Day × time performance</div></div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div><div class="chart-title">P&amp;L by time</div><div class="chart-sub">Day × time performance</div></div>
+                <div class="a-tooltip-wrap">
+                  <button class="a-info-btn" aria-label="What is P&L by time">?</button>
+                  <div class="a-tooltip">
+                    <div class="a-tooltip-title">What is P&L by time?</div>
+                    <div class="a-tooltip-body">A heatmap showing your profitability broken down by day of week and time of day. Green cells = profitable windows. Red cells = losing windows. Darker colour = stronger signal.</div>
+                    <div class="a-tooltip-action">🎯 Stop trading during your red time windows. Double down during your green ones.</div>
+                  </div>
+                </div>
+              </div>
               <span id="time-badge" class="a-badge a-badge-warn">Need 50+ trades</span>
             </div>
             <div id="time-heatmap"></div>
@@ -1047,7 +1075,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <!-- Behavioural Patterns -->
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
-              <div><div class="chart-title">Behavioural patterns</div><div class="chart-sub">Psychology impact on P&amp;L</div></div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div><div class="chart-title">Behavioural patterns</div><div class="chart-sub">Psychology impact on P&amp;L</div></div>
+                <div class="a-tooltip-wrap">
+                  <button class="a-info-btn" aria-label="What is Behavioural patterns">?</button>
+                  <div class="a-tooltip left">
+                    <div class="a-tooltip-title">What are behavioural patterns?</div>
+                    <div class="a-tooltip-body">Cross-references your psychology data (emotions, mood, rule compliance) with your P&L to detect patterns. Identifies revenge trading, overtrading, and the P&L impact of your emotional state.</div>
+                    <div class="a-tooltip-action">🎯 The goal is to find what mental states make you profitable — then recreate them daily.</div>
+                  </div>
+                </div>
+              </div>
               <span id="beh-badge" class="a-badge a-badge-warn">Early signal</span>
             </div>
             <div id="beh-list" style="display:flex;flex-direction:column;gap:8px"></div>
@@ -1056,7 +1094,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <!-- Setup Quality -->
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
-              <div><div class="chart-title">Setup quality</div><div class="chart-sub">Performance by strategy</div></div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div><div class="chart-title">Setup quality</div><div class="chart-sub">Performance by strategy</div></div>
+                <div class="a-tooltip-wrap">
+                  <button class="a-info-btn" aria-label="What is Setup quality">?</button>
+                  <div class="a-tooltip">
+                    <div class="a-tooltip-title">What is Setup quality?</div>
+                    <div class="a-tooltip-body">Ranks every strategy/setup you trade by expectancy — the average amount you make per trade on that setup. Combines win rate and average win/loss size into one number. Positive = profitable setup. Negative = losing setup.</div>
+                    <div class="a-tooltip-action">🎯 Scale up setups with positive expectancy. Pause or study setups with negative expectancy.</div>
+                  </div>
+                </div>
+              </div>
               <span id="setup-badge" class="a-badge a-badge-warn">Early signal</span>
             </div>
             <div id="setup-table-wrap"></div>
@@ -1070,7 +1118,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <!-- Drawdown DNA -->
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
-              <div><div class="chart-title">Drawdown DNA</div><div class="chart-sub">What causes your losing streaks</div></div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div><div class="chart-title">Drawdown DNA</div><div class="chart-sub">What causes your losing streaks</div></div>
+                <div class="a-tooltip-wrap">
+                  <button class="a-info-btn" aria-label="What is Drawdown DNA">?</button>
+                  <div class="a-tooltip left">
+                    <div class="a-tooltip-title">What is Drawdown DNA?</div>
+                    <div class="a-tooltip-body">Analyses the sequence of events that leads to your worst losing periods. Identifies trigger trades, escalation patterns and the point of maximum damage — so you can break the cycle before it starts.</div>
+                    <div class="a-tooltip-action">🎯 Most drawdowns follow the same pattern. Knowing yours lets you stop it at step 1.</div>
+                  </div>
+                </div>
+              </div>
               <span id="dd-badge" class="a-badge a-badge-warn">Early signal</span>
             </div>
             <div id="dd-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px"></div>
@@ -1080,7 +1138,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <!-- Monte Carlo -->
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
-              <div><div class="chart-title">Monte Carlo simulation</div><div class="chart-sub">Statistical confidence in your edge</div></div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div><div class="chart-title">Monte Carlo simulation</div><div class="chart-sub">Statistical confidence in your edge</div></div>
+                <div class="a-tooltip-wrap">
+                  <button class="a-info-btn" aria-label="What is Monte Carlo simulation">?</button>
+                  <div class="a-tooltip">
+                    <div class="a-tooltip-title">What is Monte Carlo simulation?</div>
+                    <div class="a-tooltip-body">Runs 500 simulations of your trading by randomly sampling from your trade history. Shows the range of possible monthly outcomes and calculates the probability that your edge is real — not just luck. The distribution chart shows most likely outcomes in green, unlikely losses in red.</div>
+                    <div class="a-tooltip-action">🎯 Below 80% confidence = keep logging. Above 80% = your edge is statistically real.</div>
+                  </div>
+                </div>
+              </div>
               <span id="mc-badge" class="a-badge a-badge-warn">Need 50+ trades</span>
             </div>
             <div id="mc-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px"></div>
