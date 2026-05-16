@@ -1,0 +1,61 @@
+name: Deploy to Firebase
+
+on:
+  push:
+    branches:
+      - main            # auto-deploy on every push to main
+  pull_request:
+    branches:
+      - main            # deploy preview on PRs, comment with preview URL
+
+jobs:
+  # ── Deploy to Firebase Hosting (+ Functions on main pushes) ────────────────
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: write   # needed to post preview-URL comments on PRs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install Cloud Functions dependencies
+        run: npm ci
+        working-directory: functions
+
+      # ── Push to main → full production deploy (hosting + functions) ─────
+      - name: Deploy to Firebase (production)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EDGEBOOK_2DCE2 }}
+          projectId: edgebook-2dce2
+          channelId: live
+          # Deploy hosting AND functions on every main push
+          entryPoint: "."
+          # Pass env vars the functions need at deploy time (not at runtime —
+          # runtime secrets live in functions/.env on the server)
+        env:
+          FIREBASE_CLI_EXPERIMENTS: webframeworks
+
+      # ── Pull request → hosting preview only (functions unchanged) ────────
+      - name: Deploy Firebase Hosting preview (PR)
+        if: github.event_name == 'pull_request'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_EDGEBOOK_2DCE2 }}
+          projectId: edgebook-2dce2
+          # No channelId → creates a unique preview channel per PR
+          entryPoint: "."
