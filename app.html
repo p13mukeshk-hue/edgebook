@@ -216,9 +216,8 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 .ai-action-num{width:18px;height:18px;border-radius:50%;background:var(--green);color:#fff;font-size:9px;font-weight:500;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
 .a-info-btn:hover{background:var(--bg3);color:var(--text);border-color:var(--accent)}
 .a-tooltip-wrap{position:relative;display:inline-flex;align-items:center}
-.a-tooltip{display:none;position:absolute;top:calc(100% + 8px);right:0;width:260px;background:var(--bg2);border:0.5px solid var(--border2);border-radius:10px;padding:12px 14px;z-index:200;box-shadow:0 4px 20px rgba(0,0,0,0.15)}
-.a-tooltip.left{right:auto;left:0}
-.a-tooltip-wrap:hover .a-tooltip,.a-tooltip-wrap.open .a-tooltip{display:block}
+.a-tooltip{display:none;position:fixed;width:240px;background:var(--bg2);border:0.5px solid var(--border2);border-radius:10px;padding:12px 14px;z-index:9999;box-shadow:0 8px 32px rgba(0,0,0,0.35)}
+.a-tooltip.visible{display:block}
 .a-tooltip-title{font-size:12px;font-weight:500;color:var(--text);margin-bottom:6px}
 .a-tooltip-body{font-size:11px;color:var(--text2);line-height:1.6;margin-bottom:8px}
 .a-tooltip-action{font-size:11px;color:var(--green);font-weight:500;padding-top:6px;border-top:0.5px solid var(--border)}
@@ -3340,6 +3339,51 @@ function renderFullJournal(){
   wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
   applyCompact();
 }
+
+// ── TOOLTIP SYSTEM ──
+(function(){
+  let activeTooltip = null;
+  document.addEventListener('click', function(e){
+    const btn = e.target.closest('.a-info-btn');
+    if(btn){
+      e.stopPropagation();
+      const wrap = btn.closest('.a-tooltip-wrap');
+      const tooltip = wrap?.querySelector('.a-tooltip');
+      if(!tooltip) return;
+      if(activeTooltip && activeTooltip !== tooltip){
+        activeTooltip.classList.remove('visible');
+      }
+      if(tooltip.classList.contains('visible')){
+        tooltip.classList.remove('visible');
+        activeTooltip = null;
+        return;
+      }
+      // Position tooltip
+      const rect = btn.getBoundingClientRect();
+      tooltip.style.top = (rect.bottom + 8) + 'px';
+      // Default: align right edge to button right
+      let left = rect.right - 240;
+      // Clamp to viewport
+      if(left < 8) left = 8;
+      if(left + 240 > window.innerWidth - 8) left = window.innerWidth - 248;
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = (rect.bottom + 8) + 'px';
+      // If tooltip would go off bottom, show above
+      const tipHeight = 160;
+      if(rect.bottom + 8 + tipHeight > window.innerHeight){
+        tooltip.style.top = (rect.top - tipHeight - 8) + 'px';
+      }
+      tooltip.classList.add('visible');
+      activeTooltip = tooltip;
+      return;
+    }
+    // Click outside — close any open tooltip
+    if(activeTooltip){
+      activeTooltip.classList.remove('visible');
+      activeTooltip = null;
+    }
+  });
+})();
 
 // ── AI COACHING REPORT SYSTEM ──
 let _aiReportType=null,_aiReportText='',_aiReportTitle='';
