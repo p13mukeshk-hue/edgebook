@@ -1,0 +1,56 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Deny everything by default ──────────────────────────────────────────
+    // No rule below? Access denied. Unauthenticated callers are rejected at
+    // every match because every leaf rule requires request.auth != null.
+
+    // ── User root document ───────────────────────────────────────────────────
+    // users/{userId}  — profile, settings, preferences
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      // ── Broker credentials ─────────────────────────────────────────────────
+      // users/{userId}/brokers/{broker}
+      // Contains encrypted access tokens — strictly owner-only.
+      match /brokers/{broker} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // ── Trades ────────────────────────────────────────────────────────────
+      // users/{userId}/trades/{tradeId}
+      match /trades/{tradeId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // ── Orders ────────────────────────────────────────────────────────────
+      // users/{userId}/orders/{orderId}
+      match /orders/{orderId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // ── Order updates (real-time postbacks) ───────────────────────────────
+      // users/{userId}/orderUpdates/{updateId}
+      // Written by the Cloud Function (Admin SDK bypasses rules).
+      // Client may read but never write directly.
+      match /orderUpdates/{updateId} {
+        allow read:  if isOwner(userId);
+        allow write: if false; // Cloud Function (Admin SDK) only
+      }
+    }
+
+    // ── Pending auth state (Zerodha OAuth flow) ───────────────────────────
+    // pendingAuth/{stateToken} — written by Cloud Function, never by clients
+    match /pendingAuth/{stateToken} {
+      allow read, write: if false; // Cloud Function (Admin SDK) only
+    }
+
+    // ── Helper function ───────────────────────────────────────────────────
+    // Authenticated AND the document path belongs to the calling user.
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+  }
+}

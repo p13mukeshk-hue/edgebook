@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Edgebook — Trades to Insights. Insights to Edge.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --green:#1D9E75;--green2:#0F6E56;--green-glow:rgba(29,158,117,0.15);
+  --red:#E24B4A;--amber:#BA7517;
+  --navy:#080c14;--navy2:#0f1420;--navy3:#131929;--navy4:#1a2035;
+  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);
+  --text:#f0f2f8;--text2:rgba(255,255,255,0.55);--text3:rgba(255,255,255,0.3);
+  --font-display:'DM Serif Display',serif;
+  --font-body:'DM Sans',sans-serif;
+  --font-mono:'JetBrains Mono',monospace;
+  --radius:10px;--radius-lg:16px;
+}
+html{scroll-behavior:smooth}
+body{background:var(--navy);color:var(--text);font-family:var(--font-body);font-size:15px;line-height:1.6;overflow-x:hidden}
+
+/* ── NAV ── */
+nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:14px 48px;border-bottom:0.5px solid var(--border);background:rgba(8,12,20,0.85);backdrop-filter:blur(16px)}
+.nav-logo{display:flex;align-items:center;gap:10px;text-decoration:none}
+.logo-mark{width:34px;height:34px;background:var(--green);border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:13px;font-weight:500;color:#fff;letter-spacing:-.5px}
+.logo-name{font-family:var(--font-display);font-size:20px;color:var(--text)}
+.nav-links{display:flex;align-items:center;gap:32px}
+.nav-link{font-size:13px;color:var(--text2);text-decoration:none;transition:color .15s}
+.nav-link:hover{color:var(--text)}
+.nav-actions{display:flex;align-items:center;gap:10px}
+.btn-ghost{padding:8px 18px;border-radius:var(--radius);border:0.5px solid var(--border2);background:none;font-size:13px;color:var(--text);cursor:pointer;font-family:var(--font-body);transition:.15s;text-decoration:none;display:inline-flex;align-items:center}
+.btn-ghost:hover{border-color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.04)}
+.btn-primary{padding:8px 20px;border-radius:var(--radius);border:none;background:var(--green);font-size:13px;font-weight:500;color:#fff;cursor:pointer;font-family:var(--font-body);transition:.15s;text-decoration:none;display:inline-flex;align-items:center}
+.btn-primary:hover{background:var(--green2)}
+
+/* ── HERO ── */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:24px 48px 0;position:relative;overflow:hidden}
+.hero-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;background:rgba(29,158,117,0.1);border:0.5px solid rgba(29,158,117,0.35);font-size:11px;font-weight:500;color:var(--green);margin-bottom:10px;font-family:var(--font-mono)}
+.hero-badge::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);animation:blink 2s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.hero-h1{font-family:var(--font-display);font-size:clamp(32px,4vw,52px);line-height:1.12;text-align:center;color:var(--text);margin-bottom:8px;letter-spacing:-.5px;max-width:780px}
+.hero-h1 em{color:var(--green);font-style:italic}
+.hero-sub{font-size:14px;color:var(--text2);text-align:center;line-height:1.6;max-width:480px;margin-bottom:20px}
+.hero-btns{display:flex;gap:10px;margin-bottom:10px}
+.btn-hero{padding:11px 28px;border-radius:var(--radius);font-size:14px;font-weight:500;cursor:pointer;font-family:var(--font-body);transition:.15s;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
+.btn-hero-primary{background:var(--green);color:#fff;border:none}
+.btn-hero-primary:hover{background:var(--green2);transform:translateY(-1px)}
+.btn-hero-ghost{background:none;color:var(--text);border:0.5px solid var(--border2)}
+.btn-hero-ghost:hover{border-color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.04)}
+.hero-note{font-size:11px;color:var(--text3);font-family:var(--font-mono);margin-bottom:28px}
+
+/* ── HERO SCENE ── */
+.hero-scene{position:relative;width:100%;max-width:860px;height:380px;margin:0 auto}
+.hero-scene canvas.bgc{position:absolute;inset:0;width:100%;height:100%;border-radius:var(--radius-lg);border:0.5px solid var(--border)}
+.hcard{position:absolute;border-radius:var(--radius);overflow:hidden;border:0.5px solid rgba(255,255,255,0.1);background:var(--navy2);font-family:var(--font-body)}
+.hcbar{display:flex;align-items:center;gap:5px;padding:7px 10px;background:var(--navy3);border-bottom:0.5px solid var(--border)}
+.hdot{width:7px;height:7px;border-radius:50%}
+.hctitle{font-size:9px;color:var(--text3);margin-left:4px;letter-spacing:.3px}
+.hml{font-size:7px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.hmv{font-size:12px;font-weight:500}
+.hpos{color:var(--green)}.hneg{color:var(--red)}.hneu{color:rgba(255,255,255,0.85)}
+.hmrow{display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:7px 8px}
+.hm-m{background:var(--navy4);border-radius:5px;padding:6px 8px;border:0.5px solid var(--border)}
+.heatrow{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:7px 8px}
+.hc{border-radius:5px;padding:5px 4px}
+.hcg{background:rgba(29,158,117,0.15);border:0.5px solid rgba(29,158,117,0.3)}
+.hcr{background:rgba(226,75,74,0.12);border:0.5px solid rgba(226,75,74,0.25)}
+.hca{background:rgba(186,117,23,0.12);border:0.5px solid rgba(186,117,23,0.3)}
+.hcs{font-size:8px;font-weight:500}.hcv{font-size:7px;margin-top:1px}
+.hcg .hcs,.hcg .hcv{color:#5DCAA5}.hcr .hcs,.hcr .hcv{color:#F09595}
+.hca .hcs{color:#EF9F27}.hca .hcv{color:#EF9F27}
+.live-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:#EF9F27;animation:blink 1.2s ease-in-out infinite;margin-right:2px;vertical-align:middle}
+.jbody{padding:7px 9px;display:flex;flex-direction:column;gap:5px}
+.jsec{font-size:7px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:var(--text3);padding-bottom:3px;border-bottom:0.5px solid var(--border)}
+.srow{display:flex;align-items:center;gap:4px}
+.slbl{font-size:8px;color:rgba(255,255,255,0.4);width:55px;flex-shrink:0}
+.sdots{display:flex;gap:2px}
+.sd{width:11px;height:11px;border-radius:50%;border:0.5px solid rgba(255,255,255,0.12);font-size:6px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.3)}
+.sdg{background:var(--green);border-color:var(--green);color:#fff}
+.sda{background:#BA7517;border-color:#BA7517;color:#fff}
+.mchips{display:flex;gap:3px;flex-wrap:wrap}
+.mchip{padding:2px 6px;border-radius:20px;font-size:7px;border:0.5px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.35);background:rgba(255,255,255,0.04)}
+.mchip.on{background:rgba(29,158,117,0.12);border-color:rgba(29,158,117,0.35);color:#5DCAA5}
+.ynr{display:flex;align-items:center;justify-content:space-between;font-size:8px}
+.ynl{color:rgba(255,255,255,0.4)}
+.yy{padding:1px 6px;border-radius:3px;font-size:7px;background:rgba(29,158,117,0.12);color:#5DCAA5;border:0.5px solid rgba(29,158,117,0.3)}
+.yn{padding:1px 6px;border-radius:3px;font-size:7px;background:rgba(226,75,74,0.1);color:#F09595;border:0.5px solid rgba(226,75,74,0.25)}
+
+/* card positions */
+.hc1{width:230px;left:0px;top:55px;transform:perspective(900px) rotateY(16deg) rotateX(3deg);z-index:3;animation:hf1 5s ease-in-out infinite}
+@keyframes hf1{0%,100%{transform:perspective(900px) rotateY(16deg) rotateX(3deg) translateY(0)}50%{transform:perspective(900px) rotateY(16deg) rotateX(3deg) translateY(-10px)}}
+.hc2{width:200px;left:200px;top:20px;transform:perspective(900px) rotateY(5deg) rotateX(1deg);z-index:5;animation:hf2 4.5s ease-in-out infinite}
+@keyframes hf2{0%,100%{transform:perspective(900px) rotateY(5deg) rotateX(1deg) translateY(0)}50%{transform:perspective(900px) rotateY(5deg) rotateX(1deg) translateY(-14px)}}
+.hc3{width:210px;right:185px;top:28px;transform:perspective(900px) rotateY(-5deg) rotateX(1deg);z-index:4;animation:hf3 5.5s ease-in-out infinite}
+@keyframes hf3{0%,100%{transform:perspective(900px) rotateY(-5deg) rotateX(1deg) translateY(0)}50%{transform:perspective(900px) rotateY(-5deg) rotateX(1deg) translateY(-8px)}}
+.hc4{width:205px;right:0px;top:60px;transform:perspective(900px) rotateY(-16deg) rotateX(3deg);z-index:3;animation:hf4 4.2s ease-in-out infinite}
+@keyframes hf4{0%,100%{transform:perspective(900px) rotateY(-16deg) rotateX(3deg) translateY(0)}50%{transform:perspective(900px) rotateY(-16deg) rotateX(3deg) translateY(-7px)}}
+
+/* ── SCROLL INDICATOR ── */
+.scroll-hint{text-align:center;padding:16px 0 32px;display:flex;flex-direction:column;align-items:center;gap:6px}
+.scroll-line{width:1px;height:48px;background:linear-gradient(to bottom,transparent,rgba(29,158,117,0.5),transparent);animation:scrollPulse 2s ease-in-out infinite}
+@keyframes scrollPulse{0%,100%{opacity:.3;transform:scaleY(0.8)}50%{opacity:1;transform:scaleY(1)}}
+.scroll-label{font-size:11px;color:var(--text3);font-family:var(--font-mono);letter-spacing:.5px}
+
+/* ── SECTIONS ── */
+section{padding:100px 48px}
+.section-eyebrow{font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:1px;color:var(--green);margin-bottom:12px;font-family:var(--font-mono)}
+.section-title{font-family:var(--font-display);font-size:clamp(28px,3.5vw,44px);line-height:1.15;color:var(--text);margin-bottom:14px;letter-spacing:-.3px}
+.section-sub{font-size:15px;color:var(--text2);line-height:1.7;max-width:500px}
+.section-center{text-align:center}
+.section-center .section-sub{margin:0 auto;text-align:center}
+.section-center .section-title{text-align:center}
+
+/* ── FEATURES ── */
+.features-wrap{max-width:1080px;margin:0 auto}
+.features-intro{margin-bottom:60px}
+.features-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
+.feat{background:var(--navy);padding:32px 28px;transition:.2s}
+.feat:hover{background:var(--navy2)}
+.feat-icon{width:52px;height:52px;border-radius:14px;background:rgba(29,158,117,0.08);border:0.5px solid rgba(29,158,117,0.2);display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:20px;transition:.2s}
+.feat:hover .feat-icon{background:rgba(29,158,117,0.15);border-color:rgba(29,158,117,0.4);transform:scale(1.08)}
+.feat-title{font-size:15px;font-weight:500;color:var(--text);margin-bottom:8px}
+.feat-desc{font-size:13px;color:var(--text2);line-height:1.6}
+.feat-tag{display:inline-block;margin-top:12px;font-size:10px;font-family:var(--font-mono);color:var(--green);opacity:.7}
+
+/* ── BUILT FOR ── */
+.built-wrap{max-width:860px;margin:0 auto;text-align:center}
+.built-grid{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:36px}
+.built-chip{padding:8px 18px;border-radius:20px;font-size:13px;border:0.5px solid var(--border2);color:var(--text2);background:rgba(255,255,255,0.03);transition:.15s;cursor:default}
+.built-chip:hover{border-color:rgba(29,158,117,0.4);color:var(--text);background:rgba(29,158,117,0.06)}
+.built-chip.accent{border-color:rgba(29,158,117,0.4);color:var(--green);background:rgba(29,158,117,0.08)}
+
+/* ── HOW IT WORKS ── */
+.how-wrap{max-width:900px;margin:60px auto 0;display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
+.how-step{padding:32px 28px;border-radius:var(--radius-lg);border:0.5px solid var(--border);background:var(--navy2);position:relative}
+.how-num{font-family:var(--font-mono);font-size:11px;color:var(--green);margin-bottom:14px;opacity:.8}
+.how-title{font-size:16px;font-weight:500;color:var(--text);margin-bottom:8px}
+.how-desc{font-size:13px;color:var(--text2);line-height:1.6}
+.how-connector{position:absolute;right:-13px;top:50%;transform:translateY(-50%);color:var(--text3);font-size:18px;z-index:1}
+
+/* ── PRICING ── */
+.pricing-wrap{max-width:720px;margin:60px auto 0;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);border-radius:var(--radius-lg);overflow:hidden;border:0.5px solid var(--border)}
+.plan{background:var(--navy);padding:36px 32px}
+.plan.featured{background:var(--navy2);border-left:0.5px solid var(--border)}
+.plan-badge{display:inline-block;padding:3px 12px;border-radius:20px;background:rgba(29,158,117,0.12);border:0.5px solid rgba(29,158,117,0.3);color:var(--green);font-size:11px;font-family:var(--font-mono);margin-bottom:16px}
+.plan-name{font-size:14px;color:var(--text2);margin-bottom:8px;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.5px}
+.plan-price{font-family:var(--font-display);font-size:48px;color:var(--text);line-height:1;margin-bottom:6px}
+.plan-price span{font-size:16px;font-family:var(--font-body);color:var(--text2)}
+.plan-annual{font-size:12px;color:var(--text3);margin-bottom:28px;font-family:var(--font-mono)}
+.plan-features{list-style:none;display:flex;flex-direction:column;gap:10px;margin-bottom:32px}
+.plan-features li{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text)}
+.plan-features li::before{content:'';width:16px;height:16px;border-radius:50%;border:0.5px solid rgba(29,158,117,0.4);background:rgba(29,158,117,0.1);flex-shrink:0;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8l3.5 3.5 6.5-7' stroke='%231D9E75' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-size:12px;background-position:center;background-repeat:no-repeat}
+.plan-features li.no{color:var(--text3)}
+.plan-features li.no::before{background-image:none;background:var(--navy4);border-color:var(--border2)}
+.btn-plan{width:100%;padding:12px;border-radius:var(--radius);font-size:14px;font-weight:500;cursor:pointer;font-family:var(--font-body);transition:.15s;border:0.5px solid var(--border2);background:none;color:var(--text)}
+.btn-plan:hover{border-color:rgba(255,255,255,0.3);background:rgba(255,255,255,0.04)}
+.btn-plan.featured{background:var(--green);color:#fff;border:none}
+.btn-plan.featured:hover{background:var(--green2)}
+.pricing-note{text-align:center;margin-top:20px;font-size:12px;color:var(--text3);font-family:var(--font-mono)}
+
+/* ── TESTIMONIALS ── */
+.testi-wrap{max-width:900px;margin:60px auto 0;display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.testi{background:var(--navy2);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:24px}
+.testi-text{font-size:14px;color:var(--text2);line-height:1.7;margin-bottom:20px;font-style:italic}
+.testi-author{display:flex;align-items:center;gap:10px}
+.testi-av{width:34px;height:34px;border-radius:50%;background:rgba(29,158,117,0.15);border:0.5px solid rgba(29,158,117,0.3);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500;color:var(--green);flex-shrink:0}
+.testi-name{font-size:13px;font-weight:500;color:var(--text)}
+.testi-role{font-size:11px;color:var(--text3);font-family:var(--font-mono)}
+
+/* ── CTA SECTION ── */
+.cta-section{padding:100px 48px;text-align:center;border-top:0.5px solid var(--border)}
+.cta-section .section-title{max-width:600px;margin:0 auto 14px}
+.cta-section .section-sub{margin:0 auto 36px}
+.cta-btns{display:flex;gap:12px;justify-content:center}
+
+/* ── FOOTER ── */
+footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:40px}
+.footer-brand{display:flex;align-items:center;gap:10px}
+.footer-brand-name{font-family:var(--font-display);font-size:18px;color:var(--text)}
+.footer-copy{font-size:12px;color:var(--text3);font-family:var(--font-mono)}
+.footer-links{display:flex;gap:24px}
+.footer-link{font-size:13px;color:var(--text3);text-decoration:none;transition:color .15s}
+.footer-link:hover{color:var(--text2)}
+
+/* ── DIVIDER ── */
+.divider{height:0.5px;background:var(--border);margin:0 48px}
+
+/* animations on scroll */
+.fade-up{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}
+.fade-up.visible{opacity:1;transform:translateY(0)}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="#" class="nav-logo">
+    <div class="logo-mark">E</div>
+    <span class="logo-name">Edgebook</span>
+  </a>
+  <div class="nav-links">
+    <a href="#features" class="nav-link">Features</a>
+    <a href="#pricing" class="nav-link">Pricing</a>
+    <a href="#for-traders" class="nav-link">For traders</a>
+    <a href="#how" class="nav-link">How it works</a>
+  </div>
+  <div class="nav-actions">
+    <a href="index.html" class="btn-ghost">Sign in</a>
+    <a href="index.html" class="btn-primary">Get started free</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-badge">Built for serious traders</div>
+  <h1 class="hero-h1">Trades to Insights.<br><em>Insights to Edge.</em></h1>
+  <p class="hero-sub">The trading journal that turns your trade history into performance intelligence. Log, analyse and grow — one trade at a time.</p>
+  <div class="hero-btns">
+    <a href="index.html" class="btn-hero btn-hero-primary">Start for free →</a>
+    <a href="#features" class="btn-hero btn-hero-ghost">See features</a>
+  </div>
+  <p class="hero-note">Free forever · No credit card · Works with Zerodha, Angel One, Upstox & more</p>
+
+  <!-- HERO SCENE -->
+  <div class="hero-scene" id="heroScene">
+    <canvas class="bgc" id="heroBg"></canvas>
+
+    <!-- Card 1: Dashboard -->
+    <div class="hcard hc1">
+      <div class="hcbar"><div class="hdot" style="background:#ff5f57"></div><div class="hdot" style="background:#ffbd2e"></div><div class="hdot" style="background:#28c840"></div><span class="hctitle">Dashboard</span></div>
+      <div class="hmrow">
+        <div class="hm-m"><div class="hml">Net P&L</div><div class="hmv hpos">+₹48,200</div></div>
+        <div class="hm-m"><div class="hml">Win rate</div><div class="hmv hneu">68%</div></div>
+        <div class="hm-m"><div class="hml">Trades</div><div class="hmv hneu">24</div></div>
+        <div class="hm-m"><div class="hml">Profit factor</div><div class="hmv hpos">2.4R</div></div>
+      </div>
+      <div style="padding:0 8px 8px">
+        <div style="font-size:7px;color:rgba(255,255,255,0.3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px">Equity curve</div>
+        <canvas id="eqSparkline" width="210" height="42"></canvas>
+      </div>
+    </div>
+
+    <!-- Card 2: Trade Heatmap -->
+    <div class="hcard hc2">
+      <div class="hcbar"><div class="hdot" style="background:#ff5f57"></div><div class="hdot" style="background:#ffbd2e"></div><div class="hdot" style="background:#28c840"></div><span class="hctitle">Trade heatmap</span></div>
+      <div class="heatrow">
+        <div class="hc hcg"><div class="hcs">NIFTY</div><div class="hcv">+₹6,500</div></div>
+        <div class="hc hcg"><div class="hcs">BNK</div><div class="hcv">+₹9,000</div></div>
+        <div class="hc hcr"><div class="hcs">CRUDE</div><div class="hcv">-₹2,100</div></div>
+        <div class="hc hcg"><div class="hcs">GOLD</div><div class="hcv">+₹4,200</div></div>
+        <div class="hc hca"><div class="hcs"><span class="live-dot"></span>AAPL</div><div class="hcv">open</div></div>
+        <div class="hc hcg"><div class="hcs">NQ</div><div class="hcv">+$2,000</div></div>
+        <div class="hc hcr"><div class="hcs">EUR</div><div class="hcv">-$140</div></div>
+        <div class="hc hcg"><div class="hcs">BTC</div><div class="hcv">+$380</div></div>
+        <div class="hc hcg"><div class="hcs">SILVER</div><div class="hcv">+₹820</div></div>
+      </div>
+    </div>
+
+    <!-- Card 3: Analytics -->
+    <div class="hcard hc3">
+      <div class="hcbar"><div class="hdot" style="background:#ff5f57"></div><div class="hdot" style="background:#ffbd2e"></div><div class="hdot" style="background:#28c840"></div><span class="hctitle">Analytics</span></div>
+      <div style="padding:7px 9px 4px">
+        <div style="font-size:7px;color:rgba(255,255,255,0.3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">P&L by strategy</div>
+        <canvas id="analBars" width="190" height="68"></canvas>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:3px;padding:4px 9px 8px">
+        <div style="background:#1a2035;border-radius:4px;padding:5px 5px;border:0.5px solid rgba(255,255,255,0.07)"><div style="font-size:6px;color:rgba(255,255,255,0.35);margin-bottom:1px">MVWAP</div><div style="font-size:10px;font-weight:500;color:#5DCAA5">+₹28K</div></div>
+        <div style="background:#1a2035;border-radius:4px;padding:5px 5px;border:0.5px solid rgba(255,255,255,0.07)"><div style="font-size:6px;color:rgba(255,255,255,0.35);margin-bottom:1px">Breakout</div><div style="font-size:10px;font-weight:500;color:#5DCAA5">+₹14K</div></div>
+        <div style="background:#1a2035;border-radius:4px;padding:5px 5px;border:0.5px solid rgba(255,255,255,0.07)"><div style="font-size:6px;color:rgba(255,255,255,0.35);margin-bottom:1px">Reversal</div><div style="font-size:10px;font-weight:500;color:#F09595">-₹3K</div></div>
+      </div>
+    </div>
+
+    <!-- Card 4: Daily Journal -->
+    <div class="hcard hc4">
+      <div class="hcbar"><div class="hdot" style="background:#ff5f57"></div><div class="hdot" style="background:#ffbd2e"></div><div class="hdot" style="background:#28c840"></div><span class="hctitle">Daily journal</span></div>
+      <div class="jbody">
+        <div class="jsec">Morning prep</div>
+        <div class="srow"><span class="slbl">Readiness</span><div class="sdots"><div class="sd sdg">1</div><div class="sd sdg">2</div><div class="sd sdg">3</div><div class="sd sdg">4</div><div class="sd sdg">5</div><div class="sd sdg">6</div><div class="sd sdg">7</div><div class="sd sda">8</div><div class="sd">9</div><div class="sd">10</div></div></div>
+        <div><div style="font-size:7px;color:rgba(255,255,255,0.3);margin-bottom:3px">Pre-market mood</div><div class="mchips"><span class="mchip on">Focused</span><span class="mchip on">Calm</span><span class="mchip">Tired</span><span class="mchip">Anxious</span></div></div>
+        <div class="jsec">Session behaviour</div>
+        <div class="ynr"><span class="ynl">Followed rules?</span><span class="yy">Yes</span></div>
+        <div class="ynr"><span class="ynl">Revenge traded?</span><span class="yn">No</span></div>
+        <div class="ynr"><span class="ynl">Overtraded?</span><span class="yn">No</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="scroll-hint">
+    <span class="scroll-label">scroll</span>
+    <div class="scroll-line"></div>
+  </div>
+</div>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="features-wrap">
+    <div class="features-intro fade-up">
+      <p class="section-eyebrow">Features</p>
+      <h2 class="section-title">Everything a serious trader needs</h2>
+      <p class="section-sub">Built around how Indian traders actually trade — not a generic journal adapted for India.</p>
+    </div>
+    <div class="features-grid fade-up">
+      <div class="feat">
+        <div class="feat-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><polyline points="2,22 8,14 13,18 20,8 26,12" stroke="#1D9E75" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><rect x="22" y="8" width="4" height="4" rx="1" fill="#1D9E75" opacity=".6"/><line x1="2" y1="26" x2="26" y2="26" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" opacity=".4"/></svg>
+        </div>
+        <div class="feat-title">Smart P&L engine</div>
+        <div class="feat-desc">Accurate P&L for NIFTY, BANKNIFTY, F&O Options, Commodities, Forex and Crypto. Lot size, multipliers and currency all handled correctly.</div>
+        <span class="feat-tag">calculatePnL()</span>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="3" y="3" width="22" height="22" rx="4" stroke="#1D9E75" stroke-width="1.5" opacity=".5"/><line x1="8" y1="10" x2="20" y2="10" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round"/><line x1="8" y1="14" x2="20" y2="14" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" opacity=".7"/><line x1="8" y1="18" x2="15" y2="18" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" opacity=".4"/><circle cx="22" cy="22" r="5" fill="#1D9E75" opacity=".15" stroke="#1D9E75" stroke-width="1"/><path d="M20 22h2m0 0h2m-2 0v-2m0 2v2" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round"/></svg>
+        </div>
+        <div class="feat-title">Daily journal</div>
+        <div class="feat-desc">Morning prep scores, session behaviour tracking, end-of-day reflection. Build the mental discipline that separates consistent traders.</div>
+        <span class="feat-tag">psychology tracking</span>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="3" y="16" width="5" height="9" rx="1.5" fill="#1D9E75" opacity=".5"/><rect x="11" y="10" width="5" height="15" rx="1.5" fill="#1D9E75" opacity=".7"/><rect x="19" y="4" width="5" height="21" rx="1.5" fill="#1D9E75"/><line x1="2" y1="26" x2="26" y2="26" stroke="#1D9E75" stroke-width="1" opacity=".3"/></svg>
+        </div>
+        <div class="feat-title">Performance analytics</div>
+        <div class="feat-desc">Win rate by strategy, emotion–P&L correlation, drawdown tracking. Discover exactly what works — and what doesn't — for you.</div>
+        <span class="feat-tag">strategy performance</span>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><path d="M4 6h20M4 10h20" stroke="#1D9E75" stroke-width="1" stroke-linecap="round" opacity=".3"/><rect x="2" y="2" width="24" height="16" rx="3" stroke="#1D9E75" stroke-width="1.5" opacity=".6"/><path d="M9 22l3 4 3-4" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="18" x2="12" y2="26" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </div>
+        <div class="feat-title">Broker CSV import</div>
+        <div class="feat-desc">Import directly from Zerodha, Angel One, Upstox, Fyers, Groww. Auto-detects column formats. No manual entry needed.</div>
+        <span class="feat-tag">auto-detection</span>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="2" y="8" width="14" height="17" rx="3" stroke="#1D9E75" stroke-width="1.5" opacity=".5"/><rect x="10" y="3" width="14" height="17" rx="3" stroke="#1D9E75" stroke-width="1.5" fill="#0f1420"/><line x1="14" y1="8" x2="20" y2="8" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round" opacity=".6"/><line x1="14" y1="11" x2="21" y2="11" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round" opacity=".4"/><line x1="14" y1="14" x2="19" y2="14" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round" opacity=".3"/></svg>
+        </div>
+        <div class="feat-title">Multi-account</div>
+        <div class="feat-desc">Track your prop firm, Zerodha and international accounts together. Live FX conversion across USD, INR, EUR and GBP.</div>
+        <span class="feat-tag">fx conversion</span>
+      </div>
+      <div class="feat">
+        <div class="feat-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="3" y="5" width="22" height="17" rx="3" stroke="#1D9E75" stroke-width="1.5" opacity=".6"/><rect x="7" y="9" width="14" height="9" rx="1.5" stroke="#1D9E75" stroke-width="1" opacity=".4"/><circle cx="14" cy="13.5" r="3" fill="#1D9E75" opacity=".25" stroke="#1D9E75" stroke-width="1"/><circle cx="14" cy="13.5" r="1" fill="#1D9E75"/><line x1="11" y1="24" x2="17" y2="24" stroke="#1D9E75" stroke-width="2" stroke-linecap="round" opacity=".5"/><line x1="14" y1="22" x2="14" y2="24" stroke="#1D9E75" stroke-width="1.5" opacity=".5"/></svg>
+        </div>
+        <div class="feat-title">Chart screenshots</div>
+        <div class="feat-desc">Attach up to 5 screenshots per trade. Review your setups, learn from every entry and exit. Visual memory for your trades.</div>
+        <span class="feat-tag">up to 5 per trade</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- BUILT FOR -->
+<section id="for-traders">
+  <div class="built-wrap fade-up">
+    <p class="section-eyebrow section-center">Built for</p>
+    <h2 class="section-title section-center">Made for the serious trader</h2>
+    <p class="section-sub section-center">Whether you trade NIFTY options intraday or CME futures overnight, Edgebook speaks your language.</p>
+    <div class="built-grid">
+      <span class="built-chip accent">NIFTY options</span>
+      <span class="built-chip accent">BANKNIFTY</span>
+      <span class="built-chip accent">F&amp;O traders</span>
+      <span class="built-chip">Equity intraday</span>
+      <span class="built-chip">Commodity</span>
+      <span class="built-chip">Zerodha users</span>
+      <span class="built-chip">Angel One</span>
+      <span class="built-chip">Upstox</span>
+      <span class="built-chip">Prop firm traders</span>
+      <span class="built-chip">Forex</span>
+      <span class="built-chip">Crypto</span>
+      <span class="built-chip">CME futures</span>
+      <span class="built-chip">Swing traders</span>
+      <span class="built-chip">Scalpers</span>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- HOW IT WORKS -->
+<section id="how">
+  <div style="max-width:1080px;margin:0 auto">
+    <div class="fade-up">
+      <p class="section-eyebrow section-center">How it works</p>
+      <h2 class="section-title section-center">From first trade to full clarity</h2>
+      <p class="section-sub section-center" style="margin:0 auto 0;text-align:center">Three steps between you and knowing exactly where your edge comes from.</p>
+    </div>
+    <div class="how-wrap fade-up">
+      <div class="how-step">
+        <div class="how-num">01 / Log</div>
+        <div class="how-title">Log every trade</div>
+        <div class="how-desc">Manual entry or CSV import from your broker. Add screenshots, strategy tags, emotions and notes. Takes 30 seconds.</div>
+        <span class="how-connector">→</span>
+      </div>
+      <div class="how-step">
+        <div class="how-num">02 / Reflect</div>
+        <div class="how-title">Journal daily</div>
+        <div class="how-desc">Morning prep, session behaviour, end-of-day reflection. Track your psychology alongside your P&L to spot patterns.</div>
+        <span class="how-connector">→</span>
+      </div>
+      <div class="how-step">
+        <div class="how-num">03 / Discover</div>
+        <div class="how-title">Find your edge</div>
+        <div class="how-desc">Analytics reveals your best strategies, optimal trading hours, emotional patterns. Data-backed decisions, not gut feel.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- TESTIMONIALS -->
+<section>
+  <div style="max-width:1080px;margin:0 auto">
+    <div class="fade-up">
+      <p class="section-eyebrow section-center">Traders say</p>
+      <h2 class="section-title section-center">Built with real feedback</h2>
+    </div>
+    <div class="testi-wrap fade-up">
+      <div class="testi">
+        <div class="testi-text">"Finally a journal that actually understands F&O. BANKNIFTY lot sizes, premium P&L — all correct out of the box. No more Excel hacks."</div>
+        <div class="testi-author"><div class="testi-av">RK</div><div><div class="testi-name">Rahul K.</div><div class="testi-role">BANKNIFTY options trader</div></div></div>
+      </div>
+      <div class="testi">
+        <div class="testi-text">"The daily journal changed how I think about trading. I noticed I was revenge trading every Tuesday — I had no idea until Edgebook showed me."</div>
+        <div class="testi-author"><div class="testi-av">PS</div><div><div class="testi-name">Priya S.</div><div class="testi-role">Equity intraday, Mumbai</div></div></div>
+      </div>
+      <div class="testi">
+        <div class="testi-text">"I trade CME futures and NSE equities. No other journal handled both accounts in different currencies this cleanly. Multi-account is a game changer."</div>
+        <div class="testi-author"><div class="testi-av">AV</div><div><div class="testi-name">Arjun V.</div><div class="testi-role">Prop trader, Pune</div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- PRICING -->
+<section id="pricing">
+  <div style="max-width:1080px;margin:0 auto">
+    <div class="fade-up">
+      <p class="section-eyebrow section-center">Pricing</p>
+      <h2 class="section-title section-center">Simple, honest pricing</h2>
+      <p class="section-sub section-center">Start free. Upgrade when you're ready to go deeper.</p>
+    </div>
+    <div class="pricing-wrap fade-up">
+      <div class="plan">
+        <div class="plan-name">Free</div>
+        <div class="plan-price">₹0 <span>/ forever</span></div>
+        <div class="plan-annual">No credit card required</div>
+        <ul class="plan-features">
+          <li>Up to 50 trades per month</li>
+          <li>1 trading account</li>
+          <li>Basic analytics</li>
+          <li>Trade journal</li>
+          <li class="no">CSV import</li>
+          <li class="no">Daily journal</li>
+          <li class="no">Chart screenshots</li>
+          <li class="no">Drawdown tracker</li>
+        </ul>
+        <button class="btn-plan" onclick="window.location.href='index.html'">Get started free</button>
+      </div>
+      <div class="plan featured">
+        <div class="plan-badge">Most popular</div>
+        <div class="plan-name">Pro</div>
+        <div class="plan-price">₹499 <span>/ month</span></div>
+        <div class="plan-annual">or ₹3,999 / year — save 33%</div>
+        <ul class="plan-features">
+          <li>Unlimited trades</li>
+          <li>Unlimited accounts</li>
+          <li>Full analytics suite</li>
+          <li>CSV import (all brokers)</li>
+          <li>Daily journal</li>
+          <li>Chart screenshots</li>
+          <li>Drawdown tracker</li>
+          <li>Priority support</li>
+        </ul>
+        <button class="btn-plan featured" onclick="window.location.href='index.html'">Start Pro free for 14 days</button>
+      </div>
+    </div>
+    <p class="pricing-note">14-day free trial on Pro · Cancel anytime · Secure payments via Razorpay</p>
+  </div>
+</section>
+
+<!-- CTA -->
+<div class="cta-section fade-up">
+  <p class="section-eyebrow section-center">Get started</p>
+  <h2 class="section-title">Ready to find your edge?</h2>
+  <p class="section-sub">Join traders who track smarter, reflect deeper and grow faster with Edgebook.</p>
+  <div class="cta-btns">
+    <a href="index.html" class="btn-hero btn-hero-primary">Start for free →</a>
+    <a href="#pricing" class="btn-hero btn-hero-ghost">View pricing</a>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-brand">
+    <div class="logo-mark">E</div>
+    <span class="footer-brand-name">Edgebook</span>
+  </div>
+  <div class="footer-links">
+    <a href="#" class="footer-link">Privacy</a>
+    <a href="#" class="footer-link">Terms</a>
+    <a href="#" class="footer-link">Contact</a>
+    <a href="index.html" class="footer-link">Sign in</a>
+  </div>
+  <span class="footer-copy">© 2026 Edgebook</span>
+</footer>
+
+<script>
+// Hero background — NIFTY candlesticks
+(function(){
+  const scene = document.getElementById('heroScene');
+  const cv = document.getElementById('heroBg');
+  if(!cv||!scene) return;
+  const W = scene.offsetWidth||860, H = 380;
+  cv.width=W; cv.height=H;
+  const ctx = cv.getContext('2d');
+
+  const candles=[];let p=22400;
+  for(let i=0;i<55;i++){
+    const o=p+(Math.random()-.48)*80,c=o+(Math.random()-.45)*160;
+    candles.push({o,c,h:Math.max(o,c)+Math.random()*60,l:Math.min(o,c)-Math.random()*60});
+    p=c;
+  }
+
+  ctx.fillStyle='#080c14'; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='rgba(255,255,255,0.025)'; ctx.lineWidth=0.5;
+  for(let x=0;x<W;x+=55){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+
+  ctx.fillStyle='rgba(255,255,255,0.1)'; ctx.font='9px monospace'; ctx.textAlign='right';
+  ['22800','22600','22400','22200','22000'].forEach((v,i)=>{
+    const y=35+i*50; ctx.fillText(v,W-8,y);
+    ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W-50,y); ctx.stroke();
+  });
+  ctx.fillStyle='rgba(255,255,255,0.1)'; ctx.textAlign='center'; ctx.font='8px monospace';
+  ['09:15','10:00','11:00','12:00','13:00','14:00','15:00','15:30'].forEach((v,i)=>
+    ctx.fillText(v, 30+i*(W-60)/7, H-10));
+
+  const prices=[...candles.map(c=>c.h),...candles.map(c=>c.l)];
+  const minP=Math.min(...prices),maxP=Math.max(...prices),rng=maxP-minP;
+  const toY=v=>28+(1-(v-minP)/rng)*(H-70);
+  const cGap=(W-60)/candles.length;
+  candles.forEach((c,i)=>{
+    const x=30+i*cGap+cGap/2, isUp=c.c>=c.o;
+    const col=isUp?'rgba(29,158,117,0.55)':'rgba(226,75,74,0.5)';
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,toY(c.h)); ctx.lineTo(x,toY(c.l)); ctx.stroke();
+    ctx.fillRect(x-5, toY(Math.max(c.o,c.c)), 10, Math.max(toY(Math.min(c.o,c.c))-toY(Math.max(c.o,c.c)),1.5));
+    ctx.fillStyle=isUp?'rgba(29,158,117,0.18)':'rgba(226,75,74,0.14)';
+    const vol=0.3+Math.random()*0.7;
+    ctx.fillRect(x-5, H-28-18*vol, 10, 18*vol);
+  });
+
+  ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.font='500 10px sans-serif'; ctx.textAlign='left';
+  ctx.fillText('NIFTY 50  ·  15 min', 12, 16);
+  ctx.fillStyle='rgba(29,158,117,0.9)'; ctx.fillText('▲ +1.24%', 162, 16);
+})();
+
+// Equity sparkline
+(function(){
+  const eq=document.getElementById('eqSparkline'); if(!eq) return;
+  const ec=eq.getContext('2d'), ew=210, eh=42;
+  const pts=[0,300,250,600,520,900,820,1200,1100,1600,1450,2000,1850,2400,2700,3200,3000,3800,3600,4300,4100,4700];
+  const mx=Math.max(...pts);
+  ec.beginPath(); pts.forEach((v,i)=>{const x=i/(pts.length-1)*ew,y=eh-(v/mx)*(eh-4)-2;i===0?ec.moveTo(x,y):ec.lineTo(x,y);});
+  ec.lineTo(ew,eh); ec.lineTo(0,eh); ec.closePath(); ec.fillStyle='rgba(29,158,117,0.1)'; ec.fill();
+  ec.beginPath(); pts.forEach((v,i)=>{const x=i/(pts.length-1)*ew,y=eh-(v/mx)*(eh-4)-2;i===0?ec.moveTo(x,y):ec.lineTo(x,y);});
+  ec.strokeStyle='#1D9E75'; ec.lineWidth=1.5; ec.lineJoin='round'; ec.stroke();
+  const lv=pts[pts.length-1];
+  ec.beginPath(); ec.arc(ew,eh-(lv/mx)*(eh-4)-2,3,0,Math.PI*2); ec.fillStyle='#1D9E75'; ec.fill();
+})();
+
+// Analytics bar chart
+(function(){
+  const an=document.getElementById('analBars'); if(!an) return;
+  const ac=an.getContext('2d'), aw=190, ah=68;
+  const bars=[{v:28,p:true},{v:14,p:true},{v:9,p:true},{v:-3,p:false},{v:-1.5,p:false}];
+  const mx=28, bW=26, gap=10, baseline=ah*0.6;
+  bars.forEach((b,i)=>{
+    const x=i*(bW+gap)+4, bH=Math.abs(b.v/mx)*(ah*0.55);
+    ac.fillStyle=b.p?'rgba(29,158,117,0.5)':'rgba(226,75,74,0.45)';
+    b.p?ac.fillRect(x,baseline-bH,bW,bH):ac.fillRect(x,baseline,bW,bH);
+    ac.fillStyle=b.p?'rgba(93,202,165,0.8)':'rgba(240,149,149,0.8)';
+    ac.font='7px monospace'; ac.textAlign='center';
+    b.p?ac.fillText('+'+b.v+'K',x+bW/2,baseline-bH-3):ac.fillText(b.v+'K',x+bW/2,baseline+bH+9);
+  });
+  ac.strokeStyle='rgba(255,255,255,0.1)'; ac.lineWidth=0.5;
+  ac.beginPath(); ac.moveTo(0,baseline); ac.lineTo(aw,baseline); ac.stroke();
+})();
+
+// Scroll fade-up
+const obs = new IntersectionObserver(entries=>{
+  entries.forEach(e=>{ if(e.isIntersecting) e.target.classList.add('visible'); });
+},{threshold:0.15});
+document.querySelectorAll('.fade-up').forEach(el=>obs.observe(el));
+
+// Smooth nav links
+document.querySelectorAll('a[href^="#"]').forEach(a=>{
+  a.addEventListener('click',e=>{
+    const t=document.querySelector(a.getAttribute('href'));
+    if(t){e.preventDefault();t.scrollIntoView({behavior:'smooth',block:'start'});}
+  });
+});
+</script>
+</body>
+</html>
