@@ -206,7 +206,14 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 
 /* ACCOUNT TABS (for cumulative vs individual) */
 .acct-tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
-.a-info-btn{width:18px;height:18px;border-radius:50%;border:0.5px solid var(--border2);background:none;color:var(--text3);font-size:10px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:var(--font-mono);transition:.15s;margin-left:6px}
+.ai-report-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:8px 14px;border-radius:8px;border:0.5px solid rgba(29,158,117,0.4);background:rgba(29,158,117,0.06);color:var(--green);font-size:12px;font-weight:500;cursor:pointer;font-family:var(--font-body);transition:.15s;margin-top:10px}
+.ai-report-btn:hover{background:rgba(29,158,117,0.12);border-color:rgba(29,158,117,0.6)}
+.ai-report-section{margin-bottom:14px}
+.ai-report-section-title{font-size:12px;font-weight:500;color:var(--text);margin-bottom:5px;display:flex;align-items:center;gap:6px}
+.ai-report-section-title i{font-size:12px}
+.ai-report-section-body{font-size:12px;color:var(--text2);line-height:1.75}
+.ai-action-item{display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;font-size:12px;color:var(--text2);line-height:1.5}
+.ai-action-num{width:18px;height:18px;border-radius:50%;background:var(--green);color:#fff;font-size:9px;font-weight:500;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px}
 .a-info-btn:hover{background:var(--bg3);color:var(--text);border-color:var(--accent)}
 .a-tooltip-wrap{position:relative;display:inline-flex;align-items:center}
 .a-tooltip{display:none;position:absolute;top:calc(100% + 8px);right:0;width:260px;background:var(--bg2);border:0.5px solid var(--border2);border-radius:10px;padding:12px 14px;z-index:200;box-shadow:0 4px 20px rgba(0,0,0,0.15)}
@@ -1016,6 +1023,46 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
       <div id="page-analytics" class="page-content">
         <div id="analytics-acct-tabs" class="acct-tabs"></div>
 
+        <!-- AI REPORT SIDE PANEL -->
+        <div id="ai-report-panel" style="display:none;position:fixed;top:0;right:0;width:340px;height:100vh;z-index:300;display:none;flex-direction:column;background:var(--bg2);border-left:0.5px solid var(--border2);box-shadow:-4px 0 20px rgba(0,0,0,0.15)">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:0.5px solid var(--border);flex-shrink:0">
+            <div style="display:flex;align-items:center;gap:8px">
+              <i class="fa-solid fa-wand-magic-sparkles" style="color:var(--green);font-size:14px"></i>
+              <span style="font-size:13px;font-weight:500;color:var(--text)" id="ai-panel-title">AI coaching report</span>
+            </div>
+            <button onclick="closeAIReport()" style="background:none;border:none;color:var(--text2);cursor:pointer;font-size:18px;padding:0;line-height:1">×</button>
+          </div>
+
+          <!-- Loading state -->
+          <div id="ai-report-loading" style="padding:20px 16px;display:none">
+            <div style="height:3px;border-radius:2px;background:var(--border);overflow:hidden;margin-bottom:16px">
+              <div id="ai-load-bar" style="height:100%;border-radius:2px;background:var(--green);width:0%;transition:width 0.3s ease"></div>
+            </div>
+            <div style="font-size:12px;color:var(--text2);text-align:center" id="ai-load-msg">Analysing your trades...</div>
+          </div>
+
+          <!-- Report content -->
+          <div id="ai-report-content" style="flex:1;overflow-y:auto;padding:16px;display:none">
+            <!-- Key insight -->
+            <div id="ai-key-insight" style="background:rgba(29,158,117,0.08);border-left:3px solid var(--green);padding:10px 12px;margin-bottom:16px">
+              <div style="font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:.6px;color:var(--green);margin-bottom:5px">Key insight</div>
+              <div id="ai-insight-text" style="font-size:13px;font-weight:500;color:var(--text);line-height:1.5"></div>
+            </div>
+            <!-- Full report -->
+            <div id="ai-full-report" style="font-size:12px;color:var(--text2);line-height:1.75"></div>
+          </div>
+
+          <!-- Footer -->
+          <div id="ai-report-footer" style="padding:12px 16px;border-top:0.5px solid var(--border);display:none;gap:8px;flex-shrink:0">
+            <button onclick="downloadAIReportPDF()" style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;border-radius:8px;background:var(--green);color:#fff;border:none;font-size:12px;font-weight:500;cursor:pointer;font-family:var(--font-body)">
+              <i class="fa-solid fa-file-pdf"></i> Download PDF
+            </button>
+            <button onclick="copyAIReport()" style="display:flex;align-items:center;justify-content:center;gap:6px;padding:8px 12px;border-radius:8px;background:none;color:var(--text);border:0.5px solid var(--border2);font-size:12px;font-weight:500;cursor:pointer;font-family:var(--font-body)">
+              <i class="fa-solid fa-copy"></i> Copy
+            </button>
+          </div>
+        </div>
+
         <!-- ROW 1: Edge Score + Time Heatmap -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
 
@@ -1046,6 +1093,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
               <div id="edge-breakdown" style="flex:1;display:flex;flex-direction:column;gap:6px"></div>
             </div>
             <div id="edge-insight" class="a-insight"></div>
+            <button class="ai-report-btn" onclick="openAIReport('edge')"><i class="fa-solid fa-wand-magic-sparkles"></i> Get AI coaching report</button>
           </div>
 
           <!-- Time Heatmap -->
@@ -1066,6 +1114,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
             </div>
             <div id="time-heatmap"></div>
             <div id="time-insight" class="a-insight" style="margin-top:8px"></div>
+            <button class="ai-report-btn" onclick="openAIReport('time')"><i class="fa-solid fa-wand-magic-sparkles"></i> Get AI coaching report</button>
           </div>
         </div>
 
@@ -1089,6 +1138,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
               <span id="beh-badge" class="a-badge a-badge-warn">Early signal</span>
             </div>
             <div id="beh-list" style="display:flex;flex-direction:column;gap:8px"></div>
+            <button class="ai-report-btn" onclick="openAIReport('behaviour')" style="margin-top:12px"><i class="fa-solid fa-wand-magic-sparkles"></i> Get AI coaching report</button>
           </div>
 
           <!-- Setup Quality -->
@@ -1109,6 +1159,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
             </div>
             <div id="setup-table-wrap"></div>
             <div id="setup-insight" class="a-insight" style="margin-top:10px"></div>
+            <button class="ai-report-btn" onclick="openAIReport('setup')" style="margin-top:10px"><i class="fa-solid fa-wand-magic-sparkles"></i> Get AI coaching report</button>
           </div>
         </div>
 
@@ -1133,6 +1184,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
             </div>
             <div id="dd-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px"></div>
             <div id="dd-pattern"></div>
+            <button class="ai-report-btn" onclick="openAIReport('drawdown')" style="margin-top:12px"><i class="fa-solid fa-wand-magic-sparkles"></i> Get AI coaching report</button>
           </div>
 
           <!-- Monte Carlo -->
@@ -1154,6 +1206,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
             <div id="mc-stats" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px"></div>
             <div style="position:relative;height:120px;margin-bottom:10px"><canvas id="mc-chart" role="img" aria-label="Monte Carlo distribution of monthly P&L outcomes">Distribution of simulated monthly outcomes.</canvas></div>
             <div id="mc-insight" class="a-insight"></div>
+            <button class="ai-report-btn" onclick="openAIReport('montecarlo')" style="margin-top:10px"><i class="fa-solid fa-wand-magic-sparkles"></i> Get AI coaching report</button>
           </div>
         </div>
 
@@ -3286,6 +3339,218 @@ function renderFullJournal(){
   if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-book-open"></i><p>No trades match.</p></div>';return;}
   wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
   applyCompact();
+}
+
+// ── AI COACHING REPORT SYSTEM ──
+let _aiReportType=null,_aiReportText='',_aiReportTitle='';
+const AI_REPORT_LABELS={edge:'Edge score analysis',time:'P&L by time analysis',behaviour:'Behavioural patterns analysis',setup:'Setup quality analysis',drawdown:'Drawdown DNA analysis',montecarlo:'Monte Carlo & confidence analysis'};
+const AI_REPORT_PROMPTS={
+  edge:`You are an expert trading coach. Analyse the trader's edge score data and write a coaching report with these EXACT sections (use ## before each heading):
+## KEY INSIGHT
+## STRENGTHS
+## PERFORMANCE LEAKS
+## 3 ACTIONS
+## LONG-TERM OUTLOOK
+Be specific, reference actual numbers. Be honest but constructive.`,
+  time:`You are an expert trading coach. Analyse P&L by time of day data and write a coaching report with EXACT sections:
+## KEY INSIGHT
+## GOLDEN WINDOW
+## DANGER ZONES
+## 3 ACTIONS
+## EXPECTED IMPACT
+Reference actual time slots and P&L numbers.`,
+  behaviour:`You are an expert trading coach specialising in psychology. Write a coaching report with EXACT sections:
+## KEY INSIGHT
+## EMOTIONAL PROFILE
+## DESTRUCTIVE PATTERNS
+## 3 ACTIONS
+## MINDSET SHIFT
+Be empathetic but direct. Reference specific emotions and P&L correlations.`,
+  setup:`You are an expert trading coach. Analyse setup quality data and write a report with EXACT sections:
+## KEY INSIGHT
+## SETUPS TO SCALE
+## SETUPS TO PAUSE
+## 3 ACTIONS
+## SPECIALISATION ADVICE
+Reference win rates, expectancy and trade counts.`,
+  drawdown:`You are an expert risk management coach. Analyse drawdown data and write a report with EXACT sections:
+## KEY INSIGHT
+## DRAWDOWN PATTERN
+## EARLY WARNING SIGNS
+## 3 ACTIONS
+## PROTECTION PLAN
+Be specific about triggers, patterns and recovery.`,
+  montecarlo:`You are an expert trading statistics coach. Write a report with EXACT sections:
+## KEY INSIGHT
+## STATISTICAL REALITY
+## RISK ASSESSMENT
+## 3 ACTIONS
+## THE PATH TO CERTAINTY
+Explain statistics in plain trader language. No jargon.`
+};
+
+function buildTradeContext(){
+  const src=tradesForContext('analytics');
+  const closed=src.filter(t=>t.pnl!==null);
+  const n=closed.length;
+  if(!n) return 'No trades logged yet.';
+  const wins=closed.filter(t=>t.pnl>0),losses=closed.filter(t=>t.pnl<0);
+  const totalPnl=closed.reduce((a,t)=>a+t.pnl,0);
+  const avgWin=wins.length?wins.reduce((a,t)=>a+t.pnl,0)/wins.length:0;
+  const avgLoss=losses.length?Math.abs(losses.reduce((a,t)=>a+t.pnl,0)/losses.length):0;
+  const winRate=Math.round(wins.length/n*100);
+  const sm={},sc={},sw={};
+  src.filter(t=>t.pnl!==null&&t.strategy).forEach(t=>{sm[t.strategy]=(sm[t.strategy]||0)+t.pnl;sc[t.strategy]=(sc[t.strategy]||0)+1;if(t.pnl>0)sw[t.strategy]=(sw[t.strategy]||0)+1;});
+  const strategies=Object.keys(sm).map(s=>`${s}: ${sc[s]} trades, ${Math.round((sw[s]||0)/sc[s]*100)}% WR, P&L ₹${Math.round(sm[s])}`).join('; ');
+  const em={},ec={};
+  src.filter(t=>t.pnl!==null&&t.emotion).forEach(t=>{const e=t.emotion.split(' ')[0];em[e]=(em[e]||0)+t.pnl;ec[e]=(ec[e]||0)+1;});
+  const emotions=Object.keys(em).map(e=>`${e}: ${ec[e]} trades, avg ₹${Math.round(em[e]/ec[e])}`).join('; ');
+  let peak=0,maxDD=0,cumPnl=0;
+  closed.forEach(t=>{cumPnl+=t.pnl;if(cumPnl>peak)peak=cumPnl;const dd=peak>0?(cumPnl-peak)/peak*100:0;if(dd<maxDD)maxDD=dd;});
+  return `TRADER DATA:
+Trades: ${n} | Win rate: ${winRate}% | Total P&L: ₹${Math.round(totalPnl)}
+Avg win: ₹${Math.round(avgWin)} | Avg loss: ₹${Math.round(avgLoss)} | R:R: ${avgLoss?(avgWin/avgLoss).toFixed(2):'N/A'}
+Max drawdown: ${maxDD.toFixed(1)}%
+Strategies: ${strategies||'none tagged'}
+Emotions vs P&L: ${emotions||'none logged'}
+Recent 10 trades: ${closed.slice(-10).map(t=>`${t.symbol} ${t.direction} ₹${Math.round(t.pnl)} ${t.strategy||''} ${t.emotion||''}`).join(', ')}`;
+}
+
+async function openAIReport(type){
+  _aiReportType=type;
+  _aiReportTitle=AI_REPORT_LABELS[type]||'AI coaching report';
+  _aiReportText='';
+  const panel=document.getElementById('ai-report-panel');
+  const loading=document.getElementById('ai-report-loading');
+  const content=document.getElementById('ai-report-content');
+  const footer=document.getElementById('ai-report-footer');
+  const titleEl=document.getElementById('ai-panel-title');
+  const loadMsg=document.getElementById('ai-load-msg');
+  const loadBar=document.getElementById('ai-load-bar');
+  panel.style.display='flex';
+  titleEl.textContent=_aiReportTitle;
+  loading.style.display='block';
+  content.style.display='none';
+  footer.style.display='none';
+  loadBar.style.width='0%';
+  const msgs=['Analysing your trades...','Identifying patterns...','Writing your report...','Almost done...'];
+  let mi=0,bw=0;
+  const iv=setInterval(()=>{bw=Math.min(bw+Math.random()*15,90);loadBar.style.width=bw+'%';if(mi<msgs.length-1){mi++;loadMsg.textContent=msgs[mi];}},800);
+  try{
+    const ctx=buildTradeContext();
+    const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:AI_REPORT_PROMPTS[type],messages:[{role:'user',content:`${ctx}\n\nWrite the coaching report now. Use ## headings exactly as specified. Reference actual numbers.`}]})});
+    const data=await res.json();
+    _aiReportText=data.content?.map(b=>b.text||'').join('')||'';
+    clearInterval(iv);loadBar.style.width='100%';
+    await new Promise(r=>setTimeout(r,300));
+    renderAIReport(_aiReportText);
+    loading.style.display='none';content.style.display='block';footer.style.display='flex';
+  }catch(e){
+    clearInterval(iv);loading.style.display='none';content.style.display='block';
+    content.innerHTML=`<div class="a-insight" style="color:var(--red)">Failed to generate report. Please try again.</div>`;
+  }
+}
+
+function renderAIReport(text){
+  const insightEl=document.getElementById('ai-insight-text');
+  const fullEl=document.getElementById('ai-full-report');
+  const insightMatch=text.match(/##\s*KEY INSIGHT\s*\n([^\n#]+)/i);
+  if(insightEl) insightEl.textContent=insightMatch?insightMatch[1].trim():'';
+  const sectionIcons={'STRENGTHS':'fa-trophy','PERFORMANCE LEAKS':'fa-triangle-exclamation','GOLDEN WINDOW':'fa-sun','DANGER ZONES':'fa-skull-crossbones','EMOTIONAL PROFILE':'fa-brain','DESTRUCTIVE PATTERNS':'fa-bomb','MINDSET SHIFT':'fa-arrows-rotate','SETUPS TO SCALE':'fa-arrow-trend-up','SETUPS TO PAUSE':'fa-pause','SPECIALISATION ADVICE':'fa-crosshairs','DRAWDOWN PATTERN':'fa-chart-line','EARLY WARNING SIGNS':'fa-bell','PROTECTION PLAN':'fa-shield','STATISTICAL REALITY':'fa-calculator','RISK ASSESSMENT':'fa-shield-halved','THE PATH TO CERTAINTY':'fa-road','LONG-TERM OUTLOOK':'fa-binoculars','EXPECTED IMPACT':'fa-chart-line','3 ACTIONS':'fa-list-check'};
+  let remaining=text.replace(/##\s*KEY INSIGHT[\s\S]*?(?=##|$)/i,'').trim();
+  const lines=remaining.split('\n');
+  let sections=[],currentSection=null,currentBody=[];
+  lines.forEach(line=>{
+    const sm=line.match(/^##\s*(.+)$/);
+    if(sm){if(currentSection)sections.push({title:currentSection.trim(),body:currentBody.join('\n').trim()});currentSection=sm[1];currentBody=[];}
+    else currentBody.push(line);
+  });
+  if(currentSection)sections.push({title:currentSection.trim(),body:currentBody.join('\n').trim()});
+  if(!sections.length){fullEl.innerHTML=remaining.split('\n\n').map(p=>p.trim()?`<p style="margin-bottom:12px">${p.replace(/\n/g,'<br>')}</p>`:'').join('');return;}
+  let html='';
+  sections.forEach(sec=>{
+    const key=sec.title.toUpperCase();
+    const icon=sectionIcons[key]||'fa-circle-dot';
+    const isActions=key.includes('ACTION');
+    let bodyHtml='';
+    if(isActions){
+      const al=sec.body.split('\n').filter(l=>l.match(/^\d+\./));
+      bodyHtml=al.length?al.map((l,i)=>`<div class="ai-action-item"><div class="ai-action-num">${i+1}</div><span>${l.replace(/^\d+\.\s*/,'')}</span></div>`).join(''):`<div class="ai-report-section-body">${sec.body.replace(/\n/g,'<br>')}</div>`;
+    } else {
+      bodyHtml=`<div class="ai-report-section-body">${sec.body.replace(/\n/g,'<br>')}</div>`;
+    }
+    html+=`<div class="ai-report-section"><div class="ai-report-section-title"><i class="fa-solid ${icon}" style="color:var(--green)"></i> ${sec.title.charAt(0)+sec.title.slice(1).toLowerCase()}</div>${bodyHtml}</div>`;
+  });
+  fullEl.innerHTML=html||`<div class="ai-report-section-body">${remaining.replace(/\n/g,'<br>')}</div>`;
+}
+
+function closeAIReport(){
+  document.getElementById('ai-report-panel').style.display='none';
+}
+
+function copyAIReport(){
+  if(!_aiReportText)return;
+  navigator.clipboard.writeText(`${_aiReportTitle}\n\n${_aiReportText}`).then(()=>showToast('Report copied to clipboard','success'));
+}
+
+async function downloadAIReportPDF(){
+  if(!_aiReportText)return;
+  const btn=document.querySelector('#ai-report-footer button');
+  if(btn){btn.disabled=true;btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Generating...';}
+  const src=tradesForContext('analytics');
+  const closed=src.filter(t=>t.pnl!==null),n=closed.length;
+  const wins=closed.filter(t=>t.pnl>0),losses=closed.filter(t=>t.pnl<0);
+  const totalPnl=closed.reduce((a,t)=>a+t.pnl,0);
+  const avgWin=wins.length?wins.reduce((a,t)=>a+t.pnl,0)/wins.length:0;
+  const avgLoss=losses.length?Math.abs(losses.reduce((a,t)=>a+t.pnl,0)/losses.length):0;
+  const winRate=n?Math.round(wins.length/n*100):0;
+  const rrRatio=avgLoss?(avgWin/avgLoss).toFixed(2):'N/A';
+  let peak=0,maxDD=0,cumPnl=0;
+  closed.forEach(t=>{cumPnl+=t.pnl;if(cumPnl>peak)peak=cumPnl;const dd=peak>0?(cumPnl-peak)/peak*100:0;if(dd<maxDD)maxDD=dd;});
+  const insightMatch=_aiReportText.match(/##\s*KEY INSIGHT\s*\n([^\n#]+)/i);
+  const keyInsight=insightMatch?insightMatch[1].trim():'See full report below.';
+  const userName=document.getElementById('user-name-display')?.textContent||'Trader';
+  const userInitials=userName.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2);
+  const today=new Date().toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'});
+  // Build report HTML for PDF
+  let reportHTML='';
+  const lines=_aiReportText.replace(/##\s*KEY INSIGHT[\s\S]*?(?=##|$)/i,'').trim().split('\n');
+  let inActions=false;
+  lines.forEach(line=>{
+    const sm=line.match(/^##\s*(.+)$/);
+    if(sm){
+      const title=sm[1];
+      inActions=title.toUpperCase().includes('ACTION');
+      reportHTML+=`<div style="font-size:13px;font-weight:600;color:#0a1a12;margin:18px 0 6px;padding-top:14px;border-top:0.5px solid #e8ede9">${title.charAt(0)+title.slice(1).toLowerCase()}</div>`;
+    } else if(line.match(/^\d+\.\s/)&&inActions){
+      const num=line.match(/^(\d+)\./)[1];
+      const txt=line.replace(/^\d+\.\s*/,'');
+      reportHTML+=`<div style="display:flex;gap:8px;margin-bottom:8px;font-size:12px;color:#4a5550;line-height:1.6"><div style="width:18px;height:18px;min-width:18px;border-radius:50%;background:#1D9E75;color:#fff;font-size:9px;font-weight:500;display:flex;align-items:center;justify-content:center;margin-top:2px">${num}</div><span>${txt}</span></div>`;
+    } else if(line.trim()){
+      reportHTML+=`<p style="font-size:12px;color:#4a5550;line-height:1.75;margin-bottom:6px">${line}</p>`;
+    }
+  });
+  const pdfHTML=`<!DOCTYPE html><html><head><meta charset="UTF-8"><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet"><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'DM Sans',sans-serif;background:#fff}.page{max-width:680px;margin:0 auto}.header{background:#080c14;padding:28px 36px;display:flex;justify-content:space-between;align-items:flex-start}.logo{display:flex;align-items:center;gap:10px}.lm{width:32px;height:32px;background:#1D9E75;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#fff}.ln{font-size:20px;font-weight:500;color:#fff}.hr{text-align:right}.rt{font-size:10px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}.rn{font-size:14px;font-weight:500;color:#fff}.rd{font-size:11px;color:rgba(255,255,255,0.4);margin-top:3px}.ts{background:#0f1420;padding:14px 36px;display:flex;align-items:center;gap:14px}.av{width:36px;height:36px;border-radius:50%;background:#1D9E75;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#fff;flex-shrink:0}.tn{font-size:13px;font-weight:500;color:#fff}.tm{font-size:11px;color:rgba(255,255,255,0.4);margin-top:1px}.sp{display:flex;align-items:center;gap:8px;background:rgba(29,158,117,0.12);border:0.5px solid rgba(29,158,117,0.3);border-radius:20px;padding:5px 14px;margin-left:auto}.sl{font-size:10px;color:rgba(29,158,117,0.8);text-transform:uppercase;letter-spacing:.4px}.sv{font-size:18px;font-weight:500;color:#1D9E75}.body{padding:28px 36px}.ins{background:#f0faf6;border-left:4px solid #1D9E75;padding:14px 16px;margin-bottom:22px}.il{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:#0F6E56;margin-bottom:5px}.it{font-size:14px;font-weight:500;color:#0a1a12;line-height:1.5}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:22px}.stat{background:#f7f9f8;border:0.5px solid #e0ebe5;border-radius:8px;padding:10px 12px}.sv2{font-size:18px;font-weight:500;color:#0a1a12;margin-bottom:2px}.sv2.pos{color:#0F6E56}.sv2.neg{color:#A32D2D}.sl2{font-size:10px;color:#6b7c74;text-transform:uppercase;letter-spacing:.4px}.foot{background:#f7f9f8;border-top:0.5px solid #e0ebe5;padding:14px 36px;display:flex;justify-content:space-between;align-items:center;margin-top:28px}.fl{font-size:10px;color:#9aaba3;line-height:1.5}.fr{font-size:10px;color:#9aaba3;text-align:right}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body><div class="page">
+<div class="header"><div class="logo"><div class="lm">E</div><span class="ln">Edgebook</span></div><div class="hr"><div class="rt">AI coaching report</div><div class="rn">${_aiReportTitle}</div><div class="rd">${today} · ${n} trades analysed</div></div></div>
+<div class="ts"><div class="av">${userInitials}</div><div><div class="tn">${userName}</div><div class="tm">Edgebook · ${today}</div></div><div class="sp"><span class="sl">Trades</span><span class="sv">${n}</span></div></div>
+<div class="body">
+<div class="ins"><div class="il">Key insight</div><div class="it">${keyInsight}</div></div>
+<div class="stats">
+<div class="stat"><div class="sv2 pos">${winRate}%</div><div class="sl2">Win rate</div></div>
+<div class="stat"><div class="sv2 pos">${rrRatio}R</div><div class="sl2">Avg R:R</div></div>
+<div class="stat"><div class="sv2 neg">${maxDD.toFixed(1)}%</div><div class="sl2">Max drawdown</div></div>
+<div class="stat"><div class="sv2">${n}</div><div class="sl2">Trades logged</div></div>
+</div>
+${reportHTML}
+</div>
+<div class="foot"><div class="fl">Generated by Edgebook AI · edgebook.trade<br>Based on ${n} trades · ${today}</div><div class="fr">Edgebook · AI Coaching Report<br>Confidential — for trader use only</div></div>
+</div></body></html>`;
+  const blob=new Blob([pdfHTML],{type:'text/html'});
+  const url=URL.createObjectURL(blob);
+  const win=window.open(url,'_blank');
+  if(win) win.onload=()=>setTimeout(()=>win.print(),600);
+  if(btn){btn.disabled=false;btn.innerHTML='<i class="fa-solid fa-file-pdf"></i> Download PDF';}
+  showToast('PDF opened — use Print → Save as PDF','success');
 }
 
 function importTradesJSON(){
