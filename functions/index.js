@@ -1396,6 +1396,48 @@ async function syncCtraderForUser(uid) {
   return { saved: written, skipped: skipped.length, errors: [], durationMs, symbolLog };
 }
 
+// ─── Token input parser ───────────────────────────────────────────────────────
+//
+// Users can paste in any of these formats from the cTrader config screen:
+//   1. Full JSON config:  {"url":"…","headers":{"Authorization":"Bearer eyJ…"}}
+//   2. Header string:     Bearer eyJ…
+//   3. Raw JWT:           eyJ…
+//
+// Always returns the bare token string, or null if nothing usable is found.
+
+function parseCtraderBearerInput(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  let s = raw.trim();
+
+  // Format 1: looks like JSON — try to parse and extract the Authorization header
+  if (s.startsWith("{")) {
+    try {
+      const obj = JSON.parse(s);
+      // {"headers":{"Authorization":"Bearer eyJ…"}}
+      const auth = obj?.headers?.Authorization ?? obj?.headers?.authorization ?? "";
+      if (auth) s = auth.trim();
+      // Also handle {"token":"eyJ…"} or {"access_token":"eyJ…"}
+      else if (obj?.token)        s = String(obj.token).trim();
+      else if (obj?.access_token) s = String(obj.access_token).trim();
+    } catch {
+      // Not valid JSON — fall through and try string parsing
+    }
+  }
+
+  // Format 2: "Bearer eyJ…" — strip the prefix
+  if (/^Bearer\s+/i.test(s)) {
+    s = s.replace(/^Bearer\s+/i, "").trim();
+  }
+
+  // Strip any stray surrounding quotes or whitespace left over
+  s = s.replace(/^["'`]+|["'`]+$/g, "").trim();
+
+  // Sanity: a JWT has at least two dots; reject anything that looks wrong
+  if (!s || s.length < 20) return null;
+
+  return s;
+}
+
 // ─── 7. ctraderConnect ────────────────────────────────────────────────────────
 //
 // POST /ctraderConnect  { bearerToken: "<token>" }
@@ -1414,11 +1456,20 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
     }
 
     const { bearerToken, refreshToken } = req.body || {};
-    if (!bearerToken || typeof bearerToken !== "string" || bearerToken.trim() === "") {
+    if (!bearerToken || typeof bearerToken !== "string") {
       return res.status(400).json({ error: "bearerToken is required in request body" });
     }
 
-    const cleanBearer  = bearerToken.trim();
+    // Accept full JSON config, "Bearer eyJ…", or raw token — all formats work
+    const cleanBearer = parseCtraderBearerInput(bearerToken);
+    if (!cleanBearer) {
+      return res.status(400).json({
+        error:
+          "Could not extract a valid Bearer token from the input. " +
+          "Paste the full JSON config from cTrader, 'Bearer eyJ…', or just the raw token.",
+      });
+    }
+
     const cleanRefresh = (refreshToken && typeof refreshToken === "string") ? refreshToken.trim() : null;
 
     // Validate token by opening a session and fetching balance
