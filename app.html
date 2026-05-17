@@ -2210,7 +2210,7 @@ function updateCtraderUI(connected){
   document.getElementById('ctrader-status-badge').style.display = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-last-sync').style.display = connected ? 'block' : 'none';
   document.getElementById('ctrader-status-desc').textContent = connected
-    ? 'Trades sync automatically every 15 mins during market hours'
+    ? 'Trades sync automatically every 5 mins, 24/7'
     : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
 }
 
@@ -2335,7 +2335,10 @@ async function checkZerodhaStatus(){
     if(snap.exists()&&snap.data().connected){
       updateZerodhaUI(true);
       const ls=snap.data().lastSync;
-      if(ls) document.getElementById('zerodha-last-sync').textContent=`Last synced: ${new Date(ls).toLocaleString('en-IN')}`;
+      if(ls){
+        const d = ls.toDate ? ls.toDate() : new Date(ls);
+        if(!isNaN(d)) document.getElementById('zerodha-last-sync').textContent=`Last synced: ${d.toLocaleString('en-IN')}`;
+      }
     }
   }catch(e){}
 }
