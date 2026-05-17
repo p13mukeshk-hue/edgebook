@@ -421,13 +421,15 @@ exports.marketHoursTradeSync = functions.pubsub
     console.log(`marketHoursTradeSync: ${label} — within market hours, starting sync`);
 
     const snapshot = await db.collectionGroup("brokers").where("connected", "==", true).get();
-    if (snapshot.empty) {
-      console.log("marketHoursTradeSync: no connected users");
+    // Only sync Zerodha accounts here; cTrader has its own scheduler
+    const zerodhaDocs = snapshot.docs.filter((doc) => doc.id === "zerodha");
+    if (zerodhaDocs.length === 0) {
+      console.log("marketHoursTradeSync: no connected Zerodha users");
       return;
     }
 
     const results = await Promise.allSettled(
-      snapshot.docs.map(async (doc) => {
+      zerodhaDocs.map(async (doc) => {
         const uid = doc.ref.parent.parent.id;
         const result = await syncTradesForUser(uid);
         console.log(`marketHoursTradeSync: uid=${uid} trades=${result.trades} orders=${result.orders}`);
@@ -453,8 +455,10 @@ exports.scheduledTradeSync = functions.pubsub
     console.log("scheduledTradeSync (EOD): starting");
 
     const snapshot = await db.collectionGroup("brokers").where("connected", "==", true).get();
+    // Only sync Zerodha accounts here; cTrader has its own scheduler
+    const zerodhaDocs = snapshot.docs.filter((doc) => doc.id === "zerodha");
     const results = await Promise.allSettled(
-      snapshot.docs.map(async (doc) => {
+      zerodhaDocs.map(async (doc) => {
         const uid = doc.ref.parent.parent.id;
         const result = await syncTradesForUser(uid);
         console.log(`scheduledTradeSync: uid=${uid} trades=${result.trades} orders=${result.orders}`);
@@ -465,4 +469,524 @@ exports.scheduledTradeSync = functions.pubsub
     const ok   = results.filter((r) => r.status === "fulfilled").length;
     const fail = results.filter((r) => r.status === "rejected").length;
     console.log(`scheduledTradeSync (EOD): done — ${ok} ok, ${fail} failed`);
+  });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// cTRADER INTEGRATION
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Uses the cTrader MCP server (JSON-RPC over HTTP with SSE responses).
+// Safety guarantee: symbol map is ALWAYS fetched and verified before any deal
+// data is written. Any deal with an unresolvable symbolId aborts the entire
+// import — we never write a trade with a wrong or missing instrument name.
+// We are dealing with real money.
+
+const CTRADER_MCP_URL = "https://mcp.ctrader.com/trading/mcp";
+
+// Symbol-map cache TTL — refresh if older than 6 hours
+const SYMBOL_MAP_TTL_MS = 6 * 60 * 60 * 1000;
+
+// ─── cTrader MCP protocol helpers ────────────────────────────────────────────
+
+/**
+ * Initialise an MCP session and return the session ID.
+ * Protocol: POST initialize → read Mcp-Session-Id header → POST notifications/initialized.
+ */
+async function initCtraderSession(bearerToken) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    "Authorization": `Bearer ${bearerToken}`,
+  };
+
+  // Step 1: initialize
+  const initRes = await fetch(CTRADER_MCP_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "edgebook-server", version: "1.0.0" },
+      },
+    }),
+  });
+
+  if (!initRes.ok) {
+    throw new Error(`cTrader MCP initialize failed: HTTP ${initRes.status}`);
+  }
+
+  const sessionId = initRes.headers.get("mcp-session-id");
+  if (!sessionId) throw new Error("cTrader MCP did not return Mcp-Session-Id header");
+
+  // Step 2: notifications/initialized (fire-and-forget; response is optional)
+  await fetch(CTRADER_MCP_URL, {
+    method: "POST",
+    headers: { ...headers, "Mcp-Session-Id": sessionId },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+  }).catch((e) => console.warn("notifications/initialized warning (non-fatal):", e.message));
+
+  return sessionId;
+}
+
+/**
+ * Call an MCP tool and return the parsed result object.
+ * Handles both plain JSON and SSE (text/event-stream) response formats.
+ */
+async function callCtraderTool(bearerToken, sessionId, toolName, toolArgs = {}) {
+  const res = await fetch(CTRADER_MCP_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream",
+      "Authorization": `Bearer ${bearerToken}`,
+      "Mcp-Session-Id": sessionId,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: toolName, arguments: toolArgs },
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`cTrader MCP tools/call (${toolName}) failed: HTTP ${res.status}`);
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text();
+
+  let rpcResponse;
+  if (contentType.includes("text/event-stream")) {
+    // Parse SSE: find the last "data: {...}" line with a result or error
+    const dataLines = text
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trim())
+      .filter(Boolean);
+
+    if (dataLines.length === 0) throw new Error(`cTrader MCP (${toolName}): empty SSE response`);
+
+    // The last data line should be the JSON-RPC result
+    const lastData = dataLines[dataLines.length - 1];
+    try {
+      rpcResponse = JSON.parse(lastData);
+    } catch {
+      throw new Error(`cTrader MCP (${toolName}): could not parse SSE data as JSON: ${lastData.slice(0, 200)}`);
+    }
+  } else {
+    try {
+      rpcResponse = JSON.parse(text);
+    } catch {
+      throw new Error(`cTrader MCP (${toolName}): could not parse response as JSON: ${text.slice(0, 200)}`);
+    }
+  }
+
+  if (rpcResponse.error) {
+    throw new Error(`cTrader MCP (${toolName}) RPC error ${rpcResponse.error.code}: ${rpcResponse.error.message}`);
+  }
+
+  // result.content is an array of { type: "text", text: "<json>" }
+  const content = rpcResponse?.result?.content;
+  if (!Array.isArray(content) || content.length === 0) {
+    throw new Error(`cTrader MCP (${toolName}): unexpected result shape — ${JSON.stringify(rpcResponse).slice(0, 300)}`);
+  }
+
+  const textBlock = content.find((c) => c.type === "text");
+  if (!textBlock) throw new Error(`cTrader MCP (${toolName}): no text block in result content`);
+
+  try {
+    return JSON.parse(textBlock.text);
+  } catch {
+    // Some tools return plain text (e.g. confirmations); return as-is
+    return textBlock.text;
+  }
+}
+
+/**
+ * Build a verified symbolId → symbolName map by calling get_symbols.
+ *
+ * Caching strategy:
+ *   - Stored in Firestore at system/ctrader document, field: symbolMap (JSON) + symbolMapUpdatedAt
+ *   - If cached data is < SYMBOL_MAP_TTL_MS old, return the cached version
+ *   - Otherwise, re-fetch from cTrader and update cache
+ *
+ * This avoids a get_symbols call on every scheduled sync (which would be 4 calls/hour).
+ */
+async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = false } = {}) {
+  const cacheRef = db.collection("system").doc("ctrader");
+
+  if (!forceRefresh) {
+    const cacheSnap = await cacheRef.get();
+    if (cacheSnap.exists) {
+      const { symbolMap, symbolMapUpdatedAt } = cacheSnap.data();
+      const age = Date.now() - (symbolMapUpdatedAt?.toMillis?.() ?? 0);
+      if (symbolMap && age < SYMBOL_MAP_TTL_MS) {
+        console.log(`cTrader: using cached symbol map (${Object.keys(symbolMap).length} symbols, age ${Math.round(age / 60000)}m)`);
+        return symbolMap; // { "41": "XAUUSD", "42": "XAGUSD", ... }
+      }
+    }
+  }
+
+  console.log("cTrader: fetching fresh symbol map from get_symbols");
+  const rawSymbols = await callCtraderTool(bearerToken, sessionId, "get_symbols");
+
+  // rawSymbols should be an array of objects with at minimum { id, name }
+  if (!Array.isArray(rawSymbols)) {
+    throw new Error(`cTrader get_symbols: expected array, got ${typeof rawSymbols} — ${JSON.stringify(rawSymbols).slice(0, 300)}`);
+  }
+  if (rawSymbols.length === 0) {
+    throw new Error("cTrader get_symbols: returned empty array — cannot build symbol map");
+  }
+
+  const symbolMap = {};
+  for (const s of rawSymbols) {
+    const id   = String(s.id   ?? s.symbolId ?? "");
+    const name = String(s.name ?? s.symbolName ?? "").trim();
+    if (!id || !name) {
+      console.warn("cTrader get_symbols: skipping entry with missing id or name:", JSON.stringify(s));
+      continue;
+    }
+    symbolMap[id] = name;
+  }
+
+  if (Object.keys(symbolMap).length === 0) {
+    throw new Error("cTrader get_symbols: could not extract any id→name pairs from API response");
+  }
+
+  // Persist to cache
+  await cacheRef.set(
+    { symbolMap, symbolMapUpdatedAt: admin.firestore.FieldValue.serverTimestamp() },
+    { merge: true }
+  );
+  console.log(`cTrader: symbol map cached — ${Object.keys(symbolMap).length} symbols`);
+
+  return symbolMap;
+}
+
+// ─── Required deal fields — ALL must be present. No defaults, no guessing. ───
+
+const REQUIRED_DEAL_FIELDS = [
+  "dealId",
+  "orderId",
+  "positionId",
+  "symbolId",
+  "tradeSide",
+  "volume",
+  "filledVolume",
+  "executionPrice",
+  "executionTimestamp",
+  "dealStatus",
+];
+
+/**
+ * Validate and normalise a raw deal object from get_deals.
+ * Throws a descriptive error if any required field is missing or symbolId is unresolved.
+ * Returns a clean trade document ready for Firestore.
+ */
+function normaliseDeal(rawDeal, symbolMap) {
+  // Check required fields
+  const missing = REQUIRED_DEAL_FIELDS.filter((f) => rawDeal[f] == null);
+  if (missing.length > 0) {
+    throw new Error(
+      `cTrader deal ${rawDeal.dealId ?? "(unknown)"} is missing required fields: ${missing.join(", ")} — aborting import`
+    );
+  }
+
+  const symbolId = String(rawDeal.symbolId);
+  const symbolName = symbolMap[symbolId];
+  if (!symbolName) {
+    throw new Error(
+      `cTrader deal ${rawDeal.dealId}: symbolId ${symbolId} not found in verified symbol map — ` +
+      `cannot write trade with unknown instrument. ` +
+      `Known IDs: ${Object.keys(symbolMap).slice(0, 10).join(", ")}...`
+    );
+  }
+
+  const executionTimestamp = Number(rawDeal.executionTimestamp);
+  if (!Number.isFinite(executionTimestamp) || executionTimestamp <= 0) {
+    throw new Error(`cTrader deal ${rawDeal.dealId}: invalid executionTimestamp: ${rawDeal.executionTimestamp}`);
+  }
+
+  const executionPrice = Number(rawDeal.executionPrice);
+  if (!Number.isFinite(executionPrice) || executionPrice <= 0) {
+    throw new Error(`cTrader deal ${rawDeal.dealId}: invalid executionPrice: ${rawDeal.executionPrice}`);
+  }
+
+  const filledVolume = Number(rawDeal.filledVolume);
+  if (!Number.isFinite(filledVolume) || filledVolume < 0) {
+    throw new Error(`cTrader deal ${rawDeal.dealId}: invalid filledVolume: ${rawDeal.filledVolume}`);
+  }
+
+  return {
+    broker:           "CTRADER",
+    dealId:           String(rawDeal.dealId),
+    orderId:          String(rawDeal.orderId),
+    positionId:       String(rawDeal.positionId),
+    symbolId:         symbolId,
+    symbol:           symbolName,          // verified, human-readable
+    side:             String(rawDeal.tradeSide).toUpperCase(),   // "BUY" | "SELL"
+    volume:           Number(rawDeal.volume),
+    filledVolume:     filledVolume,
+    executionPrice:   executionPrice,
+    dealStatus:       String(rawDeal.dealStatus),
+    executedAt:       admin.firestore.Timestamp.fromMillis(executionTimestamp),
+    // Optional enrichment fields (include only if present)
+    ...(rawDeal.commission    != null && { commission:    Number(rawDeal.commission) }),
+    ...(rawDeal.swap          != null && { swap:          Number(rawDeal.swap) }),
+    ...(rawDeal.pnl           != null && { pnl:           Number(rawDeal.pnl) }),
+    ...(rawDeal.balance       != null && { balanceAfter:  Number(rawDeal.balance) }),
+    ...(rawDeal.label         != null && { label:         String(rawDeal.label) }),
+    ...(rawDeal.comment       != null && { comment:       String(rawDeal.comment) }),
+    importedAt: admin.firestore.FieldValue.serverTimestamp(),
+    _raw: rawDeal,  // keep original for debugging; can be removed once stable
+  };
+}
+
+/**
+ * Core sync logic: fetch deals for a cTrader-connected user, validate every
+ * deal against the verified symbol map, and upsert to Firestore.
+ * Returns { trades, skipped, errors[] }.
+ */
+async function syncCtraderForUser(uid) {
+  // 1. Load encrypted bearer token from Firestore
+  const brokerRef = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+  const brokerSnap = await brokerRef.get();
+
+  if (!brokerSnap.exists || !brokerSnap.data().connected) {
+    throw new Error(`cTrader not connected for uid=${uid}`);
+  }
+
+  const bearerToken = decrypt(brokerSnap.data().accessToken);
+
+  // 2. Open MCP session
+  const sessionId = await initCtraderSession(bearerToken);
+
+  // 3. Fetch verified symbol map (uses cache when fresh)
+  const symbolMap = await getVerifiedSymbolMap(bearerToken, sessionId);
+
+  // 4. Fetch deals — default: today's deals
+  //    get_deals accepts optional fromTimestamp / toTimestamp (Unix ms)
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const rawDeals = await callCtraderTool(bearerToken, sessionId, "get_deals", {
+    fromTimestamp: todayStart.getTime(),
+    toTimestamp:   Date.now(),
+  });
+
+  if (!Array.isArray(rawDeals)) {
+    throw new Error(`cTrader get_deals: expected array, got ${typeof rawDeals}`);
+  }
+
+  console.log(`cTrader syncCtraderForUser uid=${uid}: raw deal count = ${rawDeals.length}`);
+
+  if (rawDeals.length === 0) {
+    console.log(`cTrader syncCtraderForUser uid=${uid}: no deals today`);
+    return { trades: 0, skipped: 0, errors: [] };
+  }
+
+  // 5. Validate and normalise ALL deals before writing ANY — fail loud
+  //    If even one deal has a bad symbolId or missing field, abort entirely.
+  const normalisedDeals = [];
+  const validationErrors = [];
+
+  for (const rawDeal of rawDeals) {
+    try {
+      normalisedDeals.push(normaliseDeal(rawDeal, symbolMap));
+    } catch (err) {
+      validationErrors.push(err.message);
+    }
+  }
+
+  if (validationErrors.length > 0) {
+    // Log all errors but throw the first — we refuse to write a partial import
+    console.error(`cTrader uid=${uid}: deal validation FAILED (${validationErrors.length} errors):`, validationErrors);
+    throw new Error(
+      `cTrader deal validation failed — refusing partial write. First error: ${validationErrors[0]}`
+    );
+  }
+
+  // 6. Upsert to Firestore (dealId as document ID prevents duplicates)
+  const tradesRef = db.collection("users").doc(uid).collection("trades");
+  const BATCH_SIZE = 400; // Firestore batch limit is 500
+  let written = 0;
+
+  for (let i = 0; i < normalisedDeals.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    const chunk = normalisedDeals.slice(i, i + BATCH_SIZE);
+
+    for (const trade of chunk) {
+      // Use broker + dealId as composite key to avoid clashes with Zerodha trade IDs
+      const docId = `ctrader_${trade.dealId}`;
+      batch.set(tradesRef.doc(docId), trade, { merge: true });
+    }
+
+    await batch.commit();
+    written += chunk.length;
+  }
+
+  // 7. Update broker document with last sync metadata
+  await brokerRef.set(
+    {
+      lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastSyncTradeCount: written,
+    },
+    { merge: true }
+  );
+
+  console.log(`cTrader syncCtraderForUser uid=${uid}: wrote ${written} trades`);
+  return { trades: written, skipped: 0, errors: [] };
+}
+
+// ─── 7. ctraderConnect ────────────────────────────────────────────────────────
+//
+// POST /ctraderConnect  { bearerToken: "<token>" }
+// Validates the token by calling get_balance, fetches the symbol map to confirm
+// connectivity and symbol data, then stores the encrypted token in Firestore.
+
+exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
+  if (handleCors(req, res)) return;
+
+  try {
+    const decoded = await verifyAuth(req);
+    const uid = decoded.uid;
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const { bearerToken } = req.body || {};
+    if (!bearerToken || typeof bearerToken !== "string" || bearerToken.trim() === "") {
+      return res.status(400).json({ error: "bearerToken is required in request body" });
+    }
+
+    // Validate token by opening a session and fetching balance
+    let sessionId;
+    try {
+      sessionId = await initCtraderSession(bearerToken);
+    } catch (err) {
+      return res.status(401).json({ error: `cTrader authentication failed: ${err.message}` });
+    }
+
+    let balance;
+    try {
+      balance = await callCtraderTool(bearerToken, sessionId, "get_balance");
+    } catch (err) {
+      return res.status(401).json({ error: `cTrader get_balance failed: ${err.message}` });
+    }
+
+    // Fetch and cache symbol map on first connect (force refresh)
+    let symbolCount;
+    try {
+      const symbolMap = await getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh: true });
+      symbolCount = Object.keys(symbolMap).length;
+    } catch (err) {
+      // Symbol map failure is fatal — we cannot safely import trades without it
+      return res.status(502).json({ error: `cTrader symbol map fetch failed: ${err.message}` });
+    }
+
+    // Store encrypted token
+    await db
+      .collection("users").doc(uid)
+      .collection("brokers").doc("ctrader")
+      .set({
+        connected:    true,
+        accessToken:  encrypt(bearerToken.trim()),
+        connectedAt:  admin.firestore.FieldValue.serverTimestamp(),
+        symbolCount,
+        // Store a snippet of balance info for the UI (no sensitive data)
+        accountBalance: typeof balance === "object" ? (balance.balance ?? balance.equity ?? null) : null,
+        accountCurrency: typeof balance === "object" ? (balance.currency ?? null) : null,
+      }, { merge: true });
+
+    console.log(`ctraderConnect: uid=${uid} connected, symbolCount=${symbolCount}`);
+    return res.status(200).json({
+      ok: true,
+      message: "cTrader connected successfully",
+      symbolCount,
+    });
+
+  } catch (err) {
+    const status = err.status || 500;
+    console.error("ctraderConnect error:", err);
+    return res.status(status).json({ error: err.message });
+  }
+});
+
+// ─── 8. syncCtraderTrades ─────────────────────────────────────────────────────
+//
+// POST /syncCtraderTrades  (no body required)
+// Manually trigger a cTrader sync for the authenticated user.
+
+exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
+  if (handleCors(req, res)) return;
+
+  try {
+    const decoded = await verifyAuth(req);
+    const uid = decoded.uid;
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const result = await syncCtraderForUser(uid);
+
+    const note =
+      result.trades === 0
+        ? "No deals found for today — market may be closed or no trades have been executed yet."
+        : `${result.trades} deal(s) written to journal.`;
+
+    return res.status(200).json({ ok: true, ...result, note });
+
+  } catch (err) {
+    const status = err.status || 500;
+    console.error("syncCtraderTrades error:", err);
+    return res.status(status).json({ error: err.message });
+  }
+});
+
+// ─── 9. ctraderScheduledSync ──────────────────────────────────────────────────
+//
+// Runs every 15 minutes Mon–Fri.
+// No market-hours guard here — cTrader is a global 24/5 broker (FX/indices/metals
+// trade around the clock from Sunday 22:00 UTC to Friday 22:00 UTC).
+// Each user's sync is independent; failures are logged but don't block others.
+
+exports.ctraderScheduledSync = functions.pubsub
+  .schedule("*/15 * * * 1-5")
+  .timeZone("UTC")
+  .onRun(async () => {
+    console.log("ctraderScheduledSync: starting");
+
+    const snapshot = await db
+      .collectionGroup("brokers")
+      .where("connected", "==", true)
+      .get();
+
+    // Filter to cTrader broker documents only
+    const ctraderDocs = snapshot.docs.filter((doc) => doc.id === "ctrader");
+
+    console.log(`ctraderScheduledSync: ${ctraderDocs.length} connected cTrader account(s)`);
+
+    const results = await Promise.allSettled(
+      ctraderDocs.map(async (doc) => {
+        const uid = doc.ref.parent.parent.id;
+        try {
+          const result = await syncCtraderForUser(uid);
+          console.log(`ctraderScheduledSync: uid=${uid} trades=${result.trades}`);
+          return { uid, ...result };
+        } catch (err) {
+          console.error(`ctraderScheduledSync: uid=${uid} FAILED:`, err.message);
+          throw err;
+        }
+      })
+    );
+
+    const ok   = results.filter((r) => r.status === "fulfilled").length;
+    const fail = results.filter((r) => r.status === "rejected").length;
+    console.log(`ctraderScheduledSync: done — ${ok} ok, ${fail} failed`);
   });
