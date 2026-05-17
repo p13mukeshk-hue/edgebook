@@ -655,18 +655,55 @@ async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = fal
   }
 
   console.log("cTrader: fetching fresh symbol details from get_symbols");
-  const rawSymbols = await callCtraderTool(bearerToken, sessionId, "get_symbols");
+  const symbolsRaw = await callCtraderTool(bearerToken, sessionId, "get_symbols");
 
-  if (!Array.isArray(rawSymbols)) {
+  // Log the exact top-level shape so we can see what the API returns
+  console.log(
+    "cTrader get_symbols: raw response type =", typeof symbolsRaw,
+    "| isArray =", Array.isArray(symbolsRaw),
+    "| keys =", (!Array.isArray(symbolsRaw) && symbolsRaw && typeof symbolsRaw === "object")
+      ? Object.keys(symbolsRaw).join(", ")
+      : "n/a",
+    "| preview =", JSON.stringify(symbolsRaw).slice(0, 200)
+  );
+
+  // Unwrap either format:
+  //   {"symbols": [...]}  →  use .symbols
+  //   [...]               →  use as-is
+  //   {"data": [...]}  /  {"result": [...]}  →  use first array-valued key
+  let rawSymbols;
+  if (Array.isArray(symbolsRaw)) {
+    rawSymbols = symbolsRaw;
+  } else if (symbolsRaw && typeof symbolsRaw === "object") {
+    // Try common wrapper key names first
+    if (Array.isArray(symbolsRaw.symbols))  rawSymbols = symbolsRaw.symbols;
+    else if (Array.isArray(symbolsRaw.data))    rawSymbols = symbolsRaw.data;
+    else if (Array.isArray(symbolsRaw.result))  rawSymbols = symbolsRaw.result;
+    else if (Array.isArray(symbolsRaw.items))   rawSymbols = symbolsRaw.items;
+    else {
+      // Last resort: pick the first key whose value is an array
+      const arrayKey = Object.keys(symbolsRaw).find((k) => Array.isArray(symbolsRaw[k]));
+      if (arrayKey) {
+        console.log(`cTrader get_symbols: unwrapping via key "${arrayKey}"`);
+        rawSymbols = symbolsRaw[arrayKey];
+      } else {
+        throw new Error(
+          `cTrader get_symbols: response is an object but contains no array value — ` +
+          `keys: ${Object.keys(symbolsRaw).join(", ")} — full: ${JSON.stringify(symbolsRaw).slice(0, 300)}`
+        );
+      }
+    }
+  } else {
     throw new Error(
-      `cTrader get_symbols: expected array, got ${typeof rawSymbols} — ${JSON.stringify(rawSymbols).slice(0, 300)}`
+      `cTrader get_symbols: unexpected response type "${typeof symbolsRaw}" — ${JSON.stringify(symbolsRaw).slice(0, 300)}`
     );
   }
+
   if (rawSymbols.length === 0) {
-    throw new Error("cTrader get_symbols: returned empty array — cannot build symbol map");
+    throw new Error("cTrader get_symbols: array is empty — cannot build symbol map");
   }
 
-  // Log the first symbol's raw shape so we can see the exact API field names
+  // Log the first symbol's raw shape so we can see the exact field names
   console.log("cTrader get_symbols: first symbol raw shape →", JSON.stringify(rawSymbols[0]));
 
   const symbolDetails = {};
@@ -1246,13 +1283,54 @@ async function syncCtraderForUser(uid) {
   console.log(`cTrader uid=${uid}: symbol map loaded — ${symbolCount} symbols`);
 
   // ── 4. Fetch deals ───────────────────────────────────────────────────────────
-  const rawDeals = await callCtraderTool(bearerToken, sessionId, "get_deals", {
+  const dealsRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {
     fromTimestamp,
     toTimestamp,
   });
 
-  if (!Array.isArray(rawDeals)) {
-    throw new Error(`cTrader get_deals: expected array, got ${typeof rawDeals} — ${JSON.stringify(rawDeals).slice(0, 200)}`);
+  // Log exact response shape on every sync so we can catch format changes
+  console.log(
+    `cTrader uid=${uid} get_deals: type =`, typeof dealsRaw,
+    "| isArray =", Array.isArray(dealsRaw),
+    "| keys =", (!Array.isArray(dealsRaw) && dealsRaw && typeof dealsRaw === "object")
+      ? Object.keys(dealsRaw).join(", ")
+      : "n/a",
+    "| preview =", JSON.stringify(dealsRaw).slice(0, 200)
+  );
+
+  // Unwrap either format:
+  //   {"deals": [...]}  →  use .deals
+  //   [...]             →  use as-is
+  //   {"data": [...]}  /  {"result": [...]}  /  {"transactions": [...]}  →  handled
+  let rawDeals;
+  if (Array.isArray(dealsRaw)) {
+    rawDeals = dealsRaw;
+  } else if (dealsRaw && typeof dealsRaw === "object") {
+    if (Array.isArray(dealsRaw.deals))        rawDeals = dealsRaw.deals;
+    else if (Array.isArray(dealsRaw.data))         rawDeals = dealsRaw.data;
+    else if (Array.isArray(dealsRaw.result))       rawDeals = dealsRaw.result;
+    else if (Array.isArray(dealsRaw.transactions)) rawDeals = dealsRaw.transactions;
+    else if (Array.isArray(dealsRaw.items))        rawDeals = dealsRaw.items;
+    else {
+      const arrayKey = Object.keys(dealsRaw).find((k) => Array.isArray(dealsRaw[k]));
+      if (arrayKey) {
+        console.log(`cTrader uid=${uid} get_deals: unwrapping via key "${arrayKey}"`);
+        rawDeals = dealsRaw[arrayKey];
+      } else if (Object.keys(dealsRaw).length === 0) {
+        // Empty object {} — treat as no deals
+        console.log(`cTrader uid=${uid} get_deals: empty object response — treating as zero deals`);
+        rawDeals = [];
+      } else {
+        throw new Error(
+          `cTrader get_deals: response is an object but contains no array value — ` +
+          `keys: ${Object.keys(dealsRaw).join(", ")} — full: ${JSON.stringify(dealsRaw).slice(0, 300)}`
+        );
+      }
+    }
+  } else {
+    throw new Error(
+      `cTrader get_deals: unexpected response type "${typeof dealsRaw}" — ${JSON.stringify(dealsRaw).slice(0, 200)}`
+    );
   }
 
   console.log(`cTrader uid=${uid}: fetched ${rawDeals.length} raw deal(s)`);
