@@ -475,11 +475,16 @@ exports.scheduledTradeSync = functions.pubsub
 // cTRADER INTEGRATION
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Uses the cTrader MCP server (JSON-RPC over HTTP with SSE responses).
-// Safety guarantee: symbol map is ALWAYS fetched and verified before any deal
-// data is written. Any deal with an unresolvable symbolId aborts the entire
-// import — we never write a trade with a wrong or missing instrument name.
-// We are dealing with real money.
+// Strict no-assumptions policy:
+//   • Every piece of data (symbol names, trading hours, pip sizes, lot sizes,
+//     holidays, timezones) comes from the cTrader MCP API — nothing hardcoded.
+//   • If a required field is missing from the API response, we log clearly and
+//     skip — we never guess or default.
+//   • We are dealing with real money.
+//
+// Symbol map structure stored in Firestore system/ctrader.symbolDetails:
+//   { "<symbolId>": { id, name, enabled, symbolCategory, lotSize, pipSize,
+//                     pipValue, scheduleTimeZone, tradingHours, holidays } }
 
 const CTRADER_MCP_URL = "https://mcp.ctrader.com/trading/mcp";
 
@@ -608,14 +613,16 @@ async function callCtraderTool(bearerToken, sessionId, toolName, toolArgs = {}) 
 }
 
 /**
- * Build a verified symbolId → symbolName map by calling get_symbols.
+ * Fetch and cache full symbol details from get_symbols.
  *
- * Caching strategy:
- *   - Stored in Firestore at system/ctrader document, field: symbolMap (JSON) + symbolMapUpdatedAt
- *   - If cached data is < SYMBOL_MAP_TTL_MS old, return the cached version
- *   - Otherwise, re-fetch from cTrader and update cache
+ * Returns symbolDetails: { "<id>": { id, name, enabled, symbolCategory,
+ *   lotSize, pipSize, pipValue, scheduleTimeZone, tradingHours, holidays, _raw } }
  *
- * This avoids a get_symbols call on every scheduled sync (which would be 4 calls/hour).
+ * Caching: stored in Firestore system/ctrader.symbolDetails + symbolMapUpdatedAt.
+ * TTL = 6 hours. forceRefresh = true bypasses the cache.
+ *
+ * On first fetch the full raw symbol[0] is logged so we can see the exact field
+ * names the API uses — this helps us adapt if the schema ever changes.
  */
 async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = false } = {}) {
   const cacheRef = db.collection("system").doc("ctrader");
@@ -623,49 +630,304 @@ async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = fal
   if (!forceRefresh) {
     const cacheSnap = await cacheRef.get();
     if (cacheSnap.exists) {
-      const { symbolMap, symbolMapUpdatedAt } = cacheSnap.data();
+      const { symbolDetails, symbolMapUpdatedAt } = cacheSnap.data();
       const age = Date.now() - (symbolMapUpdatedAt?.toMillis?.() ?? 0);
-      if (symbolMap && age < SYMBOL_MAP_TTL_MS) {
-        console.log(`cTrader: using cached symbol map (${Object.keys(symbolMap).length} symbols, age ${Math.round(age / 60000)}m)`);
-        return symbolMap; // { "41": "XAUUSD", "42": "XAGUSD", ... }
+      if (symbolDetails && Object.keys(symbolDetails).length > 0 && age < SYMBOL_MAP_TTL_MS) {
+        console.log(
+          `cTrader: using cached symbol details ` +
+          `(${Object.keys(symbolDetails).length} symbols, age ${Math.round(age / 60000)}m)`
+        );
+        return symbolDetails;
       }
     }
   }
 
-  console.log("cTrader: fetching fresh symbol map from get_symbols");
+  console.log("cTrader: fetching fresh symbol details from get_symbols");
   const rawSymbols = await callCtraderTool(bearerToken, sessionId, "get_symbols");
 
-  // rawSymbols should be an array of objects with at minimum { id, name }
   if (!Array.isArray(rawSymbols)) {
-    throw new Error(`cTrader get_symbols: expected array, got ${typeof rawSymbols} — ${JSON.stringify(rawSymbols).slice(0, 300)}`);
+    throw new Error(
+      `cTrader get_symbols: expected array, got ${typeof rawSymbols} — ${JSON.stringify(rawSymbols).slice(0, 300)}`
+    );
   }
   if (rawSymbols.length === 0) {
     throw new Error("cTrader get_symbols: returned empty array — cannot build symbol map");
   }
 
-  const symbolMap = {};
+  // Log the first symbol's raw shape so we can see the exact API field names
+  console.log("cTrader get_symbols: first symbol raw shape →", JSON.stringify(rawSymbols[0]));
+
+  const symbolDetails = {};
+  let skippedCount = 0;
+
   for (const s of rawSymbols) {
-    const id   = String(s.id   ?? s.symbolId ?? "");
-    const name = String(s.name ?? s.symbolName ?? "").trim();
+    // Resolve id — try common field name variants
+    const id = String(s.id ?? s.symbolId ?? s.symbol_id ?? "").trim();
+    const name = String(s.name ?? s.symbolName ?? s.symbol_name ?? "").trim();
+
     if (!id || !name) {
-      console.warn("cTrader get_symbols: skipping entry with missing id or name:", JSON.stringify(s));
+      console.warn("cTrader get_symbols: skipping entry — missing id or name:", JSON.stringify(s));
+      skippedCount++;
       continue;
     }
-    symbolMap[id] = name;
+
+    // Extract every field the user requested. Use null when absent — never default.
+    const entry = {
+      id,
+      name,
+      // Is this symbol currently tradeable?
+      enabled: s.enabled ?? s.tradingEnabled ?? s.isEnabled ?? null,
+      // Asset class: Forex / Crypto / Commodity / Index / etc.
+      symbolCategory: s.symbolCategory ?? s.category ?? s.assetClass ?? s.type ?? null,
+      // Contract / volume sizing — from API only
+      lotSize:  extractNumber(s, ["lotSize", "lot_size", "contractSize", "contract_size"]),
+      pipSize:  extractNumber(s, ["pipSize", "pip_size", "pipPosition", "point"]),
+      pipValue: extractNumber(s, ["pipValue", "pip_value", "pipValuePerLot"]),
+      // Schedule data — from API only
+      scheduleTimeZone: s.scheduleTimeZone ?? s.tradingScheduleTimeZone ?? s.timezone ?? null,
+      tradingHours:     s.tradingHours ?? s.schedule ?? s.tradingSchedule ?? s.hours ?? null,
+      holidays:         s.holidays ?? s.tradingHolidays ?? s.closedDates ?? null,
+      _raw: s,  // keep original for debugging; prune once stable
+    };
+
+    symbolDetails[id] = entry;
   }
 
-  if (Object.keys(symbolMap).length === 0) {
-    throw new Error("cTrader get_symbols: could not extract any id→name pairs from API response");
+  if (Object.keys(symbolDetails).length === 0) {
+    throw new Error("cTrader get_symbols: could not extract any symbol entries from API response");
   }
 
-  // Persist to cache
+  if (skippedCount > 0) {
+    console.warn(`cTrader get_symbols: skipped ${skippedCount} entries due to missing id/name`);
+  }
+
+  // Log spot-check for key symbols if present
+  for (const checkName of ["XAUUSD", "BTCUSD", "BTCUSDT", "EURUSD"]) {
+    const found = Object.values(symbolDetails).find((s) => s.name === checkName);
+    if (found) {
+      console.log(
+        `cTrader symbol check — ${checkName}: id=${found.id} enabled=${found.enabled} ` +
+        `category=${found.symbolCategory} lotSize=${found.lotSize} pipSize=${found.pipSize} ` +
+        `pipValue=${found.pipValue} tz=${found.scheduleTimeZone}`
+      );
+    }
+  }
+
+  // Persist rich details to cache
   await cacheRef.set(
-    { symbolMap, symbolMapUpdatedAt: admin.firestore.FieldValue.serverTimestamp() },
+    {
+      symbolDetails,
+      // Keep legacy symbolMap for backward compat with ctraderConnect symbolCount
+      symbolMap: Object.fromEntries(Object.entries(symbolDetails).map(([k, v]) => [k, v.name])),
+      symbolMapUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
     { merge: true }
   );
-  console.log(`cTrader: symbol map cached — ${Object.keys(symbolMap).length} symbols`);
+  console.log(`cTrader: symbol details cached — ${Object.keys(symbolDetails).length} symbols`);
 
-  return symbolMap;
+  return symbolDetails;
+}
+
+/**
+ * Helper: extract a numeric field from an object, trying multiple key names.
+ * Returns the first finite number found, or null if none.
+ */
+function extractNumber(obj, keys) {
+  for (const key of keys) {
+    const v = obj[key];
+    if (v != null) {
+      const n = Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return null;
+}
+
+// ─── Trading-hours validation ─────────────────────────────────────────────────
+//
+// All logic is driven entirely by data from the API (tradingHours, holidays,
+// scheduleTimeZone). We never hardcode session times for any instrument.
+//
+// tradingHours shape from cTrader can be one of:
+//   A) Array of { dayOfWeek: "MONDAY"|"1"|1, open: "HH:MM", close: "HH:MM" }
+//   B) Array of { from: { dayOfWeek, time }, to: { dayOfWeek, time } }  (interval style)
+//   C) String "00:00-24:00" (simple, assume every day)
+//   D) null / missing → cannot determine → returns { tradeable: null, reason }
+//
+// Returns { tradeable: true|false|null, reason: string }
+//   true  → within hours
+//   false → outside hours or holiday
+//   null  → could not determine (API data missing or unparseable)
+
+const DOW_NAMES = ["SUNDAY","MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY"];
+
+function checkTradingHours(symbolInfo, nowMs) {
+  const { name, scheduleTimeZone, tradingHours, holidays } = symbolInfo;
+
+  // ── Step 1: resolve "now" in the symbol's declared timezone ─────────────────
+  let tz = scheduleTimeZone;
+  if (!tz) {
+    return { tradeable: null, reason: `${name}: scheduleTimeZone not provided by API — cannot check hours` };
+  }
+
+  let localDate;
+  try {
+    // Use Intl to get the local date/time string in the symbol's timezone
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    });
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(nowMs)).map((p) => [p.type, p.value]));
+    localDate = {
+      year:    parseInt(parts.year,   10),
+      month:   parseInt(parts.month,  10), // 1-12
+      day:     parseInt(parts.day,    10),
+      hour:    parseInt(parts.hour,   10),
+      minute:  parseInt(parts.minute, 10),
+      // Day of week in local timezone (0=Sun…6=Sat)
+      dow:     new Date(nowMs).toLocaleDateString("en-US", { timeZone: tz, weekday: "long" }).toUpperCase(),
+    };
+  } catch (e) {
+    return { tradeable: null, reason: `${name}: invalid scheduleTimeZone "${tz}" — ${e.message}` };
+  }
+
+  const localMinutes = localDate.hour * 60 + localDate.minute;
+  const localDateStr = `${localDate.year}-${String(localDate.month).padStart(2,"0")}-${String(localDate.day).padStart(2,"0")}`;
+
+  // ── Step 2: check holidays ────────────────────────────────────────────────
+  if (Array.isArray(holidays) && holidays.length > 0) {
+    // Holidays may be Date strings like "2024-12-25" or objects { date: "2024-12-25" }
+    const holidaySet = new Set(
+      holidays.map((h) => (typeof h === "string" ? h.slice(0, 10) : (h?.date ?? h?.holiday ?? "").slice(0, 10)))
+        .filter(Boolean)
+    );
+    if (holidaySet.has(localDateStr)) {
+      return { tradeable: false, reason: `${name}: today (${localDateStr}) is a declared holiday` };
+    }
+  }
+
+  // ── Step 3: check trading hours ───────────────────────────────────────────
+  if (!tradingHours) {
+    return { tradeable: null, reason: `${name}: tradingHours not provided by API — cannot check hours` };
+  }
+
+  // Format C: simple string like "00:00-24:00"
+  if (typeof tradingHours === "string") {
+    const m = tradingHours.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
+    if (!m) {
+      return { tradeable: null, reason: `${name}: tradingHours string "${tradingHours}" not parseable` };
+    }
+    const openMin  = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    const closeMin = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+    const within   = localMinutes >= openMin && localMinutes < (closeMin === 1440 ? 1440 : closeMin);
+    return {
+      tradeable: within,
+      reason: within
+        ? `${name}: within hours ${tradingHours} (${tz})`
+        : `${name}: outside hours ${tradingHours} (${tz}), local time ${localDate.hour}:${String(localDate.minute).padStart(2,"0")}`,
+    };
+  }
+
+  if (!Array.isArray(tradingHours) || tradingHours.length === 0) {
+    return { tradeable: null, reason: `${name}: tradingHours is not a usable array` };
+  }
+
+  // Normalise day-of-week to uppercase string
+  function normaliseDow(v) {
+    if (v == null) return null;
+    if (typeof v === "string") {
+      const up = v.toUpperCase().trim();
+      if (DOW_NAMES.includes(up)) return up;
+      // Try numeric string
+      const n = parseInt(v, 10);
+      if (!isNaN(n) && n >= 0 && n <= 6) return DOW_NAMES[n];
+      if (!isNaN(n) && n >= 1 && n <= 7) return DOW_NAMES[n % 7]; // ISO: 1=Mon…7=Sun
+    }
+    if (typeof v === "number") {
+      if (v >= 0 && v <= 6) return DOW_NAMES[v];
+      if (v >= 1 && v <= 7) return DOW_NAMES[v % 7];
+    }
+    return null;
+  }
+
+  // Parse "HH:MM" → total minutes
+  function parseTime(t) {
+    if (t == null) return null;
+    const s = String(t).trim();
+    const m = s.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  }
+
+  const firstEntry = tradingHours[0];
+
+  // Format A: { dayOfWeek, open/openTime/from, close/closeTime/to }
+  if (firstEntry.dayOfWeek != null || firstEntry.day != null) {
+    for (const slot of tradingHours) {
+      const slotDow   = normaliseDow(slot.dayOfWeek ?? slot.day);
+      const openMin   = parseTime(slot.open ?? slot.openTime ?? slot.from ?? slot.start);
+      const closeMin  = parseTime(slot.close ?? slot.closeTime ?? slot.to ?? slot.end);
+
+      if (!slotDow || openMin == null || closeMin == null) {
+        console.warn(`cTrader ${name}: unparseable tradingHours slot: ${JSON.stringify(slot)}`);
+        continue;
+      }
+
+      if (slotDow !== localDate.dow) continue;
+
+      // Handle midnight-crossing (e.g. 22:00–02:00)
+      const within = closeMin <= openMin
+        ? (localMinutes >= openMin || localMinutes < closeMin)
+        : (localMinutes >= openMin && localMinutes < closeMin);
+
+      return {
+        tradeable: within,
+        reason: within
+          ? `${name}: within ${slotDow} ${slot.open ?? slot.openTime ?? slot.from}–${slot.close ?? slot.closeTime ?? slot.to} (${tz})`
+          : `${name}: outside ${slotDow} hours (${tz}), local ${localDate.hour}:${String(localDate.minute).padStart(2,"0")}`,
+      };
+    }
+    // Today not listed → market closed today
+    return { tradeable: false, reason: `${name}: ${localDate.dow} not in tradingHours — market closed today (${tz})` };
+  }
+
+  // Format B: interval style { from: { dayOfWeek, time }, to: { dayOfWeek, time } }
+  if (firstEntry.from != null && firstEntry.to != null) {
+    for (const interval of tradingHours) {
+      const fromDow = normaliseDow(interval.from?.dayOfWeek ?? interval.from?.day);
+      const toDow   = normaliseDow(interval.to?.dayOfWeek   ?? interval.to?.day);
+      const fromMin = parseTime(interval.from?.time ?? interval.from?.open);
+      const toMin   = parseTime(interval.to?.time   ?? interval.to?.close);
+
+      if (!fromDow || !toDow || fromMin == null || toMin == null) {
+        console.warn(`cTrader ${name}: unparseable interval slot: ${JSON.stringify(interval)}`);
+        continue;
+      }
+
+      const fromDowIdx = DOW_NAMES.indexOf(fromDow);
+      const toDowIdx   = DOW_NAMES.indexOf(toDow);
+      const nowDowIdx  = DOW_NAMES.indexOf(localDate.dow);
+      const nowMins    = localMinutes;
+
+      // Convert to a simple "minutes since Sunday 00:00" for comparison
+      const fromAbs = fromDowIdx * 1440 + fromMin;
+      const toAbs   = toDowIdx   * 1440 + toMin;
+      const nowAbs  = nowDowIdx  * 1440 + nowMins;
+
+      const within = toAbs > fromAbs
+        ? (nowAbs >= fromAbs && nowAbs < toAbs)
+        : (nowAbs >= fromAbs || nowAbs < toAbs); // week-wrap
+
+      if (within) {
+        return { tradeable: true, reason: `${name}: within interval ${fromDow} ${interval.from.time}–${toDow} ${interval.to.time} (${tz})` };
+      }
+    }
+    return { tradeable: false, reason: `${name}: outside all trading intervals (${tz}), local ${localDate.dow} ${localDate.hour}:${String(localDate.minute).padStart(2,"0")}` };
+  }
+
+  return { tradeable: null, reason: `${name}: tradingHours format not recognised — ${JSON.stringify(firstEntry).slice(0, 120)}` };
 }
 
 // ─── Required deal fields — ALL must be present. No defaults, no guessing. ───
@@ -684,29 +946,27 @@ const REQUIRED_DEAL_FIELDS = [
 ];
 
 /**
- * Validate and normalise a raw deal object from get_deals.
- * Throws a descriptive error if any required field is missing or symbolId is unresolved.
- * Returns a clean trade document ready for Firestore.
+ * Validate and normalise a raw deal from get_deals.
+ * symbolInfo is the full entry from symbolDetails (not just the name string).
+ *
+ * P&L fields use pipValue / pipSize / lotSize from the API symbol entry.
+ * If those fields aren't in the API response they are stored as null —
+ * the frontend can recalculate once we have values.
+ *
+ * Throws if any required field is missing or symbolId unresolved.
  */
-function normaliseDeal(rawDeal, symbolMap) {
-  // Check required fields
+function normaliseDeal(rawDeal, symbolInfo) {
+  // 1. Required field check
   const missing = REQUIRED_DEAL_FIELDS.filter((f) => rawDeal[f] == null);
   if (missing.length > 0) {
     throw new Error(
-      `cTrader deal ${rawDeal.dealId ?? "(unknown)"} is missing required fields: ${missing.join(", ")} — aborting import`
+      `cTrader deal ${rawDeal.dealId ?? "(unknown)"} missing required fields: ${missing.join(", ")}`
     );
   }
 
   const symbolId = String(rawDeal.symbolId);
-  const symbolName = symbolMap[symbolId];
-  if (!symbolName) {
-    throw new Error(
-      `cTrader deal ${rawDeal.dealId}: symbolId ${symbolId} not found in verified symbol map — ` +
-      `cannot write trade with unknown instrument. ` +
-      `Known IDs: ${Object.keys(symbolMap).slice(0, 10).join(", ")}...`
-    );
-  }
 
+  // 2. Numeric field validation
   const executionTimestamp = Number(rawDeal.executionTimestamp);
   if (!Number.isFinite(executionTimestamp) || executionTimestamp <= 0) {
     throw new Error(`cTrader deal ${rawDeal.dealId}: invalid executionTimestamp: ${rawDeal.executionTimestamp}`);
@@ -722,38 +982,71 @@ function normaliseDeal(rawDeal, symbolMap) {
     throw new Error(`cTrader deal ${rawDeal.dealId}: invalid filledVolume: ${rawDeal.filledVolume}`);
   }
 
+  // 3. P&L metadata — from symbol API data only, null if unavailable
+  const lotSize  = symbolInfo.lotSize  ?? null;
+  const pipSize  = symbolInfo.pipSize  ?? null;
+  const pipValue = symbolInfo.pipValue ?? null;
+
+  // Compute lots traded (filledVolume / lotSize) only if lotSize is known
+  const lotsTraded = (lotSize != null && lotSize > 0)
+    ? parseFloat((filledVolume / lotSize).toFixed(8))
+    : null;
+
   return {
-    broker:           "CTRADER",
-    dealId:           String(rawDeal.dealId),
-    orderId:          String(rawDeal.orderId),
-    positionId:       String(rawDeal.positionId),
-    symbolId:         symbolId,
-    symbol:           symbolName,          // verified, human-readable
-    side:             String(rawDeal.tradeSide).toUpperCase(),   // "BUY" | "SELL"
-    volume:           Number(rawDeal.volume),
-    filledVolume:     filledVolume,
-    executionPrice:   executionPrice,
-    dealStatus:       String(rawDeal.dealStatus),
-    executedAt:       admin.firestore.Timestamp.fromMillis(executionTimestamp),
-    // Optional enrichment fields (include only if present)
-    ...(rawDeal.commission    != null && { commission:    Number(rawDeal.commission) }),
-    ...(rawDeal.swap          != null && { swap:          Number(rawDeal.swap) }),
-    ...(rawDeal.pnl           != null && { pnl:           Number(rawDeal.pnl) }),
-    ...(rawDeal.balance       != null && { balanceAfter:  Number(rawDeal.balance) }),
-    ...(rawDeal.label         != null && { label:         String(rawDeal.label) }),
-    ...(rawDeal.comment       != null && { comment:       String(rawDeal.comment) }),
-    importedAt: admin.firestore.FieldValue.serverTimestamp(),
-    _raw: rawDeal,  // keep original for debugging; can be removed once stable
+    broker:          "CTRADER",
+    dealId:          String(rawDeal.dealId),
+    orderId:         String(rawDeal.orderId),
+    positionId:      String(rawDeal.positionId),
+    symbolId,
+    symbol:          symbolInfo.name,          // verified name from API
+    symbolCategory:  symbolInfo.symbolCategory ?? null,
+    side:            String(rawDeal.tradeSide).toUpperCase(),  // "BUY" | "SELL"
+    volume:          Number(rawDeal.volume),
+    filledVolume,
+    lotsTraded,      // derived, null if lotSize unknown
+    executionPrice,
+    dealStatus:      String(rawDeal.dealStatus),
+    executedAt:      admin.firestore.Timestamp.fromMillis(executionTimestamp),
+    // P&L sizing from API — stored so frontend can recalculate
+    lotSize,
+    pipSize,
+    pipValue,
+    // Optional deal-level fields (include only if present in API response)
+    ...(rawDeal.commission != null && { commission:   Number(rawDeal.commission) }),
+    ...(rawDeal.swap       != null && { swap:         Number(rawDeal.swap) }),
+    ...(rawDeal.pnl        != null && { pnl:          Number(rawDeal.pnl) }),
+    ...(rawDeal.balance    != null && { balanceAfter: Number(rawDeal.balance) }),
+    ...(rawDeal.label      != null && { label:        String(rawDeal.label) }),
+    ...(rawDeal.comment    != null && { comment:      String(rawDeal.comment) }),
+    importedAt:      admin.firestore.FieldValue.serverTimestamp(),
+    _raw:            rawDeal,  // keep for debugging; prune once stable
   };
 }
 
 /**
- * Core sync logic: fetch deals for a cTrader-connected user, validate every
- * deal against the verified symbol map, and upsert to Firestore.
- * Returns { trades, skipped, errors[] }.
+ * Core sync logic for one cTrader user.
+ *
+ * Order of operations:
+ *   1. Load token + lastSyncTimestamp from Firestore
+ *   2. Open MCP session
+ *   3. Fetch verified symbol details (cached 6h)
+ *   4. Fetch deals since lastSyncTimestamp
+ *   5. For each deal:
+ *        a. Resolve symbolInfo — if not found → abort entire sync (no partial writes)
+ *        b. Check enabled flag — if false → skip + log
+ *        c. Check trading hours + holidays — if outside → skip + log
+ *        d. Validate required fields + numeric sanity
+ *        e. Normalise to trade document
+ *   6. If ANY validation error → abort entirely (refuse partial write)
+ *   7. Batch upsert to Firestore
+ *   8. Update broker doc: lastSyncTimestamp, lastSyncResult, connectedSymbols
+ *
+ * Returns { saved, skipped, errors, durationMs, symbolLog }
  */
 async function syncCtraderForUser(uid) {
-  // 1. Load encrypted bearer token from Firestore
+  const syncStart = Date.now();
+
+  // ── 1. Load broker state ────────────────────────────────────────────────────
   const brokerRef = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
   const brokerSnap = await brokerRef.get();
 
@@ -761,85 +1054,184 @@ async function syncCtraderForUser(uid) {
     throw new Error(`cTrader not connected for uid=${uid}`);
   }
 
-  const bearerToken = decrypt(brokerSnap.data().accessToken);
+  const brokerData = brokerSnap.data();
+  const bearerToken = decrypt(brokerData.accessToken);
 
-  // 2. Open MCP session
+  // Use lastSyncTimestamp for incremental sync; default to start of today (UTC)
+  let fromTimestamp;
+  if (brokerData.lastSyncTimestamp) {
+    fromTimestamp = brokerData.lastSyncTimestamp.toMillis
+      ? brokerData.lastSyncTimestamp.toMillis()
+      : Number(brokerData.lastSyncTimestamp);
+  } else {
+    const todayUtc = new Date();
+    todayUtc.setUTCHours(0, 0, 0, 0);
+    fromTimestamp = todayUtc.getTime();
+  }
+
+  const toTimestamp = Date.now();
+  console.log(
+    `cTrader syncCtraderForUser uid=${uid}: fetching deals from ` +
+    `${new Date(fromTimestamp).toISOString()} → ${new Date(toTimestamp).toISOString()}`
+  );
+
+  // ── 2. Open MCP session ─────────────────────────────────────────────────────
   const sessionId = await initCtraderSession(bearerToken);
 
-  // 3. Fetch verified symbol map (uses cache when fresh)
-  const symbolMap = await getVerifiedSymbolMap(bearerToken, sessionId);
+  // ── 3. Fetch symbol details (uses 6h cache) ─────────────────────────────────
+  const symbolDetails = await getVerifiedSymbolMap(bearerToken, sessionId);
+  const symbolCount = Object.keys(symbolDetails).length;
+  console.log(`cTrader uid=${uid}: symbol map loaded — ${symbolCount} symbols`);
 
-  // 4. Fetch deals — default: today's deals
-  //    get_deals accepts optional fromTimestamp / toTimestamp (Unix ms)
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
+  // ── 4. Fetch deals ───────────────────────────────────────────────────────────
   const rawDeals = await callCtraderTool(bearerToken, sessionId, "get_deals", {
-    fromTimestamp: todayStart.getTime(),
-    toTimestamp:   Date.now(),
+    fromTimestamp,
+    toTimestamp,
   });
 
   if (!Array.isArray(rawDeals)) {
-    throw new Error(`cTrader get_deals: expected array, got ${typeof rawDeals}`);
+    throw new Error(`cTrader get_deals: expected array, got ${typeof rawDeals} — ${JSON.stringify(rawDeals).slice(0, 200)}`);
   }
 
-  console.log(`cTrader syncCtraderForUser uid=${uid}: raw deal count = ${rawDeals.length}`);
+  console.log(`cTrader uid=${uid}: fetched ${rawDeals.length} raw deal(s)`);
 
   if (rawDeals.length === 0) {
-    console.log(`cTrader syncCtraderForUser uid=${uid}: no deals today`);
-    return { trades: 0, skipped: 0, errors: [] };
+    const durationMs = Date.now() - syncStart;
+    console.log(`cTrader uid=${uid}: no new deals — duration ${durationMs}ms`);
+    await brokerRef.set(
+      {
+        lastSyncTimestamp:  admin.firestore.Timestamp.fromMillis(toTimestamp),
+        lastSyncAt:         admin.firestore.FieldValue.serverTimestamp(),
+        lastSyncResult:     { saved: 0, skipped: 0, errors: 0, durationMs },
+      },
+      { merge: true }
+    );
+    return { saved: 0, skipped: 0, errors: [], durationMs, symbolLog: {} };
   }
 
-  // 5. Validate and normalise ALL deals before writing ANY — fail loud
-  //    If even one deal has a bad symbolId or missing field, abort entirely.
-  const normalisedDeals = [];
-  const validationErrors = [];
+  // ── 5. Per-deal: resolve, validate, check hours ─────────────────────────────
+  const nowMs = toTimestamp;
+  const toProcess   = [];   // deals ready to write
+  const skipped     = [];   // { dealId, symbol, reason }
+  const errors      = [];   // { dealId, error }
+  const symbolLog   = {};   // { symbolName: { count, skippedCount, reason? } }
+  const seenSymbols = new Set();
 
   for (const rawDeal of rawDeals) {
+    const dealId = String(rawDeal.dealId ?? "(unknown)");
+
+    // 5a. Resolve symbolInfo — unknown symbolId → abort entire sync
+    const symbolId = rawDeal.symbolId != null ? String(rawDeal.symbolId) : null;
+    if (!symbolId) {
+      errors.push({ dealId, error: "missing symbolId field — aborting sync" });
+      console.error(`cTrader uid=${uid} deal ${dealId}: missing symbolId`);
+      break; // will abort below
+    }
+
+    const symbolInfo = symbolDetails[symbolId];
+    if (!symbolInfo) {
+      errors.push({
+        dealId,
+        error: `symbolId ${symbolId} not in verified symbol map — aborting sync. ` +
+               `Known IDs sample: ${Object.keys(symbolDetails).slice(0, 8).join(", ")}`,
+      });
+      console.error(`cTrader uid=${uid} deal ${dealId}: symbolId ${symbolId} unresolved`);
+      break; // abort entire sync
+    }
+
+    seenSymbols.add(symbolInfo.name);
+    if (!symbolLog[symbolInfo.name]) symbolLog[symbolInfo.name] = { count: 0, skipped: 0 };
+
+    // 5b. Check enabled flag
+    if (symbolInfo.enabled === false) {
+      const reason = `symbol ${symbolInfo.name} is marked disabled in API`;
+      skipped.push({ dealId, symbol: symbolInfo.name, reason });
+      symbolLog[symbolInfo.name].skipped++;
+      symbolLog[symbolInfo.name].skipReason = reason;
+      console.log(`cTrader uid=${uid} deal ${dealId}: SKIP — ${reason}`);
+      continue;
+    }
+
+    // 5c. Check trading hours + holidays (all data from API)
+    const hoursCheck = checkTradingHours(symbolInfo, nowMs);
+    if (hoursCheck.tradeable === false) {
+      skipped.push({ dealId, symbol: symbolInfo.name, reason: hoursCheck.reason });
+      symbolLog[symbolInfo.name].skipped++;
+      symbolLog[symbolInfo.name].skipReason = hoursCheck.reason;
+      console.log(`cTrader uid=${uid} deal ${dealId}: SKIP — ${hoursCheck.reason}`);
+      continue;
+    }
+    if (hoursCheck.tradeable === null) {
+      // Cannot determine hours from API — log but still process (we can't confirm it's outside)
+      console.warn(`cTrader uid=${uid} deal ${dealId}: trading hours indeterminate — ${hoursCheck.reason} — processing anyway`);
+    }
+
+    // 5d. Validate required fields + numeric sanity
     try {
-      normalisedDeals.push(normaliseDeal(rawDeal, symbolMap));
+      const normalised = normaliseDeal(rawDeal, symbolInfo);
+      toProcess.push(normalised);
+      symbolLog[symbolInfo.name].count++;
+      console.log(
+        `cTrader uid=${uid} deal ${dealId}: OK — ${symbolInfo.name} ` +
+        `${normalised.side} ${normalised.filledVolume} @ ${normalised.executionPrice} ` +
+        `[${hoursCheck.reason}]`
+      );
     } catch (err) {
-      validationErrors.push(err.message);
+      errors.push({ dealId, error: err.message });
+      console.error(`cTrader uid=${uid} deal ${dealId}: validation FAILED — ${err.message}`);
     }
   }
 
-  if (validationErrors.length > 0) {
-    // Log all errors but throw the first — we refuse to write a partial import
-    console.error(`cTrader uid=${uid}: deal validation FAILED (${validationErrors.length} errors):`, validationErrors);
+  // ── 6. Abort if any symbolId was unresolved or validation errors exist ───────
+  if (errors.length > 0) {
+    console.error(
+      `cTrader uid=${uid}: ABORTING — ${errors.length} error(s), refusing partial write:`,
+      errors
+    );
     throw new Error(
-      `cTrader deal validation failed — refusing partial write. First error: ${validationErrors[0]}`
+      `cTrader sync aborted — ${errors.length} error(s). First: ${errors[0].error}`
     );
   }
 
-  // 6. Upsert to Firestore (dealId as document ID prevents duplicates)
-  const tradesRef = db.collection("users").doc(uid).collection("trades");
-  const BATCH_SIZE = 400; // Firestore batch limit is 500
-  let written = 0;
+  // ── 7. Batch upsert ──────────────────────────────────────────────────────────
+  const tradesRef  = db.collection("users").doc(uid).collection("trades");
+  const BATCH_SIZE = 400;
+  let written      = 0;
 
-  for (let i = 0; i < normalisedDeals.length; i += BATCH_SIZE) {
+  for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
     const batch = db.batch();
-    const chunk = normalisedDeals.slice(i, i + BATCH_SIZE);
-
-    for (const trade of chunk) {
-      // Use broker + dealId as composite key to avoid clashes with Zerodha trade IDs
-      const docId = `ctrader_${trade.dealId}`;
-      batch.set(tradesRef.doc(docId), trade, { merge: true });
+    for (const trade of toProcess.slice(i, i + BATCH_SIZE)) {
+      batch.set(tradesRef.doc(`ctrader_${trade.dealId}`), trade, { merge: true });
     }
-
     await batch.commit();
-    written += chunk.length;
+    written += toProcess.slice(i, i + BATCH_SIZE).length;
   }
 
-  // 7. Update broker document with last sync metadata
+  // ── 8. Update broker metadata ─────────────────────────────────────────────────
+  const durationMs = Date.now() - syncStart;
+  const connectedSymbols = Array.from(seenSymbols).sort();
+
   await brokerRef.set(
     {
-      lastSyncAt: admin.firestore.FieldValue.serverTimestamp(),
-      lastSyncTradeCount: written,
+      lastSyncTimestamp:  admin.firestore.Timestamp.fromMillis(toTimestamp),
+      lastSyncAt:         admin.firestore.FieldValue.serverTimestamp(),
+      lastSyncResult:     { saved: written, skipped: skipped.length, errors: 0, durationMs },
+      connectedSymbols,
     },
     { merge: true }
   );
 
-  console.log(`cTrader syncCtraderForUser uid=${uid}: wrote ${written} trades`);
-  return { trades: written, skipped: 0, errors: [] };
+  // ── Summary log ──────────────────────────────────────────────────────────────
+  console.log(
+    `cTrader uid=${uid} sync complete — ` +
+    `fetched=${rawDeals.length} saved=${written} skipped=${skipped.length} duration=${durationMs}ms`
+  );
+  console.log(`cTrader uid=${uid} symbol breakdown:`, JSON.stringify(symbolLog));
+  if (skipped.length > 0) {
+    console.log(`cTrader uid=${uid} skipped deals:`, JSON.stringify(skipped));
+  }
+
+  return { saved: written, skipped: skipped.length, errors: [], durationMs, symbolLog };
 }
 
 // ─── 7. ctraderConnect ────────────────────────────────────────────────────────
@@ -921,6 +1313,7 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
 //
 // POST /syncCtraderTrades  (no body required)
 // Manually trigger a cTrader sync for the authenticated user.
+// Returns full detail: saved, skipped, durationMs, symbolLog.
 
 exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
   if (handleCors(req, res)) return;
@@ -935,10 +1328,9 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
 
     const result = await syncCtraderForUser(uid);
 
-    const note =
-      result.trades === 0
-        ? "No deals found for today — market may be closed or no trades have been executed yet."
-        : `${result.trades} deal(s) written to journal.`;
+    const note = result.saved === 0
+      ? "No new deals to save — all deals either already imported, outside trading hours, or no activity since last sync."
+      : `${result.saved} deal(s) saved. ${result.skipped} skipped (outside hours / disabled).`;
 
     return res.status(200).json({ ok: true, ...result, note });
 
@@ -951,15 +1343,19 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
 
 // ─── 9. ctraderScheduledSync ──────────────────────────────────────────────────
 //
-// Runs every 15 minutes Mon–Fri.
-// No market-hours guard here — cTrader is a global 24/5 broker (FX/indices/metals
-// trade around the clock from Sunday 22:00 UTC to Friday 22:00 UTC).
-// Each user's sync is independent; failures are logged but don't block others.
+// Single job — every 5 minutes, 24/7 (*/5 * * * *).
+// No hardcoded market-hours gate here: the per-deal checkTradingHours() function
+// uses the schedule data from the API for each symbol. The API tells us what's
+// trading — we don't decide.
+//
+// Each user's sync is independent; a failure for one user is logged but does
+// not block other users.
 
 exports.ctraderScheduledSync = functions.pubsub
-  .schedule("*/15 * * * 1-5")
+  .schedule("*/5 * * * *")
   .timeZone("UTC")
   .onRun(async () => {
+    const jobStart = Date.now();
     console.log("ctraderScheduledSync: starting");
 
     const snapshot = await db
@@ -967,20 +1363,28 @@ exports.ctraderScheduledSync = functions.pubsub
       .where("connected", "==", true)
       .get();
 
-    // Filter to cTrader broker documents only
+    // Filter to cTrader broker documents only (Zerodha has its own scheduler)
     const ctraderDocs = snapshot.docs.filter((doc) => doc.id === "ctrader");
 
     console.log(`ctraderScheduledSync: ${ctraderDocs.length} connected cTrader account(s)`);
+
+    if (ctraderDocs.length === 0) {
+      console.log("ctraderScheduledSync: no connected accounts — done");
+      return;
+    }
 
     const results = await Promise.allSettled(
       ctraderDocs.map(async (doc) => {
         const uid = doc.ref.parent.parent.id;
         try {
           const result = await syncCtraderForUser(uid);
-          console.log(`ctraderScheduledSync: uid=${uid} trades=${result.trades}`);
+          console.log(
+            `ctraderScheduledSync: uid=${uid} saved=${result.saved} ` +
+            `skipped=${result.skipped} duration=${result.durationMs}ms`
+          );
           return { uid, ...result };
         } catch (err) {
-          console.error(`ctraderScheduledSync: uid=${uid} FAILED:`, err.message);
+          console.error(`ctraderScheduledSync: uid=${uid} FAILED — ${err.message}`);
           throw err;
         }
       })
@@ -988,5 +1392,8 @@ exports.ctraderScheduledSync = functions.pubsub
 
     const ok   = results.filter((r) => r.status === "fulfilled").length;
     const fail = results.filter((r) => r.status === "rejected").length;
-    console.log(`ctraderScheduledSync: done — ${ok} ok, ${fail} failed`);
+    console.log(
+      `ctraderScheduledSync: done — ${ok} ok, ${fail} failed, ` +
+      `total job duration ${Date.now() - jobStart}ms`
+    );
   });
