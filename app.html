@@ -1566,6 +1566,45 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                   </div>
                 </div>
                 <div id="zerodha-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
+
+                <!-- cTrader row -->
+                <div class="s-row" id="ctrader-connect-row" style="margin-top:8px">
+                  <div class="s-row-left">
+                    <div class="s-row-label" style="display:flex;align-items:center;gap:8px">
+                      <img src="https://ctrader.com/favicon.ico" width="16" height="16" style="border-radius:3px" onerror="this.style.display='none'">
+                      cTrader (The5ers / prop firms)
+                    </div>
+                    <div class="s-row-desc" id="ctrader-status-desc">Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades</div>
+                  </div>
+                  <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
+                    <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
+                    <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
+                    <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
+                    <button class="btn-ghost" id="ctrader-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectCtrader()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
+                  </div>
+                </div>
+                <div id="ctrader-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
+              </div>
+
+              <!-- cTrader token modal -->
+              <div id="ctrader-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:500;align-items:center;justify-content:center">
+                <div style="background:var(--bg2);border:0.5px solid var(--border2);border-radius:var(--radius-lg);padding:28px;width:460px;max-width:95vw">
+                  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+                    <i class="fa-solid fa-link" style="color:var(--green)"></i>
+                    <span style="font-size:15px;font-weight:500;color:var(--text)">Connect cTrader</span>
+                  </div>
+                  <p style="font-size:12px;color:var(--text2);margin-bottom:20px;line-height:1.6">Paste your cTrader MCP Bearer token. Find it at <strong>cTrader Settings → Advanced → Remote MCP → Copy token</strong>.</p>
+                  <div style="margin-bottom:16px">
+                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Bearer token</label>
+                    <textarea id="ctrader-token-input" rows="4" placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..." style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:11px;color:var(--text);font-family:var(--font-mono);resize:none;outline:none"></textarea>
+                    <div style="font-size:10px;color:var(--text3);margin-top:4px">This token is encrypted and stored securely. Never share it publicly.</div>
+                  </div>
+                  <div id="ctrader-connect-error" style="display:none;font-size:12px;color:var(--red);margin-bottom:12px;padding:8px 10px;background:rgba(226,75,74,0.08);border-radius:6px"></div>
+                  <div style="display:flex;gap:10px;justify-content:flex-end">
+                    <button class="btn-ghost" onclick="closeCtraderModal()">Cancel</button>
+                    <button class="btn-accent" id="ctrader-connect-submit" onclick="connectCtrader()"><i class="fa-solid fa-link"></i> Connect</button>
+                  </div>
+                </div>
               </div>
 
               <div class="s-section" style="margin-top:16px">
@@ -2060,6 +2099,8 @@ function bootApp(user){
     handleZerodhaCallback();
     // Check Zerodha connection status
     setTimeout(checkZerodhaStatus, 1000);
+    // Check cTrader connection status
+    setTimeout(checkCtraderStatus, 1200);
   },420);
 }
 
@@ -2072,7 +2113,107 @@ document.addEventListener('firebase-ready',()=>{
   });
 });
 
-// ── ZERODHA INTEGRATION ──
+// ── CTRADER INTEGRATION ──
+const CTRADER_FN = 'https://us-central1-edgebook-2dce2.cloudfunctions.net';
+
+function openCtraderModal(){
+  const modal = document.getElementById('ctrader-modal');
+  modal.style.display = 'flex';
+  document.getElementById('ctrader-token-input').value = '';
+  document.getElementById('ctrader-connect-error').style.display = 'none';
+}
+
+function closeCtraderModal(){
+  document.getElementById('ctrader-modal').style.display = 'none';
+}
+
+async function connectCtrader(){
+  const token = document.getElementById('ctrader-token-input').value.trim();
+  if(!token){ showCtraderError('Please paste your cTrader Bearer token.'); return; }
+  const btn = document.getElementById('ctrader-connect-submit');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting…';
+  document.getElementById('ctrader-connect-error').style.display = 'none';
+  try{
+    const idToken = await getIdToken();
+    const res = await fetch(`${CTRADER_FN}/ctraderConnect`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bearerToken: token })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Connection failed');
+    closeCtraderModal();
+    updateCtraderUI(true);
+    showToast('cTrader connected! Syncing your trades…', 'success');
+    setTimeout(syncCtraderTrades, 1500);
+  } catch(e){
+    showCtraderError(e.message || 'Failed to connect. Check your token and try again.');
+  }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-link"></i> Connect';
+}
+
+function showCtraderError(msg){
+  const el = document.getElementById('ctrader-connect-error');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+async function syncCtraderTrades(){
+  const token = await getIdToken(); if(!token) return;
+  const btn = document.getElementById('ctrader-sync-btn');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Syncing…';
+  try{
+    const res = await fetch(`${CTRADER_FN}/syncCtraderTrades`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const data = await res.json();
+    if(data.synced > 0){
+      trades = DataStore.loadTrades();
+      refreshAll();
+      showToast(`${data.synced} new trades synced from cTrader`, 'success');
+    } else {
+      showToast(data.note || 'No new trades to sync', 'info');
+    }
+    const ls = document.getElementById('ctrader-last-sync');
+    if(ls){ ls.textContent = `Last synced: ${new Date().toLocaleString('en-IN')}`; ls.style.display = 'block'; }
+  } catch(e){ showToast('cTrader sync failed. Try again.', 'error'); }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sync now';
+}
+
+async function disconnectCtrader(){
+  if(!confirm('Disconnect cTrader? Auto-sync will stop.')) return;
+  const token = await getIdToken(); if(!token) return;
+  try{
+    await window._fbSetDoc(window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', 'ctrader'), { connected: false, bearerToken: null });
+    updateCtraderUI(false);
+    showToast('cTrader disconnected', 'success');
+  } catch(e){ showToast('Failed to disconnect', 'error'); }
+}
+
+function updateCtraderUI(connected){
+  document.getElementById('ctrader-connect-btn').style.display = connected ? 'none' : 'inline-flex';
+  document.getElementById('ctrader-disconnect-btn').style.display = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-sync-btn').style.display = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-status-badge').style.display = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-last-sync').style.display = connected ? 'block' : 'none';
+  document.getElementById('ctrader-status-desc').textContent = connected
+    ? 'Trades sync automatically every 15 mins during market hours'
+    : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
+}
+
+async function checkCtraderStatus(){
+  if(!window._firebaseReady || DataStore._uid === 'guest') return;
+  try{
+    const snap = await window._fbGetDoc(window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', 'ctrader'));
+    if(snap.exists() && snap.data().connected){
+      updateCtraderUI(true);
+      const ls = snap.data().lastSync;
+      if(ls){ const el = document.getElementById('ctrader-last-sync'); if(el) el.textContent = `Last synced: ${new Date(ls).toLocaleString('en-IN')}`; }
+    }
+  } catch(e){}
+}
+
+
 const ZERODHA_FN = 'https://us-central1-edgebook-2dce2.cloudfunctions.net';
 
 async function getIdToken(){
