@@ -62,11 +62,13 @@ node_modules/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file — includes Zerodha secrets, NEVER commit
+# dotenv environment variables file — includes secrets, NEVER commit
 .env
 .env.*
 functions/.env
 functions/.env.*
+# Allow .env.example (no secrets — documents required vars)
+!functions/.env.example
 
 # dataconnect generated files
 .dataconnect

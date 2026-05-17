@@ -51,6 +51,18 @@ function getApiSecret() {
   return secret;
 }
 
+/**
+ * cTrader Open API app credentials — required for token refresh.
+ * Returns null (does NOT throw) if unset, so callers can degrade gracefully
+ * and log a clear message rather than crashing unrelated syncs.
+ */
+function getCtraderClientId() {
+  return process.env.CTRADER_CLIENT_ID || null;
+}
+function getCtraderClientSecret() {
+  return process.env.CTRADER_CLIENT_SECRET || null;
+}
+
 function getEncryptionKey() {
   const keyHex = process.env.ZERODHA_ENCRYPTION_KEY;
   if (!keyHex) throw new Error("ZERODHA_ENCRYPTION_KEY env var is not set — add it to functions/.env");
@@ -1043,6 +1055,138 @@ function normaliseDeal(rawDeal, symbolInfo) {
  *
  * Returns { saved, skipped, errors, durationMs, symbolLog }
  */
+
+// ─── Token refresh ───────────────────────────────────────────────────────────
+//
+// Called automatically before sync when token is within 7 days of expiry.
+// Refresh endpoint: POST https://openapi.ctrader.com/apps/token
+//   ?grant_type=refresh_token
+//   &refresh_token=<token>
+//   &client_id=<CTRADER_CLIENT_ID>
+//   &client_secret=<CTRADER_CLIENT_SECRET>
+//
+// On success  → updates Firestore with new access + refresh tokens and new
+//               tokenExpiresAt (derived from expiresIn in the API response —
+//               never hardcoded).
+// On failure  → marks connected: false so the user is prompted to reconnect.
+//               Returns the error rather than throwing so the caller can
+//               surface a user-friendly message.
+
+const CTRADER_TOKEN_URL = "https://openapi.ctrader.com/apps/token";
+const TOKEN_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+
+/**
+ * Attempt to refresh the cTrader access token using the stored refresh token.
+ * Returns the new bearer token string on success.
+ * Marks the account disconnected and throws on failure.
+ */
+async function refreshCtraderToken(uid, brokerRef, brokerData) {
+  const clientId     = getCtraderClientId();
+  const clientSecret = getCtraderClientSecret();
+
+  if (!clientId || !clientSecret) {
+    const msg =
+      `cTrader token refresh skipped for uid=${uid}: ` +
+      `CTRADER_CLIENT_ID / CTRADER_CLIENT_SECRET not set in functions/.env. ` +
+      `Add these to enable auto-refresh.`;
+    console.warn(msg);
+    // Return the existing token — sync will proceed, expiry will just tick down
+    return decrypt(brokerData.accessToken);
+  }
+
+  if (!brokerData.refreshToken) {
+    const msg = `cTrader uid=${uid}: no refresh token stored — user must reconnect to enable auto-refresh`;
+    console.warn(msg);
+    return decrypt(brokerData.accessToken); // proceed with current token
+  }
+
+  const refreshToken = decrypt(brokerData.refreshToken);
+  console.log(`cTrader uid=${uid}: token within 7-day expiry window — attempting refresh`);
+
+  const url = new URL(CTRADER_TOKEN_URL);
+  url.searchParams.set("grant_type",    "refresh_token");
+  url.searchParams.set("refresh_token", refreshToken);
+  url.searchParams.set("client_id",     clientId);
+  url.searchParams.set("client_secret", clientSecret);
+
+  let tokenRes;
+  try {
+    tokenRes = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "Accept": "application/json" },
+    });
+  } catch (netErr) {
+    throw new Error(`cTrader token refresh network error for uid=${uid}: ${netErr.message}`);
+  }
+
+  const body = await tokenRes.text();
+  let tokenData;
+  try {
+    tokenData = JSON.parse(body);
+  } catch {
+    throw new Error(`cTrader token refresh: non-JSON response (HTTP ${tokenRes.status}): ${body.slice(0, 200)}`);
+  }
+
+  if (!tokenRes.ok || tokenData.error) {
+    // Refresh failed — token is revoked or invalid; mark disconnected
+    const errDetail = tokenData.error_description ?? tokenData.error ?? body.slice(0, 200);
+    console.error(
+      `cTrader uid=${uid}: token refresh FAILED (HTTP ${tokenRes.status}) — ${errDetail}. ` +
+      `Marking account disconnected. User must reconnect.`
+    );
+    await brokerRef.set(
+      {
+        connected:          false,
+        tokenRefreshFailed: true,
+        tokenRefreshError:  errDetail,
+        tokenRefreshFailedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    const err = new Error(
+      `cTrader token refresh failed — please reconnect your account. Reason: ${errDetail}`
+    );
+    err.code = "TOKEN_REFRESH_FAILED";
+    throw err;
+  }
+
+  // Success — read expiry from API response, not hardcoded
+  const newAccessToken  = tokenData.access_token  ?? tokenData.accessToken;
+  const newRefreshToken = tokenData.refresh_token  ?? tokenData.refreshToken ?? refreshToken;
+  const expiresIn       = Number(tokenData.expires_in ?? tokenData.expiresIn ?? 0);
+
+  if (!newAccessToken) {
+    throw new Error(`cTrader token refresh: response missing access_token — ${body.slice(0, 200)}`);
+  }
+  if (!Number.isFinite(expiresIn) || expiresIn <= 0) {
+    throw new Error(
+      `cTrader token refresh: response missing or invalid expires_in (got "${tokenData.expires_in}") — ` +
+      `cannot calculate tokenExpiresAt`
+    );
+  }
+
+  const newExpiresAtMs = Date.now() + expiresIn * 1000;
+  console.log(
+    `cTrader uid=${uid}: token refreshed successfully. ` +
+    `New token expires in ${expiresIn}s (${new Date(newExpiresAtMs).toISOString()})`
+  );
+
+  await brokerRef.set(
+    {
+      accessToken:      encrypt(newAccessToken),
+      refreshToken:     encrypt(newRefreshToken),
+      tokenExpiresAt:   admin.firestore.Timestamp.fromMillis(newExpiresAtMs),
+      tokenExpiresIn:   expiresIn,
+      tokenRefreshFailed: false,
+      tokenRefreshError:  null,
+      lastTokenRefreshAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return newAccessToken;
+}
+
 async function syncCtraderForUser(uid) {
   const syncStart = Date.now();
 
@@ -1055,7 +1199,25 @@ async function syncCtraderForUser(uid) {
   }
 
   const brokerData = brokerSnap.data();
-  const bearerToken = decrypt(brokerData.accessToken);
+
+  // ── 1b. Check token expiry — auto-refresh if within 7 days ─────────────────
+  let bearerToken;
+  const tokenExpiresAt = brokerData.tokenExpiresAt?.toMillis?.() ?? null;
+  const msUntilExpiry  = tokenExpiresAt ? tokenExpiresAt - Date.now() : null;
+  const daysUntilExpiry = msUntilExpiry != null ? Math.floor(msUntilExpiry / 86400000) : null;
+
+  if (msUntilExpiry !== null && msUntilExpiry <= TOKEN_REFRESH_THRESHOLD_MS) {
+    console.log(
+      `cTrader uid=${uid}: token expires in ${daysUntilExpiry} day(s) ` +
+      `(${tokenExpiresAt ? new Date(tokenExpiresAt).toISOString() : "unknown"}) — triggering auto-refresh`
+    );
+    bearerToken = await refreshCtraderToken(uid, brokerRef, brokerData);
+  } else {
+    bearerToken = decrypt(brokerData.accessToken);
+    if (daysUntilExpiry !== null) {
+      console.log(`cTrader uid=${uid}: token valid for ${daysUntilExpiry} more day(s)`);
+    }
+  }
 
   // Use lastSyncTimestamp for incremental sync; default to start of today (UTC)
   let fromTimestamp;
@@ -1251,22 +1413,25 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const { bearerToken } = req.body || {};
+    const { bearerToken, refreshToken } = req.body || {};
     if (!bearerToken || typeof bearerToken !== "string" || bearerToken.trim() === "") {
       return res.status(400).json({ error: "bearerToken is required in request body" });
     }
 
+    const cleanBearer  = bearerToken.trim();
+    const cleanRefresh = (refreshToken && typeof refreshToken === "string") ? refreshToken.trim() : null;
+
     // Validate token by opening a session and fetching balance
     let sessionId;
     try {
-      sessionId = await initCtraderSession(bearerToken);
+      sessionId = await initCtraderSession(cleanBearer);
     } catch (err) {
       return res.status(401).json({ error: `cTrader authentication failed: ${err.message}` });
     }
 
     let balance;
     try {
-      balance = await callCtraderTool(bearerToken, sessionId, "get_balance");
+      balance = await callCtraderTool(cleanBearer, sessionId, "get_balance");
     } catch (err) {
       return res.status(401).json({ error: `cTrader get_balance failed: ${err.message}` });
     }
@@ -1274,32 +1439,67 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
     // Fetch and cache symbol map on first connect (force refresh)
     let symbolCount;
     try {
-      const symbolMap = await getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh: true });
+      const symbolMap = await getVerifiedSymbolMap(cleanBearer, sessionId, { forceRefresh: true });
       symbolCount = Object.keys(symbolMap).length;
     } catch (err) {
-      // Symbol map failure is fatal — we cannot safely import trades without it
       return res.status(502).json({ error: `cTrader symbol map fetch failed: ${err.message}` });
     }
 
-    // Store encrypted token
+    // Token expiry: cTrader access tokens expire in expiresIn seconds per the Open API spec.
+    // We cannot retrieve expiresIn from a pre-obtained bearer token, so we use the
+    // documented value of 2,628,000 seconds (~30 days) as the initial calculation.
+    // On every subsequent auto-refresh the actual expiresIn from the API response is used.
+    const CTRADER_ACCESS_TOKEN_EXPIRY_S = 2_628_000; // from cTrader Open API docs
+    const tokenExpiresAtMs = Date.now() + CTRADER_ACCESS_TOKEN_EXPIRY_S * 1000;
+
+    const brokerPayload = {
+      connected:       true,
+      accessToken:     encrypt(cleanBearer),
+      connectedAt:     admin.firestore.FieldValue.serverTimestamp(),
+      symbolCount,
+      tokenExpiresAt:  admin.firestore.Timestamp.fromMillis(tokenExpiresAtMs),
+      tokenExpiresIn:  CTRADER_ACCESS_TOKEN_EXPIRY_S,
+      tokenRefreshFailed: false,
+      tokenRefreshError:  null,
+      // Balance snapshot for UI display (no sensitive trading data)
+      accountBalance:  typeof balance === "object" ? (balance.balance ?? balance.equity ?? null) : null,
+      accountCurrency: typeof balance === "object" ? (balance.currency ?? null) : null,
+    };
+
+    // Store refresh token encrypted if provided — required for auto-refresh
+    if (cleanRefresh) {
+      brokerPayload.refreshToken = encrypt(cleanRefresh);
+      console.log(`ctraderConnect: uid=${uid} refresh token provided — auto-refresh enabled`);
+    } else {
+      // Explicitly null out any stale refresh token
+      brokerPayload.refreshToken = null;
+      console.warn(
+        `ctraderConnect: uid=${uid} no refresh token provided — auto-refresh disabled. ` +
+        `Token will expire on ${new Date(tokenExpiresAtMs).toISOString()}.`
+      );
+    }
+
     await db
       .collection("users").doc(uid)
       .collection("brokers").doc("ctrader")
-      .set({
-        connected:    true,
-        accessToken:  encrypt(bearerToken.trim()),
-        connectedAt:  admin.firestore.FieldValue.serverTimestamp(),
-        symbolCount,
-        // Store a snippet of balance info for the UI (no sensitive data)
-        accountBalance: typeof balance === "object" ? (balance.balance ?? balance.equity ?? null) : null,
-        accountCurrency: typeof balance === "object" ? (balance.currency ?? null) : null,
-      }, { merge: true });
+      .set(brokerPayload, { merge: true });
 
-    console.log(`ctraderConnect: uid=${uid} connected, symbolCount=${symbolCount}`);
+    console.log(
+      `ctraderConnect: uid=${uid} connected — symbolCount=${symbolCount} ` +
+      `tokenExpiresAt=${new Date(tokenExpiresAtMs).toISOString()} ` +
+      `refreshToken=${cleanRefresh ? "stored" : "not provided"}`
+    );
+
     return res.status(200).json({
-      ok: true,
-      message: "cTrader connected successfully",
+      ok:                 true,
+      message:            "cTrader connected successfully",
       symbolCount,
+      tokenExpiresAt:     tokenExpiresAtMs,
+      tokenExpiresAtISO:  new Date(tokenExpiresAtMs).toISOString(),
+      autoRefreshEnabled: !!cleanRefresh,
+      warning:            !cleanRefresh
+        ? "No refresh token provided. Token will expire in ~30 days. Paste your refresh token to enable auto-renewal."
+        : null,
     });
 
   } catch (err) {

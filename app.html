@@ -1576,8 +1576,9 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                     </div>
                     <div class="s-row-desc" id="ctrader-status-desc">Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades</div>
                   </div>
-                  <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
+                  <div class="s-row-right" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
                     <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
+                    <span id="ctrader-expiry-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(245,158,11,0.12);color:#f59e0b;border:0.5px solid rgba(245,158,11,0.35);cursor:default" title="Token expiry warning"></span>
                     <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
                     <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
                     <button class="btn-ghost" id="ctrader-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectCtrader()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
@@ -1588,16 +1589,23 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
 
               <!-- cTrader token modal -->
               <div id="ctrader-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:500;align-items:center;justify-content:center">
-                <div style="background:var(--bg2);border:0.5px solid var(--border2);border-radius:var(--radius-lg);padding:28px;width:460px;max-width:95vw">
+                <div style="background:var(--bg2);border:0.5px solid var(--border2);border-radius:var(--radius-lg);padding:28px;width:480px;max-width:95vw">
                   <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
                     <i class="fa-solid fa-link" style="color:var(--green)"></i>
                     <span style="font-size:15px;font-weight:500;color:var(--text)">Connect cTrader</span>
                   </div>
-                  <p style="font-size:12px;color:var(--text2);margin-bottom:20px;line-height:1.6">Paste your cTrader MCP Bearer token. Find it at <strong>cTrader Settings → Advanced → Remote MCP → Copy token</strong>.</p>
-                  <div style="margin-bottom:16px">
-                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Bearer token</label>
-                    <textarea id="ctrader-token-input" rows="4" placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..." style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:11px;color:var(--text);font-family:var(--font-mono);resize:none;outline:none"></textarea>
-                    <div style="font-size:10px;color:var(--text3);margin-top:4px">This token is encrypted and stored securely. Never share it publicly.</div>
+                  <p style="font-size:12px;color:var(--text2);margin-bottom:16px;line-height:1.6">Paste your cTrader Open API tokens below. Both tokens are encrypted and never leave your account.</p>
+                  <!-- Bearer / Access token -->
+                  <div style="margin-bottom:14px">
+                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Access token (Bearer) <span style="color:var(--red)">*</span></label>
+                    <textarea id="ctrader-token-input" rows="3" placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9…" style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:11px;color:var(--text);font-family:var(--font-mono);resize:none;outline:none;box-sizing:border-box"></textarea>
+                    <div style="font-size:10px;color:var(--text3);margin-top:3px">From cTrader Settings → Advanced → Remote MCP → Copy token. Expires in ~30 days.</div>
+                  </div>
+                  <!-- Refresh token -->
+                  <div style="margin-bottom:14px">
+                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Refresh token <span style="font-size:10px;font-weight:400;color:var(--text3);text-transform:none">(optional — enables auto-renewal)</span></label>
+                    <textarea id="ctrader-refresh-input" rows="2" placeholder="Paste your refresh token here to auto-renew access without reconnecting…" style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:11px;color:var(--text);font-family:var(--font-mono);resize:none;outline:none;box-sizing:border-box"></textarea>
+                    <div style="font-size:10px;color:var(--text3);margin-top:3px">From the same OAuth response. Without this, you'll need to reconnect every 30 days.</div>
                   </div>
                   <div id="ctrader-connect-error" style="display:none;font-size:12px;color:var(--red);margin-bottom:12px;padding:8px 10px;background:rgba(226,75,74,0.08);border-radius:6px"></div>
                   <div style="display:flex;gap:10px;justify-content:flex-end">
@@ -2120,6 +2128,7 @@ function openCtraderModal(){
   const modal = document.getElementById('ctrader-modal');
   modal.style.display = 'flex';
   document.getElementById('ctrader-token-input').value = '';
+  document.getElementById('ctrader-refresh-input').value = '';
   document.getElementById('ctrader-connect-error').style.display = 'none';
 }
 
@@ -2128,8 +2137,9 @@ function closeCtraderModal(){
 }
 
 async function connectCtrader(){
-  const token = document.getElementById('ctrader-token-input').value.trim();
-  if(!token){ showCtraderError('Please paste your cTrader Bearer token.'); return; }
+  const bearerToken  = document.getElementById('ctrader-token-input').value.trim();
+  const refreshToken = document.getElementById('ctrader-refresh-input').value.trim();
+  if(!bearerToken){ showCtraderError('Please paste your cTrader Bearer (access) token.'); return; }
   const btn = document.getElementById('ctrader-connect-submit');
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Connecting…';
   document.getElementById('ctrader-connect-error').style.display = 'none';
@@ -2138,13 +2148,16 @@ async function connectCtrader(){
     const res = await fetch(`${CTRADER_FN}/ctraderConnect`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bearerToken: token })
+      body: JSON.stringify({ bearerToken, ...(refreshToken && { refreshToken }) })
     });
     const data = await res.json();
     if(!res.ok || data.error) throw new Error(data.error || 'Connection failed');
     closeCtraderModal();
-    updateCtraderUI(true);
-    showToast('cTrader connected! Syncing your trades…', 'success');
+    // Show expiry info immediately after connect
+    const expiresAtMs = data.tokenExpiresAt || null;
+    updateCtraderUI(true, expiresAtMs);
+    if(data.warning) showToast(data.warning, 'warning');
+    else showToast('cTrader connected! Syncing your trades…', 'success');
     setTimeout(syncCtraderTrades, 1500);
   } catch(e){
     showCtraderError(e.message || 'Failed to connect. Check your token and try again.');
@@ -2167,10 +2180,16 @@ async function syncCtraderTrades(){
       headers: { Authorization: `Bearer ${token}` }
     });
     const data = await res.json();
-    if(data.synced > 0){
+    // Handle token refresh failure — prompt reconnect
+    if(!res.ok && data.code === 'TOKEN_REFRESH_FAILED'){
+      updateCtraderUI(false);
+      showToast('cTrader token expired. Please reconnect your account.', 'error');
+      return;
+    }
+    if(data.saved > 0){
       trades = DataStore.loadTrades();
       refreshAll();
-      showToast(`${data.synced} new trades synced from cTrader`, 'success');
+      showToast(`${data.saved} new trade(s) synced from cTrader`, 'success');
     } else {
       showToast(data.note || 'No new trades to sync', 'info');
     }
@@ -2184,33 +2203,102 @@ async function disconnectCtrader(){
   if(!confirm('Disconnect cTrader? Auto-sync will stop.')) return;
   const token = await getIdToken(); if(!token) return;
   try{
-    await window._fbSetDoc(window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', 'ctrader'), { connected: false, bearerToken: null });
+    await window._fbSetDoc(window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', 'ctrader'),
+      { connected: false, accessToken: null, refreshToken: null }, { merge: true });
     updateCtraderUI(false);
     showToast('cTrader disconnected', 'success');
   } catch(e){ showToast('Failed to disconnect', 'error'); }
 }
 
-function updateCtraderUI(connected){
-  document.getElementById('ctrader-connect-btn').style.display = connected ? 'none' : 'inline-flex';
+/**
+ * Update cTrader status UI.
+ * connected  — true/false
+ * tokenExpiresAtMs — Unix ms timestamp from Firestore (optional)
+ */
+function updateCtraderUI(connected, tokenExpiresAtMs){
+  document.getElementById('ctrader-connect-btn').style.display    = connected ? 'none'        : 'inline-flex';
   document.getElementById('ctrader-disconnect-btn').style.display = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-sync-btn').style.display = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-status-badge').style.display = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-last-sync').style.display = connected ? 'block' : 'none';
+  document.getElementById('ctrader-sync-btn').style.display       = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-status-badge').style.display   = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-last-sync').style.display      = connected ? 'block'       : 'none';
   document.getElementById('ctrader-status-desc').textContent = connected
-    ? 'Trades sync automatically every 15 mins during market hours'
-    : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
+    ? 'Trades sync automatically every 5 mins, 24/7'
+    : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver, indices trades';
+
+  // Token expiry badge — amber warning if < 7 days, red if < 1 day
+  const expiryBadge = document.getElementById('ctrader-expiry-badge');
+  if(!connected || !tokenExpiresAtMs){ expiryBadge.style.display = 'none'; return; }
+
+  const msLeft   = tokenExpiresAtMs - Date.now();
+  const daysLeft = Math.floor(msLeft / 86400000);
+  const hoursLeft = Math.floor((msLeft % 86400000) / 3600000);
+
+  if(msLeft <= 0){
+    expiryBadge.style.display = 'inline-flex';
+    expiryBadge.style.background = 'rgba(226,75,74,0.12)';
+    expiryBadge.style.color = 'var(--red)';
+    expiryBadge.style.borderColor = 'rgba(226,75,74,0.35)';
+    expiryBadge.textContent = '⚠ Token expired — reconnect';
+    expiryBadge.title = 'Your cTrader access token has expired. Click Disconnect and reconnect to resume syncing.';
+  } else if(daysLeft < 1){
+    expiryBadge.style.display = 'inline-flex';
+    expiryBadge.style.background = 'rgba(226,75,74,0.12)';
+    expiryBadge.style.color = 'var(--red)';
+    expiryBadge.style.borderColor = 'rgba(226,75,74,0.35)';
+    expiryBadge.textContent = `⚠ Token expires in ${hoursLeft}h`;
+    expiryBadge.title = `Token expires ${new Date(tokenExpiresAtMs).toLocaleString()}. Reconnect now to avoid disruption.`;
+  } else if(daysLeft <= 7){
+    expiryBadge.style.display = 'inline-flex';
+    expiryBadge.style.background = 'rgba(245,158,11,0.12)';
+    expiryBadge.style.color = '#f59e0b';
+    expiryBadge.style.borderColor = 'rgba(245,158,11,0.35)';
+    expiryBadge.textContent = `⚠ Token expires in ${daysLeft}d`;
+    expiryBadge.title = `Token expires ${new Date(tokenExpiresAtMs).toLocaleString()}. Reconnect or ensure a refresh token is stored.`;
+  } else {
+    expiryBadge.style.display = 'none';
+  }
 }
 
 async function checkCtraderStatus(){
   if(!window._firebaseReady || DataStore._uid === 'guest') return;
   try{
     const snap = await window._fbGetDoc(window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', 'ctrader'));
-    if(snap.exists() && snap.data().connected){
-      updateCtraderUI(true);
-      const ls = snap.data().lastSync;
-      if(ls){ const el = document.getElementById('ctrader-last-sync'); if(el) el.textContent = `Last synced: ${new Date(ls).toLocaleString('en-IN')}`; }
+    if(!snap.exists()){ updateCtraderUI(false); return; }
+    const data = snap.data();
+    if(!data.connected){ updateCtraderUI(false); return; }
+
+    // Read tokenExpiresAt — convert Firestore Timestamp to ms
+    let tokenExpiresAtMs = null;
+    if(data.tokenExpiresAt){
+      tokenExpiresAtMs = typeof data.tokenExpiresAt.toMillis === 'function'
+        ? data.tokenExpiresAt.toMillis()
+        : Number(data.tokenExpiresAt);
     }
-  } catch(e){}
+
+    updateCtraderUI(true, tokenExpiresAtMs);
+
+    // Last sync display — prefer lastSyncAt, fall back to lastSync
+    const lastSyncRaw = data.lastSyncAt ?? data.lastSync;
+    if(lastSyncRaw){
+      const lastSyncMs = typeof lastSyncRaw.toMillis === 'function' ? lastSyncRaw.toMillis() : Number(lastSyncRaw);
+      const el = document.getElementById('ctrader-last-sync');
+      if(el) el.textContent = `Last synced: ${new Date(lastSyncMs).toLocaleString('en-IN')}`;
+    }
+
+    // Proactive 7-day warning toast (only once per session)
+    if(tokenExpiresAtMs && !window._ctraderExpiryWarned){
+      const daysLeft = Math.floor((tokenExpiresAtMs - Date.now()) / 86400000);
+      if(daysLeft <= 7 && daysLeft >= 0){
+        window._ctraderExpiryWarned = true;
+        showToast(
+          daysLeft < 1
+            ? 'cTrader token expires today — reconnect immediately!'
+            : `cTrader token expires in ${daysLeft} day(s). Reconnect or ensure a refresh token is stored.`,
+          daysLeft < 2 ? 'error' : 'warning'
+        );
+      }
+    }
+  } catch(e){ console.warn('checkCtraderStatus error:', e); }
 }
 
 
