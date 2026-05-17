@@ -1749,22 +1749,21 @@ exports.syncCtraderHistory = functions
 
       // ── 4+5. Fetch all pages of historical deals ────────────────────────────
 
-      // fromTimestamp: accept from request body, default to 2019-01-01 00:00 UTC
-      const DEFAULT_HISTORY_FROM = new Date("2019-01-01T00:00:00Z").getTime();
-      const fromTimestamp = Number(req.body?.fromTimestamp ?? DEFAULT_HISTORY_FROM);
-      const toTimestamp   = Date.now();
+      // fromTimestamp: accept from request body; if absent, fetchAllHistoricalDeals
+      // will call getCtraderAccountStartDate() to determine the account creation date
+      // (or fall back to 2 years ago). Pass null to trigger that auto-discovery.
+      const explicitFrom = req.body?.fromTimestamp != null
+        ? Number(req.body.fromTimestamp)
+        : null;
 
-      if (!Number.isFinite(fromTimestamp) || fromTimestamp < 0) {
+      if (explicitFrom !== null && (!Number.isFinite(explicitFrom) || explicitFrom < 0)) {
         return res.status(400).json({ error: "Invalid fromTimestamp — must be a Unix ms number" });
       }
 
-      console.log(
-        `syncCtraderHistory uid=${uid}: fetching deals ` +
-        `${new Date(fromTimestamp).toISOString()} → ${new Date(toTimestamp).toISOString()}`
-      );
+      const toTimestamp = Date.now();
 
       const allDeals = await fetchAllHistoricalDeals(
-        bearerToken, sessionId, uid, fromTimestamp, toTimestamp
+        bearerToken, sessionId, uid, explicitFrom, toTimestamp
       );
 
       console.log(`syncCtraderHistory uid=${uid}: total deals fetched across all pages = ${allDeals.length}`);
@@ -1905,158 +1904,260 @@ exports.syncCtraderHistory = functions
 // ─── Helpers for syncCtraderHistory ──────────────────────────────────────────
 
 /**
- * Fetch ALL historical deals, handling whatever pagination format the API uses.
+ * Probe the cTrader MCP for the account creation date using any available
+ * account-info endpoints. If none of them returns a usable date, we fall back
+ * to 2 years ago and log clearly so the fallback is visible in Cloud Logging.
  *
- * On the first page we log the full raw response shape so the pagination
- * format is visible in Cloud Logging. We then loop until we detect there are
- * no more pages.
- *
- * Supported pagination formats detected from response:
- *   A. { deals:[...], hasMore: true, nextFrom: <ts> }     → re-call with fromTimestamp=nextFrom
- *   B. { deals:[...], cursor: "<string>" }                 → re-call with cursor=cursor
- *   C. { deals:[...], offset: N, total: N, limit: N }     → re-call with offset+=limit
- *   D. No pagination fields → single-page response, done
+ * Endpoints tried (in order):
+ *   get_account  → looks for createdAt / created_at / registrationDate / openDate
+ *   get_accountinfo → same field names
+ *   get_account_info → same field names
  */
-async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs) {
-  const allDeals = [];
-  let   page     = 0;
-  let   cursor   = null;   // for cursor-based pagination
-  let   offset   = 0;      // for offset-based pagination
+async function getCtraderAccountStartDate(bearerToken, sessionId, uid) {
+  const ENDPOINTS = ["get_account", "get_accountinfo", "get_account_info"];
+  const DATE_FIELDS = [
+    "createdAt", "created_at", "registrationDate", "registration_date",
+    "openDate", "open_date", "accountDate", "startDate", "start_date",
+  ];
 
-  // Safety cap — stop after 200 pages to avoid infinite loops on unexpected APIs
-  const MAX_PAGES = 200;
+  for (const endpoint of ENDPOINTS) {
+    try {
+      const raw = await callCtraderTool(bearerToken, sessionId, endpoint, {});
+      // Could be an object or an array-wrapped object
+      const obj = Array.isArray(raw) ? raw[0] : raw;
+      if (!obj || typeof obj !== "object") continue;
 
-  // ── Discovery probe: call get_deals with NO parameters first ──────────────
-  // This tells us what the API returns by default (and confirms it's reachable).
-  {
-    const probeRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {});
-    console.log(
-      `syncCtraderHistory uid=${uid} get_deals NO-PARAMS probe: ` +
-      `type=${typeof probeRaw} isArray=${Array.isArray(probeRaw)} ` +
-      `keys=${(!Array.isArray(probeRaw) && probeRaw && typeof probeRaw === "object") ? Object.keys(probeRaw).join(", ") : "n/a"} ` +
-      `full=${JSON.stringify(probeRaw).slice(0, 600)}`
-    );
-  }
-
-  while (page < MAX_PAGES) {
-    // cTrader MCP requires timestamps as ISO 8601 strings (not numbers).
-    // Confirmed from MCP error -32602 in Cloud Logging: "expected string, received number".
-    const args = {
-      fromTimestamp: new Date(fromTs).toISOString(),
-      toTimestamp:   new Date(toTs).toISOString(),
-    };
-    if (cursor)     args.cursor = cursor;
-    if (offset > 0) args.offset = offset;
-
-    console.log(
-      `syncCtraderHistory uid=${uid}: requesting page ${page + 1} ` +
-      `from=${args.fromTimestamp} to=${args.toTimestamp}` +
-      (cursor ? ` cursor=${cursor}` : "") +
-      (offset > 0 ? ` offset=${offset}` : "")
-    );
-
-    const raw = await callCtraderTool(bearerToken, sessionId, "get_deals", args);
-
-    // On first page: log full response shape for debugging
-    if (page === 0) {
-      console.log(
-        `syncCtraderHistory uid=${uid} get_deals page 1 raw shape: ` +
-        `type=${typeof raw} isArray=${Array.isArray(raw)} ` +
-        `keys=${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"} ` +
-        `full=${JSON.stringify(raw).slice(0, 600)}`
-      );
-    }
-
-    // If the response is still a string after our fix, it's an API error — surface it clearly
-    if (typeof raw === "string") {
-      throw new Error(`cTrader get_deals returned an error string: ${raw}`);
-    }
-
-    // Unwrap the deals array (same multi-format logic as in syncCtraderForUser)
-    let pageDeals;
-    let paginationMeta = null; // the wrapper object (if any), for pagination fields
-
-    if (Array.isArray(raw)) {
-      pageDeals = raw;
-    } else if (raw && typeof raw === "object") {
-      paginationMeta = raw;
-      if (Array.isArray(raw.deals))        pageDeals = raw.deals;
-      else if (Array.isArray(raw.data))    pageDeals = raw.data;
-      else if (Array.isArray(raw.result))  pageDeals = raw.result;
-      else if (Array.isArray(raw.items))   pageDeals = raw.items;
-      else {
-        const arrayKey = Object.keys(raw).find((k) => Array.isArray(raw[k]));
-        if (arrayKey) {
-          console.log(`syncCtraderHistory uid=${uid}: unwrapping deals via key "${arrayKey}"`);
-          pageDeals = raw[arrayKey];
-        } else if (Object.keys(raw).length === 0) {
-          pageDeals = [];
-        } else {
-          throw new Error(
-            `syncCtraderHistory get_deals page ${page + 1}: object with no array — ` +
-            `keys: ${Object.keys(raw).join(", ")}`
+      for (const field of DATE_FIELDS) {
+        const val = obj[field];
+        if (val == null) continue;
+        // Could be a Unix ms number, a Unix s number, or an ISO string
+        let ts = typeof val === "string" ? Date.parse(val) : Number(val);
+        if (!Number.isFinite(ts) || ts <= 0) continue;
+        // If it looks like Unix seconds (< year 3000 in ms but < 1e12), convert
+        if (ts < 1e12) ts *= 1000;
+        if (ts > 0 && ts < Date.now()) {
+          console.log(
+            `getCtraderAccountStartDate uid=${uid}: found via ${endpoint}.${field} → ` +
+            `${new Date(ts).toISOString()}`
           );
+          return ts;
         }
       }
-    } else {
-      throw new Error(`syncCtraderHistory get_deals page ${page + 1}: unexpected type "${typeof raw}"`);
+      console.log(
+        `getCtraderAccountStartDate uid=${uid}: ${endpoint} responded but no date field found. ` +
+        `Keys: ${Object.keys(obj).join(", ")}`
+      );
+    } catch (err) {
+      console.log(
+        `getCtraderAccountStartDate uid=${uid}: ${endpoint} failed (${err.message}) — trying next`
+      );
     }
+  }
 
-    console.log(`syncCtraderHistory uid=${uid}: page ${page + 1} → ${pageDeals.length} deals`);
-    allDeals.push(...pageDeals);
+  // Fallback: 2 years ago
+  const fallback = Date.now() - 2 * 365 * 24 * 60 * 60 * 1000;
+  console.log(
+    `getCtraderAccountStartDate uid=${uid}: FALLBACK — no account-date endpoint found. ` +
+    `Using 2 years ago = ${new Date(fallback).toISOString()}. ` +
+    `To import further back, pass an explicit fromTimestamp in the request body.`
+  );
+  return fallback;
+}
 
-    // ── Detect and advance pagination ────────────────────────────────────────
-    const meta = paginationMeta ?? {};
+/**
+ * Fetch ALL historical deals across the full date range by splitting into
+ * 720-hour (30-day) chunks — the hard cap enforced by the cTrader MCP API.
+ *
+ * @param {string}      bearerToken  - Decrypted access token
+ * @param {string}      sessionId    - Active MCP session ID
+ * @param {string}      uid          - Firestore user ID (for logging)
+ * @param {number|null} fromTs       - Start of range (Unix ms), or null to auto-discover
+ * @param {number}      toTs         - End of range (Unix ms), usually Date.now()
+ * @returns {Array}  All deals across all chunks, combined
+ */
+async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs) {
+  // Auto-discover account start date if caller passed null
+  if (fromTs === null || fromTs === undefined) {
+    fromTs = await getCtraderAccountStartDate(bearerToken, sessionId, uid);
+  }
 
-    // Format A: hasMore + nextFrom (timestamp-based)
-    if (meta.hasMore === true && meta.nextFrom != null) {
-      fromTs = Number(meta.nextFrom);
-      cursor = null;
-      page++;
-      continue;
-    }
+  const CHUNK_MS  = 720 * 60 * 60 * 1000; // 720 hours = 30 days in ms
+  const MAX_PAGES = 50;                    // per-chunk pagination safety cap
 
-    // Format B: cursor-based
-    if (meta.cursor && meta.cursor !== cursor) {
-      cursor = meta.cursor;
-      page++;
-      continue;
-    }
-    // Also handle nextCursor / next_cursor naming
-    if ((meta.nextCursor || meta.next_cursor) && (meta.nextCursor || meta.next_cursor) !== cursor) {
-      cursor = meta.nextCursor ?? meta.next_cursor;
-      page++;
-      continue;
-    }
+  // Build the list of chunk boundaries up front so we can log "chunk X / N"
+  const chunks = [];
+  let cursor = fromTs;
+  while (cursor < toTs) {
+    const end = Math.min(cursor + CHUNK_MS, toTs);
+    chunks.push({ from: cursor, to: end });
+    cursor = end;
+  }
 
-    // Format C: offset + total + limit
-    if (meta.total != null && meta.limit != null) {
-      const limit = Number(meta.limit);
-      offset += pageDeals.length > 0 ? pageDeals.length : limit;
-      if (offset >= Number(meta.total) || pageDeals.length === 0) {
+  console.log(
+    `fetchAllHistoricalDeals uid=${uid}: ` +
+    `range ${new Date(fromTs).toISOString()} → ${new Date(toTs).toISOString()} ` +
+    `split into ${chunks.length} chunk(s) of ≤720h each`
+  );
+
+  const allDeals = [];
+
+  for (let ci = 0; ci < chunks.length; ci++) {
+    const { from: chunkFrom, to: chunkTo } = chunks[ci];
+    const fromISO = new Date(chunkFrom).toISOString();
+    const toISO   = new Date(chunkTo).toISOString();
+
+    console.log(
+      `fetchAllHistoricalDeals uid=${uid}: ` +
+      `chunk ${ci + 1}/${chunks.length}: ${fromISO} → ${toISO} ` +
+      `(${allDeals.length} deals so far)`
+    );
+
+    // Within each chunk handle any pagination the API may return
+    let chunkDeals   = [];
+    let page         = 0;
+    let pageCursor   = null;
+    let pageOffset   = 0;
+    let chunkFromMs  = chunkFrom; // may advance for hasMore+nextFrom pagination
+
+    while (page < MAX_PAGES) {
+      // cTrader requires ISO 8601 strings — confirmed from Cloud Logging error -32602
+      const args = {
+        fromTimestamp: new Date(chunkFromMs).toISOString(),
+        toTimestamp:   toISO,
+      };
+      if (pageCursor)     args.cursor = pageCursor;
+      if (pageOffset > 0) args.offset = pageOffset;
+
+      const raw = await callCtraderTool(bearerToken, sessionId, "get_deals", args);
+
+      // Log full shape on first page of first chunk for diagnostics
+      if (ci === 0 && page === 0) {
         console.log(
-          `syncCtraderHistory uid=${uid}: offset pagination done ` +
-          `(offset=${offset} total=${meta.total})`
+          `fetchAllHistoricalDeals uid=${uid} chunk 1 page 1 raw shape: ` +
+          `type=${typeof raw} isArray=${Array.isArray(raw)} ` +
+          `keys=${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"} ` +
+          `preview=${JSON.stringify(raw).slice(0, 400)}`
+        );
+      }
+
+      // API error returned as a string — log and skip chunk (don't abort entire import)
+      if (typeof raw === "string") {
+        console.warn(
+          `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1}/${chunks.length} page ${page + 1}: ` +
+          `API returned error string — skipping chunk. Error: ${raw}`
+        );
+        break; // move to next chunk
+      }
+
+      // Unwrap deals array from whatever envelope the API uses
+      let pageDeals;
+      let meta = {};
+
+      if (Array.isArray(raw)) {
+        pageDeals = raw;
+      } else if (raw && typeof raw === "object") {
+        meta = raw;
+        if (Array.isArray(raw.deals))       pageDeals = raw.deals;
+        else if (Array.isArray(raw.data))   pageDeals = raw.data;
+        else if (Array.isArray(raw.result)) pageDeals = raw.result;
+        else if (Array.isArray(raw.items))  pageDeals = raw.items;
+        else {
+          const arrayKey = Object.keys(raw).find((k) => Array.isArray(raw[k]));
+          if (arrayKey) {
+            console.log(
+              `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1}: ` +
+              `unwrapping deals via key "${arrayKey}"`
+            );
+            pageDeals = raw[arrayKey];
+          } else if (Object.keys(raw).length === 0) {
+            pageDeals = [];
+          } else {
+            console.warn(
+              `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
+              `object with no array — keys: ${Object.keys(raw).join(", ")} — skipping chunk`
+            );
+            break;
+          }
+        }
+      } else {
+        console.warn(
+          `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
+          `unexpected type "${typeof raw}" — skipping chunk`
         );
         break;
       }
-      page++;
-      continue;
+
+      if (pageDeals.length === 0) {
+        console.log(
+          `fetchAllHistoricalDeals uid=${uid}: ` +
+          `chunk ${ci + 1}/${chunks.length} page ${page + 1} → 0 deals — moving to next chunk`
+        );
+        break;
+      }
+
+      console.log(
+        `fetchAllHistoricalDeals uid=${uid}: ` +
+        `chunk ${ci + 1}/${chunks.length} page ${page + 1} → ${pageDeals.length} deals`
+      );
+      chunkDeals.push(...pageDeals);
+
+      // ── Advance pagination within this chunk ────────────────────────────────
+
+      // Format A: hasMore + nextFrom
+      if (meta.hasMore === true && meta.nextFrom != null) {
+        chunkFromMs = Number(meta.nextFrom);
+        pageCursor  = null;
+        page++;
+        continue;
+      }
+
+      // Format B: cursor-based (cursor / nextCursor / next_cursor)
+      const nextCur = meta.cursor ?? meta.nextCursor ?? meta.next_cursor ?? null;
+      if (nextCur && nextCur !== pageCursor) {
+        pageCursor = nextCur;
+        page++;
+        continue;
+      }
+
+      // Format C: offset + total
+      if (meta.total != null && meta.limit != null) {
+        pageOffset += pageDeals.length > 0 ? pageDeals.length : Number(meta.limit);
+        if (pageOffset >= Number(meta.total) || pageDeals.length === 0) {
+          console.log(
+            `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1}: ` +
+            `offset pagination done (offset=${pageOffset} total=${meta.total})`
+          );
+          break;
+        }
+        page++;
+        continue;
+      }
+
+      // No pagination → single-page response
+      console.log(
+        `fetchAllHistoricalDeals uid=${uid}: ` +
+        `chunk ${ci + 1}/${chunks.length} complete (${chunkDeals.length} deals, no further pages)`
+      );
+      break;
     }
 
-    // No pagination detected, or page was empty → done
-    if (pageDeals.length === 0) {
-      console.log(`syncCtraderHistory uid=${uid}: empty page — pagination complete`);
-    } else {
-      console.log(`syncCtraderHistory uid=${uid}: no pagination fields detected — single page response`);
+    if (page >= MAX_PAGES) {
+      console.warn(
+        `fetchAllHistoricalDeals uid=${uid}: chunk ${ci + 1} hit MAX_PAGES=${MAX_PAGES} safety limit`
+      );
     }
-    break;
+
+    allDeals.push(...chunkDeals);
+    console.log(
+      `fetchAllHistoricalDeals uid=${uid}: ` +
+      `after chunk ${ci + 1}/${chunks.length} — running total = ${allDeals.length} deals`
+    );
   }
 
-  if (page >= MAX_PAGES) {
-    console.warn(`syncCtraderHistory uid=${uid}: hit MAX_PAGES=${MAX_PAGES} safety limit`);
-  }
-
+  console.log(
+    `fetchAllHistoricalDeals uid=${uid}: DONE — ` +
+    `${chunks.length} chunks fetched, ${allDeals.length} deals total`
+  );
   return allDeals;
 }
 
