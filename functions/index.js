@@ -1283,9 +1283,11 @@ async function syncCtraderForUser(uid) {
   console.log(`cTrader uid=${uid}: symbol map loaded — ${symbolCount} symbols`);
 
   // ── 4. Fetch deals ───────────────────────────────────────────────────────────
+  // cTrader MCP get_deals requires fromTimestamp and toTimestamp as ISO 8601
+  // strings, not numbers — confirmed from validation error in Cloud Logging.
   const dealsRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {
-    fromTimestamp,
-    toTimestamp,
+    fromTimestamp: new Date(fromTimestamp).toISOString(),
+    toTimestamp:   new Date(toTimestamp).toISOString(),
   });
 
   // Log exact response shape on every sync so we can catch format changes
@@ -1924,13 +1926,31 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
   // Safety cap — stop after 200 pages to avoid infinite loops on unexpected APIs
   const MAX_PAGES = 200;
 
+  // ── Discovery probe: call get_deals with NO parameters first ──────────────
+  // This tells us what the API returns by default (and confirms it's reachable).
+  {
+    const probeRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {});
+    console.log(
+      `syncCtraderHistory uid=${uid} get_deals NO-PARAMS probe: ` +
+      `type=${typeof probeRaw} isArray=${Array.isArray(probeRaw)} ` +
+      `keys=${(!Array.isArray(probeRaw) && probeRaw && typeof probeRaw === "object") ? Object.keys(probeRaw).join(", ") : "n/a"} ` +
+      `full=${JSON.stringify(probeRaw).slice(0, 600)}`
+    );
+  }
+
   while (page < MAX_PAGES) {
-    const args = { fromTimestamp: fromTs, toTimestamp: toTs };
-    if (cursor)        args.cursor = cursor;
-    if (offset > 0)    args.offset = offset;
+    // cTrader MCP requires timestamps as ISO 8601 strings (not numbers).
+    // Confirmed from MCP error -32602 in Cloud Logging: "expected string, received number".
+    const args = {
+      fromTimestamp: new Date(fromTs).toISOString(),
+      toTimestamp:   new Date(toTs).toISOString(),
+    };
+    if (cursor)     args.cursor = cursor;
+    if (offset > 0) args.offset = offset;
 
     console.log(
-      `syncCtraderHistory uid=${uid}: requesting page ${page + 1}` +
+      `syncCtraderHistory uid=${uid}: requesting page ${page + 1} ` +
+      `from=${args.fromTimestamp} to=${args.toTimestamp}` +
       (cursor ? ` cursor=${cursor}` : "") +
       (offset > 0 ? ` offset=${offset}` : "")
     );
@@ -1943,8 +1963,13 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
         `syncCtraderHistory uid=${uid} get_deals page 1 raw shape: ` +
         `type=${typeof raw} isArray=${Array.isArray(raw)} ` +
         `keys=${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"} ` +
-        `preview=${JSON.stringify(raw).slice(0, 400)}`
+        `full=${JSON.stringify(raw).slice(0, 600)}`
       );
+    }
+
+    // If the response is still a string after our fix, it's an API error — surface it clearly
+    if (typeof raw === "string") {
+      throw new Error(`cTrader get_deals returned an error string: ${raw}`);
     }
 
     // Unwrap the deals array (same multi-format logic as in syncCtraderForUser)
