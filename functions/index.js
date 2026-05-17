@@ -1680,6 +1680,420 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
 // Each user's sync is independent; a failure for one user is logged but does
 // not block other users.
 
+// ─── 10. syncCtraderHistory ───────────────────────────────────────────────────
+//
+// POST /syncCtraderHistory  { fromTimestamp?: <unix-ms> }
+//
+// Imports ALL historical closed deals from cTrader — not just today's window.
+// Safe to call multiple times: deals already in Firestore are skipped by dealId.
+//
+// Steps:
+//   1. Load & refresh token
+//   2. Open MCP session
+//   3. Get verified symbol map
+//   4. Probe get_deals response shape to detect pagination format
+//   5. Fetch ALL pages of deals in the requested time range
+//   6. Match a prop/100k/2step account from the user's Firestore settings
+//   7. Load existing ctrader deal IDs to skip duplicates
+//   8. Validate + normalise every new deal
+//   9. Batch-write to Firestore
+//  10. Return { imported, skipped, total, durationMs }
+//
+// We deliberately set a 540-second timeout (max for 1st-gen) because a full
+// account history fetch can be large.
+
+exports.syncCtraderHistory = functions
+  .runWith({ timeoutSeconds: 540, memory: "512MB" })
+  .https.onRequest(async (req, res) => {
+    if (handleCors(req, res)) return;
+
+    const fnStart = Date.now();
+
+    try {
+      const decoded = await verifyAuth(req);
+      const uid = decoded.uid;
+
+      if (req.method !== "POST") {
+        return res.status(405).json({ error: "Method not allowed" });
+      }
+
+      // ── 1. Load broker state + token ────────────────────────────────────────
+      const brokerRef  = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+      const brokerSnap = await brokerRef.get();
+
+      if (!brokerSnap.exists || !brokerSnap.data().connected) {
+        return res.status(403).json({ error: "cTrader is not connected for this account" });
+      }
+
+      const brokerData = brokerSnap.data();
+
+      // Auto-refresh token if within 7-day window
+      let bearerToken;
+      const tokenExpiresAt  = brokerData.tokenExpiresAt?.toMillis?.() ?? null;
+      const msUntilExpiry   = tokenExpiresAt ? tokenExpiresAt - Date.now() : null;
+      if (msUntilExpiry !== null && msUntilExpiry <= TOKEN_REFRESH_THRESHOLD_MS) {
+        console.log(`syncCtraderHistory uid=${uid}: token near expiry — auto-refreshing`);
+        bearerToken = await refreshCtraderToken(uid, brokerRef, brokerData);
+      } else {
+        bearerToken = decrypt(brokerData.accessToken);
+      }
+
+      // ── 2. Open MCP session ─────────────────────────────────────────────────
+      const sessionId = await initCtraderSession(bearerToken);
+
+      // ── 3. Symbol map (cached 6h) ───────────────────────────────────────────
+      const symbolDetails = await getVerifiedSymbolMap(bearerToken, sessionId);
+      console.log(`syncCtraderHistory uid=${uid}: symbol map loaded — ${Object.keys(symbolDetails).length} symbols`);
+
+      // ── 4+5. Fetch all pages of historical deals ────────────────────────────
+
+      // fromTimestamp: accept from request body, default to 2019-01-01 00:00 UTC
+      const DEFAULT_HISTORY_FROM = new Date("2019-01-01T00:00:00Z").getTime();
+      const fromTimestamp = Number(req.body?.fromTimestamp ?? DEFAULT_HISTORY_FROM);
+      const toTimestamp   = Date.now();
+
+      if (!Number.isFinite(fromTimestamp) || fromTimestamp < 0) {
+        return res.status(400).json({ error: "Invalid fromTimestamp — must be a Unix ms number" });
+      }
+
+      console.log(
+        `syncCtraderHistory uid=${uid}: fetching deals ` +
+        `${new Date(fromTimestamp).toISOString()} → ${new Date(toTimestamp).toISOString()}`
+      );
+
+      const allDeals = await fetchAllHistoricalDeals(
+        bearerToken, sessionId, uid, fromTimestamp, toTimestamp
+      );
+
+      console.log(`syncCtraderHistory uid=${uid}: total deals fetched across all pages = ${allDeals.length}`);
+
+      // ── 6. Resolve prop account from user's Firestore settings ──────────────
+      const accountId = await resolvePropAccountId(uid);
+      if (accountId) {
+        console.log(`syncCtraderHistory uid=${uid}: matched prop account id="${accountId}"`);
+      } else {
+        console.log(`syncCtraderHistory uid=${uid}: no prop/100k/2step account found — accountId will be null`);
+      }
+
+      // ── 7. Load existing cTrader deal IDs to skip duplicates ────────────────
+      const existingSnap = await db
+        .collection("users").doc(uid)
+        .collection("trades")
+        .where("broker", "==", "CTRADER")
+        .select("dealId")   // fetch only the dealId field — minimal data transfer
+        .get();
+
+      const existingDealIds = new Set(existingSnap.docs.map((d) => d.data().dealId).filter(Boolean));
+      console.log(`syncCtraderHistory uid=${uid}: ${existingDealIds.size} existing cTrader deals in Firestore`);
+
+      // ── 8. Validate, normalise, skip duplicates ──────────────────────────────
+      const toWrite        = [];
+      const skippedIds     = [];  // duplicate dealIds
+      const validationErrs = [];
+      const symbolLog      = {}; // { symbolName: count }
+
+      for (const rawDeal of allDeals) {
+        const dealId   = String(rawDeal.dealId   ?? "(unknown)");
+        const symbolId = rawDeal.symbolId != null ? String(rawDeal.symbolId) : null;
+
+        // Skip if already imported
+        if (existingDealIds.has(dealId)) {
+          skippedIds.push(dealId);
+          continue;
+        }
+
+        // Resolve symbol — unknown id → log and skip (don't abort entire history import)
+        if (!symbolId) {
+          validationErrs.push(`deal ${dealId}: missing symbolId`);
+          console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: missing symbolId — skipping`);
+          continue;
+        }
+
+        const symbolInfo = symbolDetails[symbolId];
+        if (!symbolInfo) {
+          validationErrs.push(`deal ${dealId}: symbolId ${symbolId} unresolved`);
+          console.warn(
+            `syncCtraderHistory uid=${uid} deal ${dealId}: symbolId ${symbolId} not in symbol map — skipping. ` +
+            `(symbol map may need refresh — call ctraderConnect to force-refresh)`
+          );
+          continue;
+        }
+
+        // For history imports we skip the trading-hours check — we're importing
+        // closed historical deals, not checking if a market is open right now.
+        // Symbol enabled check still applies.
+        if (symbolInfo.enabled === false) {
+          console.log(`syncCtraderHistory uid=${uid} deal ${dealId}: symbol ${symbolInfo.name} disabled — skipping`);
+          skippedIds.push(dealId);
+          continue;
+        }
+
+        try {
+          const normalised = normaliseDeal(rawDeal, symbolInfo);
+          // Attach the resolved prop account
+          if (accountId) normalised.accountId = accountId;
+          normalised.importSource = "history"; // distinguish from live syncs
+          toWrite.push(normalised);
+          symbolLog[symbolInfo.name] = (symbolLog[symbolInfo.name] ?? 0) + 1;
+        } catch (err) {
+          validationErrs.push(`deal ${dealId}: ${err.message}`);
+          console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: validation error — ${err.message}`);
+        }
+      }
+
+      console.log(
+        `syncCtraderHistory uid=${uid}: new=${toWrite.length} duplicate=${skippedIds.length} ` +
+        `validationErrors=${validationErrs.length}`
+      );
+      if (Object.keys(symbolLog).length > 0) {
+        console.log(`syncCtraderHistory uid=${uid}: per-symbol counts →`, JSON.stringify(symbolLog));
+      }
+
+      // ── 9. Batch write ───────────────────────────────────────────────────────
+      const tradesRef  = db.collection("users").doc(uid).collection("trades");
+      const BATCH_SIZE = 400;
+      let written      = 0;
+
+      for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
+        const batch = db.batch();
+        for (const trade of toWrite.slice(i, i + BATCH_SIZE)) {
+          batch.set(tradesRef.doc(`ctrader_${trade.dealId}`), trade, { merge: true });
+        }
+        await batch.commit();
+        written += toWrite.slice(i, i + BATCH_SIZE).length;
+        console.log(`syncCtraderHistory uid=${uid}: wrote batch ${Math.floor(i / BATCH_SIZE) + 1} — total so far ${written}`);
+      }
+
+      // Update broker metadata
+      await brokerRef.set(
+        {
+          lastHistoryImportAt:    admin.firestore.FieldValue.serverTimestamp(),
+          lastHistoryImportCount: written,
+        },
+        { merge: true }
+      );
+
+      const durationMs = Date.now() - fnStart;
+      console.log(
+        `syncCtraderHistory uid=${uid}: COMPLETE — ` +
+        `total=${allDeals.length} imported=${written} skipped=${skippedIds.length} ` +
+        `errors=${validationErrs.length} duration=${durationMs}ms`
+      );
+
+      return res.status(200).json({
+        ok:           true,
+        total:        allDeals.length,
+        imported:     written,
+        skipped:      skippedIds.length,
+        errors:       validationErrs.length,
+        symbolLog,
+        durationMs,
+        note: written === 0
+          ? "No new deals to import — all deals already in Firestore or no deals found in the requested range."
+          : `${written} deal(s) imported. ${skippedIds.length} already existed and were skipped.`,
+      });
+
+    } catch (err) {
+      const status = err.status || 500;
+      console.error("syncCtraderHistory error:", err);
+      return res.status(status).json({ error: err.message });
+    }
+  });
+
+// ─── Helpers for syncCtraderHistory ──────────────────────────────────────────
+
+/**
+ * Fetch ALL historical deals, handling whatever pagination format the API uses.
+ *
+ * On the first page we log the full raw response shape so the pagination
+ * format is visible in Cloud Logging. We then loop until we detect there are
+ * no more pages.
+ *
+ * Supported pagination formats detected from response:
+ *   A. { deals:[...], hasMore: true, nextFrom: <ts> }     → re-call with fromTimestamp=nextFrom
+ *   B. { deals:[...], cursor: "<string>" }                 → re-call with cursor=cursor
+ *   C. { deals:[...], offset: N, total: N, limit: N }     → re-call with offset+=limit
+ *   D. No pagination fields → single-page response, done
+ */
+async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs) {
+  const allDeals = [];
+  let   page     = 0;
+  let   cursor   = null;   // for cursor-based pagination
+  let   offset   = 0;      // for offset-based pagination
+
+  // Safety cap — stop after 200 pages to avoid infinite loops on unexpected APIs
+  const MAX_PAGES = 200;
+
+  while (page < MAX_PAGES) {
+    const args = { fromTimestamp: fromTs, toTimestamp: toTs };
+    if (cursor)        args.cursor = cursor;
+    if (offset > 0)    args.offset = offset;
+
+    console.log(
+      `syncCtraderHistory uid=${uid}: requesting page ${page + 1}` +
+      (cursor ? ` cursor=${cursor}` : "") +
+      (offset > 0 ? ` offset=${offset}` : "")
+    );
+
+    const raw = await callCtraderTool(bearerToken, sessionId, "get_deals", args);
+
+    // On first page: log full response shape for debugging
+    if (page === 0) {
+      console.log(
+        `syncCtraderHistory uid=${uid} get_deals page 1 raw shape: ` +
+        `type=${typeof raw} isArray=${Array.isArray(raw)} ` +
+        `keys=${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"} ` +
+        `preview=${JSON.stringify(raw).slice(0, 400)}`
+      );
+    }
+
+    // Unwrap the deals array (same multi-format logic as in syncCtraderForUser)
+    let pageDeals;
+    let paginationMeta = null; // the wrapper object (if any), for pagination fields
+
+    if (Array.isArray(raw)) {
+      pageDeals = raw;
+    } else if (raw && typeof raw === "object") {
+      paginationMeta = raw;
+      if (Array.isArray(raw.deals))        pageDeals = raw.deals;
+      else if (Array.isArray(raw.data))    pageDeals = raw.data;
+      else if (Array.isArray(raw.result))  pageDeals = raw.result;
+      else if (Array.isArray(raw.items))   pageDeals = raw.items;
+      else {
+        const arrayKey = Object.keys(raw).find((k) => Array.isArray(raw[k]));
+        if (arrayKey) {
+          console.log(`syncCtraderHistory uid=${uid}: unwrapping deals via key "${arrayKey}"`);
+          pageDeals = raw[arrayKey];
+        } else if (Object.keys(raw).length === 0) {
+          pageDeals = [];
+        } else {
+          throw new Error(
+            `syncCtraderHistory get_deals page ${page + 1}: object with no array — ` +
+            `keys: ${Object.keys(raw).join(", ")}`
+          );
+        }
+      }
+    } else {
+      throw new Error(`syncCtraderHistory get_deals page ${page + 1}: unexpected type "${typeof raw}"`);
+    }
+
+    console.log(`syncCtraderHistory uid=${uid}: page ${page + 1} → ${pageDeals.length} deals`);
+    allDeals.push(...pageDeals);
+
+    // ── Detect and advance pagination ────────────────────────────────────────
+    const meta = paginationMeta ?? {};
+
+    // Format A: hasMore + nextFrom (timestamp-based)
+    if (meta.hasMore === true && meta.nextFrom != null) {
+      fromTs = Number(meta.nextFrom);
+      cursor = null;
+      page++;
+      continue;
+    }
+
+    // Format B: cursor-based
+    if (meta.cursor && meta.cursor !== cursor) {
+      cursor = meta.cursor;
+      page++;
+      continue;
+    }
+    // Also handle nextCursor / next_cursor naming
+    if ((meta.nextCursor || meta.next_cursor) && (meta.nextCursor || meta.next_cursor) !== cursor) {
+      cursor = meta.nextCursor ?? meta.next_cursor;
+      page++;
+      continue;
+    }
+
+    // Format C: offset + total + limit
+    if (meta.total != null && meta.limit != null) {
+      const limit = Number(meta.limit);
+      offset += pageDeals.length > 0 ? pageDeals.length : limit;
+      if (offset >= Number(meta.total) || pageDeals.length === 0) {
+        console.log(
+          `syncCtraderHistory uid=${uid}: offset pagination done ` +
+          `(offset=${offset} total=${meta.total})`
+        );
+        break;
+      }
+      page++;
+      continue;
+    }
+
+    // No pagination detected, or page was empty → done
+    if (pageDeals.length === 0) {
+      console.log(`syncCtraderHistory uid=${uid}: empty page — pagination complete`);
+    } else {
+      console.log(`syncCtraderHistory uid=${uid}: no pagination fields detected — single page response`);
+    }
+    break;
+  }
+
+  if (page >= MAX_PAGES) {
+    console.warn(`syncCtraderHistory uid=${uid}: hit MAX_PAGES=${MAX_PAGES} safety limit`);
+  }
+
+  return allDeals;
+}
+
+/**
+ * Look up the user's prop/funded account from their Firestore settings.
+ * Matches any account whose name contains "prop", "100k", "2step", "funded",
+ * or "the5ers" (all case-insensitive).
+ * Returns the account id string, or null if none found.
+ */
+async function resolvePropAccountId(uid) {
+  const PROP_KEYWORDS = ["prop", "100k", "2step", "two step", "funded", "the5ers", "ftmo", "myfunded"];
+  try {
+    const settingsSnap = await db
+      .collection("users").doc(uid)
+      .collection("meta").doc("settings")
+      .get();
+
+    if (!settingsSnap.exists) {
+      console.log(`resolvePropAccountId uid=${uid}: no settings document found`);
+      return null;
+    }
+
+    const accounts = settingsSnap.data()?.accounts;
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+      console.log(`resolvePropAccountId uid=${uid}: no accounts in settings`);
+      return null;
+    }
+
+    const match = accounts.find((a) => {
+      const name = (a.name ?? "").toLowerCase();
+      return PROP_KEYWORDS.some((kw) => name.includes(kw));
+    });
+
+    if (match) {
+      console.log(
+        `resolvePropAccountId uid=${uid}: matched account "${match.name}" (id=${match.id}) ` +
+        `from ${accounts.length} account(s)`
+      );
+      return match.id;
+    }
+
+    // No keyword match — if there's only one account, use it and log a note
+    if (accounts.length === 1) {
+      console.log(
+        `resolvePropAccountId uid=${uid}: no prop-keyword match — ` +
+        `only one account exists ("${accounts[0].name}"), using it`
+      );
+      return accounts[0].id;
+    }
+
+    console.log(
+      `resolvePropAccountId uid=${uid}: ${accounts.length} accounts but none matched prop keywords: ` +
+      accounts.map((a) => `"${a.name}"`).join(", ")
+    );
+    return null;
+
+  } catch (err) {
+    console.warn(`resolvePropAccountId uid=${uid}: error reading settings — ${err.message}`);
+    return null;
+  }
+}
+
 exports.ctraderScheduledSync = functions.pubsub
   .schedule("*/5 * * * *")
   .timeZone("UTC")
