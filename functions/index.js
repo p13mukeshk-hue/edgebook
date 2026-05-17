@@ -979,6 +979,24 @@ function checkTradingHours(symbolInfo, nowMs) {
   return { tradeable: null, reason: `${name}: tradingHours format not recognised — ${JSON.stringify(firstEntry).slice(0, 120)}` };
 }
 
+/**
+ * Map a cTrader symbolCategory string to the app's asset class code.
+ * Returns "fx" as the default (most cTrader accounts are FX/CFD).
+ *
+ * App codes: "eq" Equities · "cx" Crypto · "fx" Forex · "cm" Commodities · "ix" Index
+ */
+function ctraderCategoryToAsset(category) {
+  if (!category) return "fx";
+  const c = String(category).toLowerCase();
+  if (c.includes("crypto")  || c.includes("coin"))                              return "cx";
+  if (c.includes("index")   || c.includes("indice") || c.includes("indices"))   return "ix";
+  if (c.includes("commodit") || c.includes("metal") || c.includes("energy")
+      || c.includes("oil")  || c.includes("gas"))                               return "cm";
+  if (c.includes("stock")   || c.includes("equit")  || c.includes("share"))     return "eq";
+  // "FX", "Forex", "CFD", "Spot", "Currencies" → fx
+  return "fx";
+}
+
 // ─── Required deal fields — ALL must be present. No defaults, no guessing. ───
 
 const REQUIRED_DEAL_FIELDS = [
@@ -1041,34 +1059,54 @@ function normaliseDeal(rawDeal, symbolInfo) {
     ? parseFloat((filledVolume / lotSize).toFixed(8))
     : null;
 
+  // ── Frontend-required fields ─────────────────────────────────────────────
+  // The app reads trades via d.data() (no doc ID injected), so every field
+  // the P&L engine / trade table uses must be present as document fields.
+
+  const tradeSideUpper = String(rawDeal.tradeSide).toUpperCase(); // "BUY" | "SELL"
+  const dealPnl        = rawDeal.pnl != null ? Number(rawDeal.pnl) : null;
+  const dealSize       = lotsTraded ?? filledVolume;
+
   return {
-    broker:          "CTRADER",
-    dealId:          String(rawDeal.dealId),
-    orderId:         String(rawDeal.orderId),
-    positionId:      String(rawDeal.positionId),
+    // ── App-required fields (read by the P&L engine and trade table) ─────────
+    id:         `ctrader_${String(rawDeal.dealId)}`,       // must match Firestore doc ID
+    date:       new Date(executionTimestamp).toISOString().slice(0, 10), // "YYYY-MM-DD"
+    symbol:     symbolInfo.name,                           // verified name from API
+    asset:      ctraderCategoryToAsset(symbolInfo.symbolCategory), // "fx"/"cx"/"ix"/"cm"/"eq"
+    direction:  tradeSideUpper === "BUY" ? "Long" : "Short",
+    entry:      executionPrice,
+    // exit: set to executionPrice when pnl is present (= closed deal),
+    //        null otherwise (= open/partial fill — treated as open trade by the app)
+    exit:       dealPnl !== null ? executionPrice : null,
+    size:       dealSize,
+    pnl:        dealPnl,                                   // null → app treats as open
+    accountId:  null,                                      // set by caller after normalisation
+
+    // ── cTrader-native fields (kept for audit / future use) ──────────────────
+    broker:         "CTRADER",
+    dealId:         String(rawDeal.dealId),
+    orderId:        String(rawDeal.orderId),
+    positionId:     String(rawDeal.positionId),
     symbolId,
-    symbol:          symbolInfo.name,          // verified name from API
-    symbolCategory:  symbolInfo.symbolCategory ?? null,
-    side:            String(rawDeal.tradeSide).toUpperCase(),  // "BUY" | "SELL"
-    volume:          Number(rawDeal.volume),
+    symbolCategory: symbolInfo.symbolCategory ?? null,
+    side:           tradeSideUpper,
+    volume:         Number(rawDeal.volume),
     filledVolume,
-    lotsTraded,      // derived, null if lotSize unknown
+    lotsTraded,
     executionPrice,
-    dealStatus:      String(rawDeal.dealStatus),
-    executedAt:      admin.firestore.Timestamp.fromMillis(executionTimestamp),
-    // P&L sizing from API — stored so frontend can recalculate
+    dealStatus:     String(rawDeal.dealStatus),
+    executedAt:     admin.firestore.Timestamp.fromMillis(executionTimestamp),
     lotSize,
     pipSize,
     pipValue,
     // Optional deal-level fields (include only if present in API response)
     ...(rawDeal.commission != null && { commission:   Number(rawDeal.commission) }),
     ...(rawDeal.swap       != null && { swap:         Number(rawDeal.swap) }),
-    ...(rawDeal.pnl        != null && { pnl:          Number(rawDeal.pnl) }),
     ...(rawDeal.balance    != null && { balanceAfter: Number(rawDeal.balance) }),
     ...(rawDeal.label      != null && { label:        String(rawDeal.label) }),
     ...(rawDeal.comment    != null && { comment:      String(rawDeal.comment) }),
-    importedAt:      admin.firestore.FieldValue.serverTimestamp(),
-    _raw:            rawDeal,  // keep for debugging; prune once stable
+    importedAt:     admin.firestore.FieldValue.serverTimestamp(),
+    _raw:           rawDeal,  // keep for debugging; prune once stable
   };
 }
 
@@ -1351,6 +1389,12 @@ async function syncCtraderForUser(uid) {
     return { saved: 0, skipped: 0, errors: [], durationMs, symbolLog: {} };
   }
 
+  // ── 4b. Resolve prop account ID (same logic as syncCtraderHistory) ─────────
+  const liveAccountId = await resolvePropAccountId(uid);
+  if (liveAccountId) {
+    console.log(`cTrader uid=${uid}: matched prop account id="${liveAccountId}" for live sync`);
+  }
+
   // ── 5. Per-deal: resolve, validate, check hours ─────────────────────────────
   const nowMs = toTimestamp;
   const toProcess   = [];   // deals ready to write
@@ -1411,12 +1455,14 @@ async function syncCtraderForUser(uid) {
     // 5d. Validate required fields + numeric sanity
     try {
       const normalised = normaliseDeal(rawDeal, symbolInfo);
+      // Attach prop account ID (same as history import)
+      if (liveAccountId) normalised.accountId = liveAccountId;
       toProcess.push(normalised);
       symbolLog[symbolInfo.name].count++;
       console.log(
         `cTrader uid=${uid} deal ${dealId}: OK — ${symbolInfo.name} ` +
-        `${normalised.side} ${normalised.filledVolume} @ ${normalised.executionPrice} ` +
-        `[${hoursCheck.reason}]`
+        `${normalised.direction} ${normalised.size} @ ${normalised.entry} ` +
+        `pnl=${normalised.pnl} [${hoursCheck.reason}]`
       );
     } catch (err) {
       errors.push({ dealId, error: err.message });
@@ -1848,6 +1894,20 @@ exports.syncCtraderHistory = functions
       );
       if (Object.keys(symbolLog).length > 0) {
         console.log(`syncCtraderHistory uid=${uid}: per-symbol counts →`, JSON.stringify(symbolLog));
+      }
+
+      // Log the first trade document in full so the structure is visible in Cloud Logging
+      if (toWrite.length > 0) {
+        const sample = { ...toWrite[0] };
+        // Replace non-serialisable Firestore sentinels with readable placeholders
+        if (sample.executedAt && typeof sample.executedAt.toDate === "function") {
+          sample.executedAt = sample.executedAt.toDate().toISOString();
+        }
+        sample.importedAt = "<serverTimestamp>";
+        console.log(
+          `syncCtraderHistory uid=${uid}: SAMPLE trade document (first of ${toWrite.length}):`,
+          JSON.stringify(sample, null, 2).slice(0, 2000)
+        );
       }
 
       // ── 9. Batch write ───────────────────────────────────────────────────────
