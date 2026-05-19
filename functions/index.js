@@ -2730,9 +2730,15 @@ async function getCtraderAccountStartDate(bearerToken, sessionId, uid) {
  * @returns {Array}  All deals across all chunks, combined
  */
 async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs) {
-  // Auto-discover account start date if caller passed null
+  // Fixed lookback: always start from Jan 1 2026 when no explicit date is given.
+  // Avoids unreliable account-start discovery endpoints and ensures all trades
+  // since account opening are included regardless of previous lastSyncTimestamp.
   if (fromTs === null || fromTs === undefined) {
-    fromTs = await getCtraderAccountStartDate(bearerToken, sessionId, uid);
+    fromTs = new Date("2026-01-01T00:00:00.000Z").getTime();
+    console.log(
+      `syncCtraderHistory uid=${uid}: no fromTimestamp supplied — ` +
+      `using fixed lookback from 2026-01-01T00:00:00.000Z`
+    );
   }
 
   const CHUNK_MS  = 720 * 60 * 60 * 1000; // 720 hours = 30 days in ms
@@ -2748,7 +2754,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
   }
 
   console.log(
-    `fetchAllHistoricalDeals uid=${uid}: ` +
+    `syncCtraderHistory uid=${uid}: ` +
     `range ${new Date(fromTs).toISOString()} → ${new Date(toTs).toISOString()} ` +
     `split into ${chunks.length} chunk(s) of ≤720h each`
   );
@@ -2761,9 +2767,8 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
     const toISO   = new Date(chunkTo).toISOString();
 
     console.log(
-      `fetchAllHistoricalDeals uid=${uid}: ` +
-      `chunk ${ci + 1}/${chunks.length}: ${fromISO} → ${toISO} ` +
-      `(${allDeals.length} deals so far)`
+      `syncCtraderHistory uid=${uid}: querying chunk ${ci + 1}/${chunks.length}: ` +
+      `${fromISO.slice(0, 10)} → ${toISO.slice(0, 10)}`
     );
 
     // Within each chunk handle any pagination the API may return
@@ -2787,7 +2792,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
       // Log full shape on first page of first chunk for diagnostics
       if (ci === 0 && page === 0) {
         console.log(
-          `fetchAllHistoricalDeals uid=${uid} chunk 1 page 1 raw shape: ` +
+          `syncCtraderHistory uid=${uid} chunk 1 page 1 raw shape: ` +
           `type=${typeof raw} isArray=${Array.isArray(raw)} ` +
           `keys=${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"} ` +
           `preview=${JSON.stringify(raw).slice(0, 400)}`
@@ -2797,7 +2802,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
       // API error returned as a string — log and skip chunk (don't abort entire import)
       if (typeof raw === "string") {
         console.warn(
-          `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1}/${chunks.length} page ${page + 1}: ` +
+          `syncCtraderHistory uid=${uid} chunk ${ci + 1}/${chunks.length} page ${page + 1}: ` +
           `API returned error string — skipping chunk. Error: ${raw}`
         );
         break; // move to next chunk
@@ -2819,7 +2824,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
           const arrayKey = Object.keys(raw).find((k) => Array.isArray(raw[k]));
           if (arrayKey) {
             console.log(
-              `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1}: ` +
+              `syncCtraderHistory uid=${uid} chunk ${ci + 1}: ` +
               `unwrapping deals via key "${arrayKey}"`
             );
             pageDeals = raw[arrayKey];
@@ -2827,7 +2832,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
             pageDeals = [];
           } else {
             console.warn(
-              `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
+              `syncCtraderHistory uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
               `object with no array — keys: ${Object.keys(raw).join(", ")} — skipping chunk`
             );
             break;
@@ -2835,7 +2840,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
         }
       } else {
         console.warn(
-          `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
+          `syncCtraderHistory uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
           `unexpected type "${typeof raw}" — skipping chunk`
         );
         break;
@@ -2843,14 +2848,14 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
 
       if (pageDeals.length === 0) {
         console.log(
-          `fetchAllHistoricalDeals uid=${uid}: ` +
+          `syncCtraderHistory uid=${uid}: ` +
           `chunk ${ci + 1}/${chunks.length} page ${page + 1} → 0 deals — moving to next chunk`
         );
         break;
       }
 
       console.log(
-        `fetchAllHistoricalDeals uid=${uid}: ` +
+        `syncCtraderHistory uid=${uid}: ` +
         `chunk ${ci + 1}/${chunks.length} page ${page + 1} → ${pageDeals.length} deals`
       );
       chunkDeals.push(...pageDeals);
@@ -2878,7 +2883,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
         pageOffset += pageDeals.length > 0 ? pageDeals.length : Number(meta.limit);
         if (pageOffset >= Number(meta.total) || pageDeals.length === 0) {
           console.log(
-            `fetchAllHistoricalDeals uid=${uid} chunk ${ci + 1}: ` +
+            `syncCtraderHistory uid=${uid} chunk ${ci + 1}: ` +
             `offset pagination done (offset=${pageOffset} total=${meta.total})`
           );
           break;
@@ -2889,7 +2894,7 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
 
       // No pagination → single-page response
       console.log(
-        `fetchAllHistoricalDeals uid=${uid}: ` +
+        `syncCtraderHistory uid=${uid}: ` +
         `chunk ${ci + 1}/${chunks.length} complete (${chunkDeals.length} deals, no further pages)`
       );
       break;
@@ -2897,19 +2902,19 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
 
     if (page >= MAX_PAGES) {
       console.warn(
-        `fetchAllHistoricalDeals uid=${uid}: chunk ${ci + 1} hit MAX_PAGES=${MAX_PAGES} safety limit`
+        `syncCtraderHistory uid=${uid}: chunk ${ci + 1} hit MAX_PAGES=${MAX_PAGES} safety limit`
       );
     }
 
     allDeals.push(...chunkDeals);
     console.log(
-      `fetchAllHistoricalDeals uid=${uid}: ` +
-      `after chunk ${ci + 1}/${chunks.length} — running total = ${allDeals.length} deals`
+      `syncCtraderHistory uid=${uid}: chunk ${ci + 1}/${chunks.length} returned ${chunkDeals.length} deals ` +
+      `(running total: ${allDeals.length})`
     );
   }
 
   console.log(
-    `fetchAllHistoricalDeals uid=${uid}: DONE — ` +
+    `syncCtraderHistory uid=${uid}: DONE — ` +
     `${chunks.length} chunks fetched, ${allDeals.length} deals total`
   );
   return allDeals;
