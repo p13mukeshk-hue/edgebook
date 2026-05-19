@@ -1927,8 +1927,10 @@ const TODAY = new Date().toISOString().split('T')[0];
    Fetched once on login, cached in memory.
    toUSD(amount, currency) converts any supported currency → USD.
 ══════════════════════════════════════════════════════ */
+// Hardcoded fallback rates (USD base). Update monthly if live fetch fails.
+const FALLBACK_FX_RATES = { USD:1, EUR:0.92, GBP:0.79, JPY:149.5, INR:83.5, AUD:1.53, CAD:1.36, CHF:0.89, SGD:1.34 };
 const FxRates = {
-  rates: { USD:1, INR:95.62, EUR:0.92, GBP:0.79, AUD:1.53 }, // today's fallback
+  rates: { ...FALLBACK_FX_RATES },
   loaded: false,
   _cacheKey: 'tradedesk_fxrates',
   _memo: {}, // memoisation cache for toUSD
@@ -1939,20 +1941,20 @@ const FxRates = {
       if (cached?.date === TODAY && cached?.rates) {
         this.rates = cached.rates;
         this.loaded = true;
-        this._memo = {}; // clear memo when rates refresh
+        this._memo = {};
         return;
       }
     } catch(e) {}
     try {
-      const r = await fetch('https://api.frankfurter.app/latest?base=USD&symbols=INR,EUR,GBP,AUD,JPY,CAD,CHF');
+      const r = await fetch('https://api.frankfurter.app/latest?base=USD&symbols=INR,EUR,GBP,AUD,JPY,CAD,CHF,SGD');
       const d = await r.json();
       if (d?.rates) {
-        this.rates = { USD:1, ...d.rates };
+        this.rates = { ...FALLBACK_FX_RATES, ...d.rates };
         this.loaded = true;
         this._memo = {};
         localStorage.setItem(this._cacheKey, JSON.stringify({ date: TODAY, rates: this.rates }));
       }
-    } catch(e) { console.warn('FxRates: using fallback rates', e); }
+    } catch(e) { console.warn('FxRates: live fetch failed, using hardcoded fallback rates'); }
   },
   // Convert amount in fromCurrency → USD (memoised per currency)
   toUSD(amount, fromCurrency) {

@@ -1601,28 +1601,73 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const pipSize  = symbolInfo.pipSize  ?? null;
   const pipValue = symbolInfo.pipValue ?? null;
 
-  // Sort chronologically — first deal is the opener, later deals are closes
+  // ── STEP 1: verbose raw-deal logging (check field names in Cloud Logging) ────
+  console.log("[buildPositionTrade] positionId:", positionId,
+    "deals:", deals.length,
+    "raw deals:", JSON.stringify(deals.map((d) => ({
+      dealId:             d.dealId,
+      executionPrice:     d.executionPrice,
+      pnl:                d.pnl,
+      grossPnl:           d.grossPnl,
+      netPnl:             d.netPnl,
+      profit:             d.profit,
+      dealPnl:            d.dealPnl,
+      realizedPnl:        d.realizedPnl,
+      tradeSide:          d.tradeSide,
+      executionTimestamp: d.executionTimestamp,
+      filledVolume:       d.filledVolume,
+      keys:               Object.keys(d),
+    })))
+  );
+
+  // Sort chronologically — first deal is the opener
   const sorted = [...deals].sort(
     (a, b) => Number(a.executionTimestamp) - Number(b.executionTimestamp)
   );
 
-  // First deal = ENTRY. Deals with pnl != null = EXIT (API populates pnl only on closing fills).
-  const primaryEntry = sorted[0];
-  const exitDeals    = sorted.filter((d) => d.pnl != null);
-
-  const tradeSideUpper = String(primaryEntry.tradeSide).toUpperCase();
+  const primaryEntry   = sorted[0];
+  const tradeSideUpper = String(primaryEntry.tradeSide ?? "BUY").toUpperCase();
   const direction      = tradeSideUpper === "BUY" ? "Long" : "Short";
 
   const entryTs   = Number(primaryEntry.executionTimestamp);
-  const date      = new Date(entryTs).toISOString().slice(0, 10);   // YYYY-MM-DD
-  const entryTime = new Date(entryTs).toISOString().slice(11, 16);  // HH:MM
-  const entry     = Number(primaryEntry.executionPrice);
+  const date      = new Date(entryTs).toISOString().slice(0, 10);
+  const entryTime = new Date(entryTs).toISOString().slice(11, 16);
 
-  // Size from the opening fill volume → lots
-  const entryVol = Number(primaryEntry.filledVolume);
-  const size = (lotSize && lotSize > 0)
+  // ── STEP 3: try multiple executionPrice field names ──────────────────────────
+  const PRICE_FIELDS = ["executionPrice", "price", "dealPrice", "filledPrice", "closePrice"];
+  const getPrice = (d) => {
+    for (const f of PRICE_FIELDS) { if (d[f] != null) return Number(d[f]); }
+    return null;
+  };
+  const entry    = getPrice(primaryEntry) ?? 0;
+  const entryVol = Number(primaryEntry.filledVolume ?? primaryEntry.volume ?? primaryEntry.quantity ?? 0);
+  const size     = (lotSize && lotSize > 0)
     ? parseFloat((entryVol / lotSize).toFixed(8))
     : entryVol;
+
+  // ── STEP 2: try multiple pnl field names ────────────────────────────────────
+  const PNL_FIELDS = ["pnl", "grossPnl", "netPnl", "profit", "dealPnl", "realizedPnl", "grossProfit", "netProfit"];
+  const getDealPnl = (d) => {
+    for (const f of PNL_FIELDS) { if (d[f] != null) return Number(d[f]); }
+    return null;
+  };
+
+  // Try pnl-based exit detection first (API sets pnl on closing deals)
+  let exitDeals = sorted.filter((d) => getDealPnl(d) !== null);
+
+  // ── STEP 4: tradeSide-pairing fallback when pnl is absent on all deals ──────
+  // The opening deal is the first by timestamp; closing deals have the opposite tradeSide.
+  if (exitDeals.length === 0 && sorted.length > 1) {
+    const entryIsBuy = tradeSideUpper === "BUY";
+    exitDeals = sorted.slice(1).filter((d) => {
+      const side = String(d.tradeSide ?? "").toUpperCase();
+      return entryIsBuy ? side === "SELL" : side === "BUY";
+    });
+    console.log(
+      `[buildPositionTrade] pos=${positionId}: pnl null on all deals — ` +
+      `tradeSide pairing found ${exitDeals.length} exit deal(s)`
+    );
+  }
 
   let exit = null, pnl = null, exitTime = null, isOpen = true;
 
@@ -1630,33 +1675,35 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
     isOpen = false;
 
     // Weighted-average exit price across all closing fills
-    const totalExitVol = exitDeals.reduce((s, d) => s + Number(d.filledVolume), 0);
-    const weightedSum  = exitDeals.reduce(
-      (s, d) => s + Number(d.executionPrice) * Number(d.filledVolume), 0
+    const totalExitVol = exitDeals.reduce(
+      (s, d) => s + Number(d.filledVolume ?? d.volume ?? d.quantity ?? 0), 0
+    );
+    const weightedSum = exitDeals.reduce(
+      (s, d) => s + (getPrice(d) ?? 0) * Number(d.filledVolume ?? d.volume ?? d.quantity ?? 0), 0
     );
     exit = totalExitVol > 0
       ? parseFloat((weightedSum / totalExitVol).toFixed(8))
-      : null;
+      : (getPrice(exitDeals[exitDeals.length - 1]) ?? null);
 
-    // Sum pnl from all closing deals (guaranteed non-null by exitDeals filter above)
-    const rawPnl = exitDeals.reduce((s, d) => s + Number(d.pnl), 0);
-    // Add commission + swap from all deals in this position
-    const commission = deals.reduce(
-      (s, d) => s + (d.commission != null ? Number(d.commission) : 0), 0
-    );
-    const swap = deals.reduce(
-      (s, d) => s + (d.swap != null ? Number(d.swap) : 0), 0
-    );
-    pnl = parseFloat((rawPnl + commission + swap).toFixed(8));
+    // Commission + swap from all deals in this position
+    const commission = deals.reduce((s, d) => s + (d.commission != null ? Number(d.commission) : 0), 0);
+    const swap       = deals.reduce((s, d) => s + (d.swap       != null ? Number(d.swap)       : 0), 0);
 
-    // Exit time from the latest closing deal
+    // Prefer API-provided pnl; compute from price diff as fallback
+    const apiPnlVals = exitDeals.map((d) => getDealPnl(d)).filter((v) => v !== null);
+    if (apiPnlVals.length > 0) {
+      pnl = parseFloat((apiPnlVals.reduce((s, v) => s + v, 0) + commission + swap).toFixed(8));
+    } else if (exit !== null) {
+      const priceDiff = direction === "Long" ? exit - entry : entry - exit;
+      pnl = parseFloat(((priceDiff * entryVol) + commission + swap).toFixed(8));
+    }
+
     const latestExit = exitDeals[exitDeals.length - 1];
     exitTime = new Date(Number(latestExit.executionTimestamp)).toISOString().slice(11, 16);
   }
 
   console.log(
     `buildPositionTrade pos=${positionId}: ${sorted.length} deal(s) | ${exitDeals.length} exit deal(s) | ` +
-    `firstDealKeys=[${Object.keys(sorted[0]).slice(0, 14).join(",")}] | ` +
     `entry=${entry} exit=${exit} pnl=${pnl} isOpen=${isOpen}`
   );
 
