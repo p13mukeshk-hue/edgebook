@@ -3782,13 +3782,14 @@ function updateMetrics(){
   // Helper: get P&L in display currency for a trade
   // All-accounts → convert to USD; single-account → raw value
   const pnlInDisplay = t => {
-    if (t.pnl === null) return null;
+    if (!isFinite(t.pnl)) return 0;
     if (!isAll) return t.pnl;
     const ac = acctCur(t.accountId);
-    return FxRates.toUSD(t.pnl, ac);
+    const v = FxRates.toUSD(t.pnl, ac);
+    return isFinite(v) ? v : t.pnl;
   };
 
-  const closed = src.filter(t=>t.pnl!==null);
+  const closed = src.filter(t => t.pnl !== null && isFinite(t.pnl));
   const pnlVals = closed.map(pnlInDisplay);
   const net = pnlVals.reduce((a,v)=>a+v, 0);
   const wins = pnlVals.filter(v=>v>0), losses = pnlVals.filter(v=>v<0);
@@ -3829,32 +3830,49 @@ function sourceBadge(t){
   return '<span class="badge badge-src-manual">Manual</span>';
 }
 function tradeRow(t){
-  const c=acctCur(t.accountId), pnl=t.pnl;
-  const bd=pnlBreakdown(t);
-  const sym=(t.symbol||'').toUpperCase();
-  const futSpec=FUTURES_SPECS[sym];
-  const szLabel=futSpec?'contracts':t.asset==='fx'?'lots':t.asset==='eq'?'shares':'units';
-  const pnlStr=pnl===null
-    ?'<span class="badge-open"><span class="badge-open-dot"></span><span style="color:#ffe066;position:relative;z-index:1;text-shadow:0 0 8px rgba(255,224,102,0.7)">Open</span></span>'
-    :pnl>=0
-      ?`<span class="pnl-pos" title="${bd}" style="cursor:help">+${c}${pnl.toFixed(2)}</span>`
-      :`<span class="pnl-neg" title="${bd}" style="cursor:help">-${c}${Math.abs(pnl).toFixed(2)}</span>`;
-  const isOpen = t.pnl === null;
+  const c      = acctCur(t.accountId);
+  const pnl    = (t.pnl !== undefined && t.pnl !== null) ? t.pnl : null;
+  const sym    = (t.symbol  || '—').toUpperCase();
+  const asset  = t.asset    || 'eq';
+  const dir    = t.direction|| 'Long';
+  const entry  = t.entry    != null ? Number(t.entry)  : null;
+  const exit   = t.exit     != null ? Number(t.exit)   : null;
+  const size   = t.size     != null ? t.size : '—';
+  const date   = t.date     || '—';
+
+  const bd       = pnlBreakdown(t);
+  const futSpec  = FUTURES_SPECS[sym];
+  const szLabel  = futSpec ? 'contracts' : asset==='fx' ? 'lots' : asset==='eq' ? 'shares' : 'units';
+  const decimals = asset==='fx' ? 4 : 2;
+
+  const isOpen = pnl === null;
+  const pnlStr = isOpen
+    ? '<span class="badge-open"><span class="badge-open-dot"></span><span style="color:#ffe066;position:relative;z-index:1;text-shadow:0 0 8px rgba(255,224,102,0.7)">Open</span></span>'
+    : pnl >= 0
+      ? `<span class="pnl-pos" title="${bd}" style="cursor:help">+${c}${pnl.toFixed(2)}</span>`
+      : `<span class="pnl-neg" title="${bd}" style="cursor:help">-${c}${Math.abs(pnl).toFixed(2)}</span>`;
+
   const symCell = isOpen
-    ? `<div class="sym-open-wrap"><span class="sym-open-name" style="font-weight:600">${t.symbol}</span><span class="sym-open-label">live</span></div>`
-    : `<span style="font-weight:600">${t.symbol}</span>`;
-  const rr=(t.sl&&t.tp)?Math.abs((t.tp-t.entry)/(t.entry-t.sl)).toFixed(1)+'R':'—';
+    ? `<div class="sym-open-wrap"><span class="sym-open-name" style="font-weight:600">${sym}</span><span class="sym-open-label">live</span></div>`
+    : `<span style="font-weight:600">${sym}</span>`;
+
+  const entryStr = entry != null ? `${c}${entry.toFixed(decimals)}` : '—';
+  const exitStr  = exit  != null ? `${c}${exit.toFixed(decimals)}`  : '—';
+  const rr = (t.sl && t.tp && entry != null && entry !== t.sl)
+    ? Math.abs((t.tp - entry) / (entry - t.sl)).toFixed(1) + 'R'
+    : '—';
+
   return `<tr>
-    <td class="td-mono" style="color:var(--text3)">${fmtDate(t.date)}</td>
+    <td class="td-mono" style="color:var(--text3)">${fmtDate(date)}</td>
     <td style="font-weight:600">${symCell}</td>
-    <td><span class="badge badge-${t.asset}">${ASSET_LABELS[t.asset]}</span></td>
+    <td><span class="badge badge-${asset}">${ASSET_LABELS[asset]||asset}</span></td>
     <td>
-      <span class="badge badge-${t.direction==='Long'?'long':'short'}">${t.direction}</span>
+      <span class="badge badge-${dir==='Long'?'long':'short'}">${dir}</span>
       ${t.instrument ? `<span class="badge" style="background:var(--bg4);color:var(--text2);margin-left:3px;font-size:10px">${t.instrument==='Options'&&t.optionType ? t.optionType : t.instrument}</span>` : ''}
     </td>
-    <td class="td-mono" title="${t.strike?'Strike: '+t.strike:''}">${c}${(t.entry??0).toFixed(t.asset==='fx'?4:2)}${t.strike?` <span style="font-size:10px;color:var(--text3)">@${t.strike}</span>`:''}</td>
-    <td class="td-mono">${t.exit!=null?c+(t.exit??0).toFixed(t.asset==='fx'?4:2):'—'}</td>
-    <td class="td-mono" title="${szLabel}">${t.size} <span style="font-size:10px;color:var(--text3)">${szLabel}</span></td>
+    <td class="td-mono" title="${t.strike?'Strike: '+t.strike:''}">${entryStr}${t.strike?` <span style="font-size:10px;color:var(--text3)">@${t.strike}</span>`:''}</td>
+    <td class="td-mono">${exitStr}</td>
+    <td class="td-mono" title="${szLabel}">${size} <span style="font-size:10px;color:var(--text3)">${szLabel}</span></td>
     <td class="td-mono" style="color:var(--text3)">${rr}</td>
     <td>${t.emotion?.split(' ')[0]||'—'}</td>
     <td style="font-size:12px;color:var(--text3)">${t.strategy||'—'}</td>
@@ -3881,7 +3899,7 @@ function getFilteredTrades(page, searchId, assetId, dirId, resultId){
     if(rf==='win'&&!(t.pnl!==null&&t.pnl>0)) return false;
     if(rf==='loss'&&!(t.pnl!==null&&t.pnl<0)) return false;
     if(rf==='open'&&t.pnl!==null) return false;
-    if(sq&&!(t.symbol.toLowerCase().includes(sq)||(t.notes||'').toLowerCase().includes(sq))) return false;
+    if(sq&&!((t.symbol||'').toLowerCase().includes(sq)||(t.notes||'').toLowerCase().includes(sq))) return false;
     return true;
   });
 }
@@ -3891,20 +3909,23 @@ const TABLE_HEADS = '<thead><tr><th>Date</th><th>Symbol</th><th>Class</th><th>Di
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
 
-const _safeRow = t => { try{ return tradeRow(t); }catch(e){ console.warn('[tradeRow]',t?.id,e); return ''; } };
-
 function renderTradeTable(){
+  const src = tradesForContext('dashboard');
+  console.log('[renderTradeTable] trades array length:', trades.length,
+    '| context src length:', src.length,
+    '| activePageAcct.dashboard:', activePageAcct['dashboard'],
+    '| sample accountIds:', src.slice(0,3).map(t=>t.accountId));
   const filtered=getFilteredTrades('dashboard','dash-search','dash-filter-asset','dash-filter-dir','').slice(0,rows());
   const wrap=document.getElementById('trade-table-wrap');
   if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-table-list"></i><p>No trades match.</p></div>';return;}
-  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(_safeRow).join('')}</tbody></table>`;
+  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
   applyCompact();
 }
 function renderFullJournal(){
   const filtered=getFilteredTrades('journal','j-search','j-asset','j-dir','j-result');
   const wrap=document.getElementById('full-journal-wrap');
   if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-book-open"></i><p>No trades match.</p></div>';return;}
-  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(_safeRow).join('')}</tbody></table>`;
+  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
   applyCompact();
 }
 
@@ -4250,7 +4271,7 @@ function renderCharts(){
   // Convert P&L to display currency (USD for all-accounts, raw for single account)
   const toPnlDisplay = t => isAll ? FxRates.toUSD(t.pnl, acctCur(t.accountId)) : t.pnl;
 
-  const closed=[...src].filter(t=>t.pnl!==null).reverse();
+  const closed=[...src].filter(t=>t.pnl!==null && isFinite(t.pnl)).reverse();
   let run=0;
   const pnlSeq=closed.map(t=>{run+=toPnlDisplay(t);return parseFloat(run.toFixed(2));});
   if(CH.equity) CH.equity.destroy();
