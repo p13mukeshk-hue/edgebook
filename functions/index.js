@@ -1542,13 +1542,14 @@ const REQUIRED_DEAL_FIELDS = [
   "dealId",
   "positionId",
   "orderId",
-  "dealType",
   "tradeSide",
   "symbolId",
   "filledVolume",
   "executionPrice",
   "executionTimestamp",
   "dealStatus",
+  // dealType intentionally omitted — cTrader MCP does not return it in deal objects.
+  // ENTRY/EXIT classification is done via chronological order + pnl presence instead.
 ];
 
 /**
@@ -1583,14 +1584,14 @@ function validateDeal(rawDeal) {
 /**
  * Build one Edgebook trade document from all deals sharing a positionId.
  *
- * Deal types:
- *   ENTRY   — opening fill: provides direction, entry price, size, date
- *   EXIT    — closing fill: provides actual exit price and API pnl
- *   REVERSE — close + reopen; treated as EXIT for the current position
+ * cTrader MCP does NOT return dealType in deal objects, so ENTRY/EXIT
+ * classification uses chronological order + pnl presence instead:
+ *   ENTRY = first deal by executionTimestamp (the opener)
+ *   EXIT  = any deal where pnl != null (the API only sets pnl on closing fills)
  *
- * For partial closes (multiple EXIT deals):
- *   exit = weighted-average price across all exit fills
- *   pnl  = sum of API pnl values from all exit deals
+ * For partial closes (multiple exit deals):
+ *   exit = weighted-average price across all closing fills
+ *   pnl  = sum of all closing-deal pnl values + commission + swap
  *
  * User-owned fields (strategy, emotion, notes, screenshots, psychology, tags)
  * are NOT included in the returned object — set(…, {merge:true}) preserves them.
@@ -1600,18 +1601,15 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const pipSize  = symbolInfo.pipSize  ?? null;
   const pipValue = symbolInfo.pipValue ?? null;
 
-  // Sort chronologically so ENTRY comes before EXIT
+  // Sort chronologically — first deal is the opener, later deals are closes
   const sorted = [...deals].sort(
     (a, b) => Number(a.executionTimestamp) - Number(b.executionTimestamp)
   );
 
-  const entryDeals = sorted.filter((d) => String(d.dealType).toUpperCase() === "ENTRY");
-  const exitDeals  = sorted.filter((d) =>
-    ["EXIT", "REVERSE"].includes(String(d.dealType).toUpperCase())
-  );
+  // First deal = ENTRY. Deals with pnl != null = EXIT (API populates pnl only on closing fills).
+  const primaryEntry = sorted[0];
+  const exitDeals    = sorted.filter((d) => d.pnl != null);
 
-  // Primary entry deal — oldest ENTRY, or first deal if none tagged ENTRY
-  const primaryEntry   = entryDeals[0] ?? sorted[0];
   const tradeSideUpper = String(primaryEntry.tradeSide).toUpperCase();
   const direction      = tradeSideUpper === "BUY" ? "Long" : "Short";
 
@@ -1620,10 +1618,8 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const entryTime = new Date(entryTs).toISOString().slice(11, 16);  // HH:MM
   const entry     = Number(primaryEntry.executionPrice);
 
-  // Size: total ENTRY volume → lots
-  const entryVol = entryDeals.length > 0
-    ? entryDeals.reduce((s, d) => s + Number(d.filledVolume), 0)
-    : Number(primaryEntry.filledVolume);
+  // Size from the opening fill volume → lots
+  const entryVol = Number(primaryEntry.filledVolume);
   const size = (lotSize && lotSize > 0)
     ? parseFloat((entryVol / lotSize).toFixed(8))
     : entryVol;
@@ -1633,7 +1629,7 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   if (exitDeals.length > 0) {
     isOpen = false;
 
-    // Weighted-average exit price across all exit fills
+    // Weighted-average exit price across all closing fills
     const totalExitVol = exitDeals.reduce((s, d) => s + Number(d.filledVolume), 0);
     const weightedSum  = exitDeals.reduce(
       (s, d) => s + Number(d.executionPrice) * Number(d.filledVolume), 0
@@ -1642,24 +1638,18 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
       ? parseFloat((weightedSum / totalExitVol).toFixed(8))
       : null;
 
-    // Sum API-provided pnl from exit deals (null if none provided it)
-    const pnlVals = exitDeals
-      .map((d) => (d.pnl != null ? Number(d.pnl) : null))
-      .filter((v) => v !== null);
+    // Sum pnl from all closing deals (guaranteed non-null by exitDeals filter above)
+    const rawPnl = exitDeals.reduce((s, d) => s + Number(d.pnl), 0);
+    // Add commission + swap from all deals in this position
+    const commission = deals.reduce(
+      (s, d) => s + (d.commission != null ? Number(d.commission) : 0), 0
+    );
+    const swap = deals.reduce(
+      (s, d) => s + (d.swap != null ? Number(d.swap) : 0), 0
+    );
+    pnl = parseFloat((rawPnl + commission + swap).toFixed(8));
 
-    if (pnlVals.length > 0) {
-      pnl = pnlVals.reduce((s, v) => s + v, 0);
-      // Incorporate commission + swap across all deals in this position
-      const commission = deals.reduce(
-        (s, d) => s + (d.commission != null ? Number(d.commission) : 0), 0
-      );
-      const swap = deals.reduce(
-        (s, d) => s + (d.swap != null ? Number(d.swap) : 0), 0
-      );
-      pnl = parseFloat((pnl + commission + swap).toFixed(8));
-    }
-
-    // Exit time from the latest exit deal
+    // Exit time from the latest closing deal
     const latestExit = exitDeals[exitDeals.length - 1];
     exitTime = new Date(Number(latestExit.executionTimestamp)).toISOString().slice(11, 16);
   }
