@@ -288,6 +288,23 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 .search-input{padding:6px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:12px;font-family:var(--font-body);outline:none;width:160px}
 .search-input::placeholder{color:var(--text3)}
 .search-input:focus{border-color:var(--accent)}
+/* Quick filter pills */
+.qf-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.qf-pills{display:flex;gap:4px;flex-wrap:wrap}
+.qf-pill{padding:3px 10px;border-radius:20px;border:1px solid var(--border);background:none;color:var(--text3);font-size:11px;font-family:var(--font-body);cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.qf-pill:hover{background:var(--bg3);color:var(--text)}
+.qf-pill.qf-active{background:var(--accent);border-color:var(--accent);color:#fff}
+.qf-count{font-size:10px;opacity:.8}
+/* Pagination */
+.pg-wrap{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-top:1px solid var(--border);flex-wrap:wrap;gap:8px}
+.pg-info{font-size:12px;color:var(--text3)}
+.pg-controls{display:flex;gap:4px;align-items:center}
+.pg-btn{padding:4px 9px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);color:var(--text2);font-size:12px;font-family:var(--font-body);cursor:pointer;transition:.15s;min-width:30px;text-align:center}
+.pg-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.pg-btn.pg-active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.pg-btn:disabled{opacity:.35;cursor:not-allowed}
+.pg-nav{padding:4px 12px}
+.pg-ellipsis{padding:4px 2px;color:var(--text3);font-size:12px;user-select:none}
 table{width:100%;border-collapse:collapse}
 .table-card table{width:100%;border-collapse:collapse;table-layout:fixed}
 .table-card th,.table-card td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1008,13 +1025,17 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
         <div class="table-card" id="widget-recenttrades">
           <div class="table-header">
             <div class="chart-title">Recent Trades</div>
-            <div class="table-filters">
-              <input class="search-input" id="dash-search" placeholder="Search…" oninput="renderTradeTableDebounced()">
-              <select class="filter-select" id="dash-filter-asset" onchange="renderTradeTable()"><option value="">All assets</option><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select>
-              <select class="filter-select" id="dash-filter-dir" onchange="renderTradeTable()"><option value="">Long &amp; Short</option><option value="Long">Long</option><option value="Short">Short</option></select>
+            <div class="qf-bar">
+              <div id="dash-qf-pills" class="qf-pills"></div>
+              <div class="table-filters">
+                <input class="search-input" id="dash-search" placeholder="Search…" oninput="dashPage=1;renderTradeTableDebounced()">
+                <select class="filter-select" id="dash-filter-asset" onchange="dashPage=1;renderTradeTable()"><option value="">All assets</option><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select>
+                <select class="filter-select" id="dash-filter-dir" onchange="dashPage=1;renderTradeTable()"><option value="">Long &amp; Short</option><option value="Long">Long</option><option value="Short">Short</option></select>
+              </div>
             </div>
           </div>
           <div id="trade-table-wrap"><div class="empty-state"><i class="fa-solid fa-table-list"></i><p>No trades yet. Click "Log trade" to begin.</p></div></div>
+          <div id="dash-pagination"></div>
         </div>
       </div>
 
@@ -1024,16 +1045,20 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
         <div class="table-card">
           <div class="table-header">
             <div class="chart-title">All Trades</div>
-            <div class="table-filters">
-              <input class="search-input" id="j-search" placeholder="Search…" oninput="renderFullJournal()">
-              <select class="filter-select" id="j-asset" onchange="renderFullJournal()"><option value="">All assets</option><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select>
-              <select class="filter-select" id="j-dir" onchange="renderFullJournal()"><option value="">All directions</option><option value="Long">Long</option><option value="Short">Short</option></select>
-              <select class="filter-select" id="j-result" onchange="renderFullJournal()"><option value="">All results</option><option value="win">Wins</option><option value="loss">Losses</option><option value="open">Open</option></select>
-              <button class="topbar-btn" onclick="openImportCSV()"><i class="fa-solid fa-file-arrow-up"></i> Import CSV</button>
-              <button class="topbar-btn" onclick="exportCSV()"><i class="fa-solid fa-download"></i> Export CSV</button>
+            <div class="qf-bar">
+              <div id="journal-qf-pills" class="qf-pills"></div>
+              <div class="table-filters">
+                <input class="search-input" id="j-search" placeholder="Search…" oninput="journalPage=1;renderFullJournal()">
+                <select class="filter-select" id="j-asset" onchange="journalPage=1;renderFullJournal()"><option value="">All assets</option><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select>
+                <select class="filter-select" id="j-dir" onchange="journalPage=1;renderFullJournal()"><option value="">All directions</option><option value="Long">Long</option><option value="Short">Short</option></select>
+                <select class="filter-select" id="j-result" onchange="journalPage=1;renderFullJournal()"><option value="">All results</option><option value="win">Wins</option><option value="loss">Losses</option><option value="open">Open</option></select>
+                <button class="topbar-btn" onclick="openImportCSV()"><i class="fa-solid fa-file-arrow-up"></i> Import CSV</button>
+                <button class="topbar-btn" onclick="exportCSV()"><i class="fa-solid fa-download"></i> Export CSV</button>
+              </div>
             </div>
           </div>
           <div id="full-journal-wrap"><div class="empty-state"><i class="fa-solid fa-book-open"></i><p>Your journal is empty.</p></div></div>
+          <div id="journal-pagination"></div>
         </div>
       </div>
 
@@ -2054,7 +2079,10 @@ const SettingsManager = {
 // Trades written by the Cloud Function (Zerodha Kite raw format) may have
 // `tradingsymbol` / `average_price` / `fill_timestamp` instead of the app fields.
 function normaliseFsTrade(t){
-  if(t.symbol && t.entry != null) return t; // already normalised
+  if(t.symbol && t.entry != null){
+    if(t.source==='ctrader') console.log('[cTrader]', t.symbol, 'entry:', t.entry, 'exit:', t.exit, 'pnl:', t.pnl, 'isOpen:', t.isOpen);
+    return t; // already normalised
+  }
   const sym  = t.tradingsymbol || t.symbol || '';
   const entry= parseFloat(t.average_price ?? t.entry ?? 0);
   let date   = t.date || '';
@@ -2113,6 +2141,9 @@ let editId=null, moodEmoji='', modalEmoji='';
 let activeAcctId='all';   // 'all' or account id string
 let activeSymbolTab='eq'; // symbol manager tab
 let selectedNewAcctColor=ACCT_COLORS[0];
+let dashPage=1, journalPage=1;
+let dashQuickFilter='', journalQuickFilter='';
+const PER_PAGE=50;
 let selectedEditAcctColor=ACCT_COLORS[0];
 let activePageAcct={dashboard:'all',journal:'all',analytics:'all'};
 
@@ -3009,6 +3040,8 @@ function renderPageAcctTabs(){
 }
 function setPageAcct(page,id){
   activePageAcct[page]=id;
+  if(page==='dashboard') dashPage=1;
+  if(page==='journal')   journalPage=1;
   renderPageAcctTabs();
   if(page==='dashboard'){ updateMetrics(); renderTradeTable(); setTimeout(renderCharts,60); }
   if(page==='journal')  renderFullJournal();
@@ -4105,13 +4138,13 @@ function tradeRow(t){
   </tr>`;
 }
 
-function getFilteredTrades(page, searchId, assetId, dirId, resultId){
+function getBaseFilteredTrades(page, searchId, assetId, dirId, resultId){
   const src=tradesForContext(page);
   const sq=(document.getElementById(searchId)?.value||'').toLowerCase();
   const af=document.getElementById(assetId)?.value||'';
   const df=document.getElementById(dirId)?.value||'';
   const rf=document.getElementById(resultId)?.value||'';
-  return src.filter(t=>{
+  const list=src.filter(t=>{
     if(af&&t.asset!==af) return false;
     if(df&&t.direction!==df) return false;
     if(rf==='win'&&!(t.pnl!==null&&t.pnl>0)) return false;
@@ -4120,6 +4153,95 @@ function getFilteredTrades(page, searchId, assetId, dirId, resultId){
     if(sq&&!((t.symbol||'').toLowerCase().includes(sq)||(t.notes||'').toLowerCase().includes(sq))) return false;
     return true;
   });
+  // Newest first: date DESC, then entryTime DESC within same day
+  list.sort((a,b)=>{
+    const dc=(b.date??'').localeCompare(a.date??'');
+    return dc!==0 ? dc : (b.entryTime??'').localeCompare(a.entryTime??'');
+  });
+  return list;
+}
+function applyQuickFilter(list, qf){
+  if(!qf) return list;
+  return list.filter(t=>{
+    if(qf==='Long')    return t.direction==='Long';
+    if(qf==='Short')   return t.direction==='Short';
+    if(qf==='Open')    return t.isOpen===true||t.pnl===null;
+    if(qf==='Closed')  return t.isOpen===false||(t.exit!=null);
+    if(qf==='Winners') return t.pnl!=null&&t.pnl>0;
+    if(qf==='Losers')  return t.pnl!=null&&t.pnl<0;
+    return true;
+  });
+}
+// Kept for backwards compat — used by AI report + other callers
+function getFilteredTrades(page, searchId, assetId, dirId, resultId){
+  const qf=page==='dashboard'?dashQuickFilter:journalQuickFilter;
+  return applyQuickFilter(getBaseFilteredTrades(page,searchId,assetId,dirId,resultId),qf);
+}
+const QF_PILL_DEFS=[
+  {key:'',label:'All'},{key:'Long',label:'Long'},{key:'Short',label:'Short'},
+  {key:'Open',label:'Open'},{key:'Closed',label:'Closed'},
+  {key:'Winners',label:'Winners'},{key:'Losers',label:'Losers'},
+];
+function renderQuickFilterPills(which, base, activeQf){
+  const el=document.getElementById(`${which}-qf-pills`); if(!el) return;
+  const c={
+    '':base.length,
+    'Long':   base.filter(t=>t.direction==='Long').length,
+    'Short':  base.filter(t=>t.direction==='Short').length,
+    'Open':   base.filter(t=>t.isOpen===true||t.pnl===null).length,
+    'Closed': base.filter(t=>t.isOpen===false||(t.exit!=null)).length,
+    'Winners':base.filter(t=>t.pnl!=null&&t.pnl>0).length,
+    'Losers': base.filter(t=>t.pnl!=null&&t.pnl<0).length,
+  };
+  const fn=which==='dash'?'setDashQuickFilter':'setJournalQuickFilter';
+  el.innerHTML=QF_PILL_DEFS.map(p=>
+    `<button class="qf-pill${p.key===activeQf?' qf-active':''}" onclick="${fn}('${p.key}')">${p.label} <span class="qf-count">${c[p.key]??0}</span></button>`
+  ).join('');
+}
+function setDashQuickFilter(key){
+  dashQuickFilter=(dashQuickFilter===key&&key!=='')?'':key;
+  dashPage=1; renderTradeTable();
+}
+function setJournalQuickFilter(key){
+  journalQuickFilter=(journalQuickFilter===key&&key!=='')?'':key;
+  journalPage=1; renderFullJournal();
+}
+function renderPagination(total, page, perPage, setterFn, containerId){
+  const el=document.getElementById(containerId); if(!el) return;
+  const totalPages=Math.ceil(total/perPage);
+  if(totalPages<=1){el.innerHTML='';return;}
+  const start=(page-1)*perPage+1, end=Math.min(page*perPage,total);
+  const nums=[];
+  if(totalPages<=7){for(let i=1;i<=totalPages;i++) nums.push(i);}
+  else{
+    nums.push(1);
+    if(page>3) nums.push('…');
+    for(let i=Math.max(2,page-1);i<=Math.min(totalPages-1,page+1);i++) nums.push(i);
+    if(page<totalPages-2) nums.push('…');
+    nums.push(totalPages);
+  }
+  const btns=nums.map(n=>n==='…'
+    ?`<span class="pg-ellipsis">…</span>`
+    :`<button class="pg-btn${n===page?' pg-active':''}" onclick="${setterFn}(${n})">${n}</button>`
+  ).join('');
+  el.innerHTML=`<div class="pg-wrap">
+    <span class="pg-info">Showing ${start}–${end} of ${total} trades</span>
+    <div class="pg-controls">
+      <button class="pg-btn pg-nav" ${page<=1?'disabled':''} onclick="${setterFn}(${page-1})">← Prev</button>
+      ${btns}
+      <button class="pg-btn pg-nav" ${page>=totalPages?'disabled':''} onclick="${setterFn}(${page+1})">Next →</button>
+    </div>
+  </div>`;
+}
+function setDashPage(p){
+  dashPage=p;
+  document.getElementById('widget-recenttrades')?.scrollIntoView({behavior:'smooth',block:'start'});
+  renderTradeTable();
+}
+function setJournalPage(p){
+  journalPage=p;
+  document.getElementById('full-journal-wrap')?.scrollIntoView({behavior:'smooth',block:'start'});
+  renderFullJournal();
 }
 
 const TABLE_HEADS = '<thead><tr><th>Date</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
@@ -4128,23 +4250,36 @@ let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
 
 function renderTradeTable(){
-  const src = tradesForContext('dashboard');
-  console.log('[renderTradeTable] trades array length:', trades.length,
-    '| context src length:', src.length,
-    '| activePageAcct.dashboard:', activePageAcct['dashboard'],
-    '| sample accountIds:', src.slice(0,3).map(t=>t.accountId));
-  const filtered=getFilteredTrades('dashboard','dash-search','dash-filter-asset','dash-filter-dir','').slice(0,rows());
+  const base=getBaseFilteredTrades('dashboard','dash-search','dash-filter-asset','dash-filter-dir','');
+  const filtered=applyQuickFilter(base,dashQuickFilter);
   const wrap=document.getElementById('trade-table-wrap');
-  if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-table-list"></i><p>No trades match.</p></div>';return;}
-  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
+  renderQuickFilterPills('dash',base,dashQuickFilter);
+  console.log('[renderTradeTable] total:',trades.length,'| filtered:',filtered.length,
+    '| cTrader in view:',filtered.filter(t=>t.source==='ctrader').length,'| page:',dashPage);
+  if(!filtered.length){
+    wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-table-list"></i><p>No trades match.</p></div>';
+    document.getElementById('dash-pagination').innerHTML='';
+    return;
+  }
+  const paginated=filtered.slice((dashPage-1)*PER_PAGE, dashPage*PER_PAGE);
+  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${paginated.map(tradeRow).join('')}</tbody></table>`;
   applyCompact();
+  renderPagination(filtered.length,dashPage,PER_PAGE,'setDashPage','dash-pagination');
 }
 function renderFullJournal(){
-  const filtered=getFilteredTrades('journal','j-search','j-asset','j-dir','j-result');
+  const base=getBaseFilteredTrades('journal','j-search','j-asset','j-dir','j-result');
+  const filtered=applyQuickFilter(base,journalQuickFilter);
   const wrap=document.getElementById('full-journal-wrap');
-  if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-book-open"></i><p>No trades match.</p></div>';return;}
-  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
+  renderQuickFilterPills('journal',base,journalQuickFilter);
+  if(!filtered.length){
+    wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-book-open"></i><p>No trades match.</p></div>';
+    document.getElementById('journal-pagination').innerHTML='';
+    return;
+  }
+  const paginated=filtered.slice((journalPage-1)*PER_PAGE, journalPage*PER_PAGE);
+  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${paginated.map(tradeRow).join('')}</tbody></table>`;
   applyCompact();
+  renderPagination(filtered.length,journalPage,PER_PAGE,'setJournalPage','journal-pagination');
 }
 
 // ── TOOLTIP SYSTEM ──

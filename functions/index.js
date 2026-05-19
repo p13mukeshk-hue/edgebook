@@ -1654,6 +1654,12 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
     exitTime = new Date(Number(latestExit.executionTimestamp)).toISOString().slice(11, 16);
   }
 
+  console.log(
+    `buildPositionTrade pos=${positionId}: ${sorted.length} deal(s) | ${exitDeals.length} exit deal(s) | ` +
+    `firstDealKeys=[${Object.keys(sorted[0]).slice(0, 14).join(",")}] | ` +
+    `entry=${entry} exit=${exit} pnl=${pnl} isOpen=${isOpen}`
+  );
+
   const trade = {
     id:            `ctrader_${positionId}`,
     brokerTradeId: positionId,
