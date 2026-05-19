@@ -1644,6 +1644,7 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const size     = (lotSize && lotSize > 0)
     ? parseFloat((entryVol / lotSize).toFixed(8))
     : entryVol;
+  console.log(`[buildPositionTrade] pos=${positionId} symbol=${symbolInfo.name} lotSize=${lotSize} entryVol=${entryVol} size=${size}`);
 
   // ── STEP 2: try multiple pnl field names ────────────────────────────────────
   const PNL_FIELDS = ["pnl", "grossPnl", "netPnl", "profit", "dealPnl", "realizedPnl", "grossProfit", "netProfit"];

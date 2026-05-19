@@ -12,7 +12,7 @@
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch, query, where, onSnapshot, addDoc } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, getDocsFromServer, deleteDoc, writeBatch, query, where, onSnapshot, addDoc } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
@@ -41,6 +41,7 @@ window._fbGetDoc = getDoc;
 window._fbSetDoc = setDoc;
 window._fbCollection = collection;
 window._fbGetDocs = getDocs;
+window._fbGetDocsFromServer = getDocsFromServer;
 window._fbDeleteDoc = deleteDoc;
 window._fbWriteBatch = writeBatch;
 window._fbQuery = query;
@@ -2132,7 +2133,7 @@ const DataStore = {
   loadMoods(){ try{return JSON.parse(localStorage.getItem(this._mk()))||[];}catch{return[];} },
   saveMoods(m){ try{localStorage.setItem(this._mk(),JSON.stringify(m));}catch{} },
   // Load trades from Firestore and merge with localStorage
-  async loadFromFirestore(){ if(!window._firebaseReady||this._uid==='guest') return; try{ const snap=await window._fbGetDocs(window._fbCollection(window._fbDb,'users',this._uid,'trades')); if(!snap.empty){ const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null); localStorage.setItem(this._tk(),JSON.stringify(fsTrades)); trades=fsTrades; refreshAll(); } }catch(e){ console.warn('Firestore load:',e); } },
+  async loadFromFirestore(opts={}){ if(!window._firebaseReady||this._uid==='guest') return; try{ const col=window._fbCollection(window._fbDb,'users',this._uid,'trades'); const snap=opts.forceServer ? await window._fbGetDocsFromServer(col) : await window._fbGetDocs(col); const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null); localStorage.setItem(this._tk(),JSON.stringify(fsTrades)); trades=fsTrades; refreshAll(); }catch(e){ console.warn('Firestore load:',e); } },
 };
 
 /* ══════════════════════════════════════════════════════
@@ -2709,8 +2710,10 @@ async function forceReimportZerodha(){
       }
     }
 
-    // STEP E — reload and refresh
-    await DataStore.loadFromFirestore();
+    // STEP E — clear cache and force-reload fresh from server
+    trades = [];
+    localStorage.removeItem(DataStore._tk());
+    await DataStore.loadFromFirestore({ forceServer: true });
     showToast(`Done! Imported ${data.saved} trade(s) from Zerodha`, 'success');
   } catch(e){
     showToast(`Zerodha re-import failed: ${e.message}`, 'error');
@@ -2798,8 +2801,10 @@ async function forceReimportCtrader(){
       }
     }
 
-    // STEP E — reload and refresh
-    await DataStore.loadFromFirestore();
+    // STEP E — clear cache and force-reload fresh from server
+    trades = [];
+    localStorage.removeItem(DataStore._tk());
+    await DataStore.loadFromFirestore({ forceServer: true });
     const imported = data.imported ?? data.saved ?? 0;
     showToast(`Done! Imported ${imported} trade(s) from cTrader`, 'success');
   } catch(e){
