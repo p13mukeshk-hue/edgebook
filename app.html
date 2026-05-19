@@ -886,6 +886,11 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
 .dup-field-value.differs{color:var(--amber);font-weight:700}
 .dup-nav{font-size:12px;color:var(--text3);text-align:center;margin-bottom:12px}
 .dup-actions{display:flex;gap:10px;justify-content:center;width:100%}
+/* ── Source badges ───────────────────────────────────────────────────── */
+.badge-src-manual{background:var(--bg4);color:var(--text3)}
+.badge-src-zerodha{background:var(--blue-bg);color:var(--blue)}
+.badge-src-ctrader{background:rgba(108,99,255,0.15);color:var(--accent2)}
+.badge-src-csv{background:var(--amber-bg);color:var(--amber)}
 </style>
 </head>
 <body>
@@ -3644,6 +3649,9 @@ function saveTrade(){
     optionType: (()=>{ if(!isFno) return null; if(document.getElementById('t-instrument').value!=='Options') return null; return document.getElementById('t-position').value; })(),
     strike: isFno && document.getElementById('t-instrument').value==='Options' ? (parseFloat(document.getElementById('t-strike').value)||null) : null,
     screenshots: [...currentScreenshots],
+    source: editId
+      ? (trades.find(t=>t.id==editId)?.source || 'manual')
+      : 'manual',
   };
   // For new trades, check for local duplicates before saving
   if(!editId){
@@ -3762,6 +3770,13 @@ function acctTagCell(t){
   return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text3)"><span style="width:6px;height:6px;border-radius:50%;background:${a.color};display:inline-block"></span>${a.name}</span>`;
 }
 
+function sourceBadge(t){
+  const src=(t.source||t.broker||'manual').toLowerCase();
+  if(src==='zerodha') return '<span class="badge badge-src-zerodha">Zerodha</span>';
+  if(src==='ctrader') return '<span class="badge badge-src-ctrader">cTrader</span>';
+  if(src==='csv')     return '<span class="badge badge-src-csv">CSV</span>';
+  return '<span class="badge badge-src-manual">Manual</span>';
+}
 function tradeRow(t){
   const c=acctCur(t.accountId), pnl=t.pnl;
   const bd=pnlBreakdown(t);
@@ -3793,6 +3808,7 @@ function tradeRow(t){
     <td>${t.emotion?.split(' ')[0]||'—'}</td>
     <td style="font-size:12px;color:var(--text3)">${t.strategy||'—'}</td>
     <td>${acctTagCell(t)}</td>
+    <td>${sourceBadge(t)}</td>
     <td>${t.screenshots&&t.screenshots.length?`<span class="ss-cell-thumb" onclick="openLightbox(${t.id},0)" title="View ${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}"><img src="${t.screenshots[0].src}" alt="chart"></span>${t.screenshots.length>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${t.screenshots.length-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>'}</td>
     <td>${pnlStr}</td>
     <td style="white-space:nowrap">
@@ -3819,7 +3835,7 @@ function getFilteredTrades(page, searchId, assetId, dirId, resultId){
   });
 }
 
-const TABLE_HEADS = '<thead><tr><th>Date</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
+const TABLE_HEADS = '<thead><tr><th>Date</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
 
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
