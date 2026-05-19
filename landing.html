@@ -190,6 +190,22 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
 .fade-up{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}
 .fade-up.visible{opacity:1;transform:translateY(0)}
 </style>
+<!-- Auto-redirect signed-in users straight to the app -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
+import { getAuth, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
+const _app = initializeApp({
+  apiKey:"AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
+  authDomain:"edgebook-2dce2.firebaseapp.com",
+  projectId:"edgebook-2dce2",
+  storageBucket:"edgebook-2dce2.firebasestorage.app",
+  messagingSenderId:"643434583515",
+  appId:"1:643434583515:web:1718b5dad6dcb5233903fe"
+});
+onAuthStateChanged(getAuth(_app), user => {
+  if (user) window.location.replace('/app.html');
+});
+</script>
 </head>
 <body>
 
@@ -206,8 +222,8 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
     <a href="#how" class="nav-link">How it works</a>
   </div>
   <div class="nav-actions">
-    <a href="index.html" class="btn-ghost">Sign in</a>
-    <a href="index.html" class="btn-primary">Get started free</a>
+    <a href="/app.html" class="btn-ghost">Sign in</a>
+    <a href="/app.html" class="btn-primary">Get started free</a>
   </div>
 </nav>
 
@@ -217,7 +233,7 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
   <h1 class="hero-h1">Trades to Insights.<br><em>Insights to Edge.</em></h1>
   <p class="hero-sub">The trading journal that turns your trade history into performance intelligence. Log, analyse and grow — one trade at a time.</p>
   <div class="hero-btns">
-    <a href="index.html" class="btn-hero btn-hero-primary">Start for free →</a>
+    <a href="/app.html" class="btn-hero btn-hero-primary">Start for free →</a>
     <a href="#features" class="btn-hero btn-hero-ghost">See features</a>
   </div>
   <p class="hero-note">Free forever · No credit card · Works with Zerodha, Angel One, Upstox & more</p>
@@ -451,7 +467,7 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
           <li class="no">Chart screenshots</li>
           <li class="no">Drawdown tracker</li>
         </ul>
-        <button class="btn-plan" onclick="window.location.href='index.html'">Get started free</button>
+        <button class="btn-plan" onclick="window.location.href='/app.html'">Get started free</button>
       </div>
       <div class="plan featured">
         <div class="plan-badge">Most popular</div>
@@ -468,7 +484,7 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
           <li>Drawdown tracker</li>
           <li>Priority support</li>
         </ul>
-        <button class="btn-plan featured" onclick="window.location.href='index.html'">Start Pro free for 14 days</button>
+        <button class="btn-plan featured" onclick="window.location.href='/app.html'">Start Pro free for 14 days</button>
       </div>
     </div>
     <p class="pricing-note">14-day free trial on Pro · Cancel anytime · Secure payments via Razorpay</p>
@@ -481,7 +497,7 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
   <h2 class="section-title">Ready to find your edge?</h2>
   <p class="section-sub">Join traders who track smarter, reflect deeper and grow faster with Edgebook.</p>
   <div class="cta-btns">
-    <a href="index.html" class="btn-hero btn-hero-primary">Start for free →</a>
+    <a href="/app.html" class="btn-hero btn-hero-primary">Start for free →</a>
     <a href="#pricing" class="btn-hero btn-hero-ghost">View pricing</a>
   </div>
 </div>
@@ -496,7 +512,7 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
     <a href="#" class="footer-link">Privacy</a>
     <a href="#" class="footer-link">Terms</a>
     <a href="#" class="footer-link">Contact</a>
-    <a href="index.html" class="footer-link">Sign in</a>
+    <a href="/app.html" class="footer-link">Sign in</a>
   </div>
   <span class="footer-copy">© 2026 Edgebook</span>
 </footer>
