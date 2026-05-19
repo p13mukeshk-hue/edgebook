@@ -2501,16 +2501,18 @@ async function syncCtraderTrades(){
       headers: { Authorization: `Bearer ${token}` }
     });
     const data = await res.json();
-    if(data.synced > 0){
+    if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
+    const saveCount = data.saved ?? 0;
+    if(saveCount > 0){
       trades = DataStore.loadTrades();
       refreshAll();
-      showToast(`${data.synced} new trades synced from cTrader`, 'success');
+      showToast(`${saveCount} new trade(s) synced from cTrader`, 'success');
     } else {
       showToast(data.note || 'No new trades to sync', 'info');
     }
     const ls = document.getElementById('ctrader-last-sync');
     if(ls){ ls.textContent = `Last synced: ${new Date().toLocaleString('en-IN')}`; ls.style.display = 'block'; }
-  } catch(e){ showToast('cTrader sync failed. Try again.', 'error'); }
+  } catch(e){ showToast(`cTrader sync failed: ${e.message}`, 'error'); }
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sync now';
 }
 
@@ -2623,10 +2625,11 @@ async function connectZerodha(){
     const btn = document.getElementById('zerodha-connect-btn');
     btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Connecting…';
     const res = await fetch(`${ZERODHA_FN}/zerodhaLogin`,{headers:{Authorization:`Bearer ${token}`}});
-    const {loginUrl} = await res.json();
-    window.location.href = loginUrl;
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
+    window.location.href = data.loginUrl;
   }catch(e){
-    showToast('Failed to connect Zerodha. Try again.','error');
+    showToast(`Failed to connect Zerodha: ${e.message}`,'error');
     const btn=document.getElementById('zerodha-connect-btn');
     btn.disabled=false; btn.innerHTML='<i class="fa-solid fa-link"></i> Connect';
   }
@@ -2640,16 +2643,18 @@ async function syncZerodhaTrades(){
   try{
     const res=await fetch(`${ZERODHA_FN}/syncZerodhaTrades`,{method:'POST',headers:{Authorization:`Bearer ${token}`}});
     const data=await res.json();
-    if(data.synced>0){
+    if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
+    const tradeCount = data.synced?.trades ?? 0;
+    if(tradeCount > 0){
       trades=DataStore.loadTrades();
       refreshAll();
-      showToast(`${data.synced} new trades synced from Zerodha`,'success');
+      showToast(`${tradeCount} new trade(s) synced from Zerodha`,'success');
     } else {
-      showToast('No new trades to sync','info');
+      showToast(data.note || data.message || 'No new trades to sync','info');
     }
     document.getElementById('zerodha-last-sync').textContent=`Last synced: ${new Date().toLocaleString('en-IN')}`;
   }catch(e){
-    showToast('Sync failed. Try again.','error');
+    showToast(`Zerodha sync failed: ${e.message}`,'error');
   }
   btn.disabled=false; btn.innerHTML='<i class="fa-solid fa-rotate"></i> Sync now';
 }
