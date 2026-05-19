@@ -2709,6 +2709,142 @@ async function getCtraderAccountStartDate(bearerToken, sessionId, uid) {
 }
 
 /**
+ * Extract a flat deals array from whatever shape the cTrader API returns.
+ * Returns the array (possibly empty), or null if the shape is unrecognised.
+ */
+function extractDealsArray(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    if (Array.isArray(raw.deals))       return raw.deals;
+    if (Array.isArray(raw.data))        return raw.data;
+    if (Array.isArray(raw.result))      return raw.result;
+    if (Array.isArray(raw.items))       return raw.items;
+    if (Array.isArray(raw.positions))   return raw.positions;
+    if (Array.isArray(raw.orders))      return raw.orders;
+    if (Array.isArray(raw.history))     return raw.history;
+    const key = Object.keys(raw).find((k) => Array.isArray(raw[k]));
+    if (key) return raw[key];
+    if (Object.keys(raw).length === 0) return [];
+  }
+  return null;
+}
+
+/**
+ * Probe the cTrader MCP to find which endpoint + parameter format actually
+ * returns historical deal data.  Tries a recent 30-day window (guaranteed to
+ * have data if the account has any trades) across every candidate combination.
+ *
+ * Returns the winning { label, endpoint, makeParams } object, or null if
+ * nothing worked (caller falls back to the original default).
+ */
+async function probeDealsEndpoint(bearerToken, sessionId, uid, toTs) {
+  const probeFrom    = toTs - 30 * 24 * 60 * 60 * 1000; // last 30 days
+  const probeFromISO = new Date(probeFrom).toISOString();
+  const probeToISO   = new Date(toTs).toISOString();
+
+  const CANDIDATES = [
+    // (fISO, tISO, fMs, tMs) → params object
+    {
+      label: "get_deals {fromTimestamp/toTimestamp ISO}",
+      endpoint: "get_deals",
+      makeParams: (fISO, tISO)       => ({ fromTimestamp: fISO, toTimestamp: tISO }),
+    },
+    {
+      label: "get_deals {from/to ISO}",
+      endpoint: "get_deals",
+      makeParams: (fISO, tISO)       => ({ from: fISO, to: tISO }),
+    },
+    {
+      label: "get_deals {from/to ms}",
+      endpoint: "get_deals",
+      makeParams: (fISO, tISO, fMs, tMs) => ({ from: fMs, to: tMs }),
+    },
+    {
+      label: "get_deals {startTime/endTime ISO}",
+      endpoint: "get_deals",
+      makeParams: (fISO, tISO)       => ({ startTime: fISO, endTime: tISO }),
+    },
+    {
+      label: "get_deals {dateFrom/dateTo ISO}",
+      endpoint: "get_deals",
+      makeParams: (fISO, tISO)       => ({ dateFrom: fISO, dateTo: tISO }),
+    },
+    {
+      label: "get_deals {} (no date filter)",
+      endpoint: "get_deals",
+      makeParams: ()                 => ({}),
+    },
+    {
+      label: "get_deal_history {fromTimestamp/toTimestamp ISO}",
+      endpoint: "get_deal_history",
+      makeParams: (fISO, tISO)       => ({ fromTimestamp: fISO, toTimestamp: tISO }),
+    },
+    {
+      label: "get_deal_history {from/to ISO}",
+      endpoint: "get_deal_history",
+      makeParams: (fISO, tISO)       => ({ from: fISO, to: tISO }),
+    },
+    {
+      label: "get_closed_positions {from/to ISO}",
+      endpoint: "get_closed_positions",
+      makeParams: (fISO, tISO)       => ({ from: fISO, to: tISO }),
+    },
+    {
+      label: "get_position_history {from/to ISO}",
+      endpoint: "get_position_history",
+      makeParams: (fISO, tISO)       => ({ from: fISO, to: tISO }),
+    },
+    {
+      label: "get_orders_history {from/to ISO}",
+      endpoint: "get_orders_history",
+      makeParams: (fISO, tISO)       => ({ from: fISO, to: tISO }),
+    },
+  ];
+
+  console.log(
+    `probeDealsEndpoint uid=${uid}: probing ${CANDIDATES.length} endpoint/param combos ` +
+    `on window ${probeFromISO} → ${probeToISO}`
+  );
+
+  for (const candidate of CANDIDATES) {
+    const params = candidate.makeParams(probeFromISO, probeToISO, probeFrom, toTs);
+    try {
+      console.log(
+        `probeDealsEndpoint uid=${uid}: trying [${candidate.label}] ` +
+        `params=${JSON.stringify(params)}`
+      );
+      const raw = await callCtraderTool(bearerToken, sessionId, candidate.endpoint, params);
+      const preview = JSON.stringify(raw).slice(0, 300);
+      const keys    = (!Array.isArray(raw) && raw && typeof raw === "object")
+        ? Object.keys(raw).join(", ") : "n/a";
+      console.log(
+        `probeDealsEndpoint uid=${uid}: [${candidate.label}] → ` +
+        `type=${typeof raw} isArray=${Array.isArray(raw)} keys=[${keys}] preview=${preview}`
+      );
+      const deals = extractDealsArray(raw);
+      if (deals !== null && deals.length > 0) {
+        console.log(
+          `probeDealsEndpoint uid=${uid}: ✓ WINNER [${candidate.label}] — ` +
+          `${deals.length} deal(s) returned. Will use this for all chunks.`
+        );
+        return candidate;
+      }
+    } catch (err) {
+      console.log(
+        `probeDealsEndpoint uid=${uid}: [${candidate.label}] threw: ${err.message}`
+      );
+    }
+  }
+
+  console.warn(
+    `probeDealsEndpoint uid=${uid}: no candidate returned deals. ` +
+    `Check logs above for raw API response shapes. ` +
+    `Falling back to get_deals + fromTimestamp/toTimestamp ISO for all chunks.`
+  );
+  return null;
+}
+
+/**
  * Fetch ALL historical deals across the full date range by splitting into
  * 720-hour (30-day) chunks — the hard cap enforced by the cTrader MCP API.
  *
@@ -2749,6 +2885,16 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
     `split into ${chunks.length} chunk(s) of ≤720h each`
   );
 
+  // Discover which endpoint + param format the API actually accepts.
+  // Probes a recent 30-day window; if nothing returns data, falls back to defaults.
+  const probe       = await probeDealsEndpoint(bearerToken, sessionId, uid, toTs);
+  const useEndpoint = probe?.endpoint  ?? "get_deals";
+  const makeParams  = probe?.makeParams ?? ((fISO, tISO) => ({ fromTimestamp: fISO, toTimestamp: tISO }));
+  console.log(
+    `syncCtraderHistory uid=${uid}: using endpoint="${useEndpoint}" ` +
+    `param format="${probe?.label ?? "get_deals {fromTimestamp/toTimestamp ISO} (default)"}"`
+  );
+
   const allDeals = [];
 
   for (let ci = 0; ci < chunks.length; ci++) {
@@ -2769,25 +2915,29 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
     let chunkFromMs  = chunkFrom; // may advance for hasMore+nextFrom pagination
 
     while (page < MAX_PAGES) {
-      // cTrader requires ISO 8601 strings — confirmed from Cloud Logging error -32602
-      const args = {
-        fromTimestamp: new Date(chunkFromMs).toISOString(),
-        toTimestamp:   toISO,
-      };
+      const args = makeParams(
+        new Date(chunkFromMs).toISOString(),
+        toISO,
+        chunkFromMs,
+        chunkTo
+      );
       if (pageCursor)     args.cursor = pageCursor;
       if (pageOffset > 0) args.offset = pageOffset;
 
-      const raw = await callCtraderTool(bearerToken, sessionId, "get_deals", args);
+      console.log(
+        `syncCtraderHistory uid=${uid} chunk ${ci + 1}/${chunks.length} page ${page + 1} ` +
+        `request: ${useEndpoint} params=${JSON.stringify(args)}`
+      );
 
-      // Log full shape on first page of first chunk for diagnostics
-      if (ci === 0 && page === 0) {
-        console.log(
-          `syncCtraderHistory uid=${uid} chunk 1 page 1 raw shape: ` +
-          `type=${typeof raw} isArray=${Array.isArray(raw)} ` +
-          `keys=${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"} ` +
-          `preview=${JSON.stringify(raw).slice(0, 400)}`
-        );
-      }
+      const raw = await callCtraderTool(bearerToken, sessionId, useEndpoint, args);
+
+      // Log raw response shape every page (critical for diagnosing API format issues)
+      console.log(
+        `syncCtraderHistory uid=${uid} chunk ${ci + 1}/${chunks.length} page ${page + 1} ` +
+        `response: type=${typeof raw} isArray=${Array.isArray(raw)} ` +
+        `keys=[${(!Array.isArray(raw) && raw && typeof raw === "object") ? Object.keys(raw).join(", ") : "n/a"}] ` +
+        `preview=${JSON.stringify(raw).slice(0, 400)}`
+      );
 
       // API error returned as a string — log and skip chunk (don't abort entire import)
       if (typeof raw === "string") {
@@ -2798,40 +2948,14 @@ async function fetchAllHistoricalDeals(bearerToken, sessionId, uid, fromTs, toTs
         break; // move to next chunk
       }
 
-      // Unwrap deals array from whatever envelope the API uses
-      let pageDeals;
-      let meta = {};
+      // Unwrap deals array; keep object envelope as meta for pagination fields
+      const pageDeals = extractDealsArray(raw);
+      const meta      = (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
 
-      if (Array.isArray(raw)) {
-        pageDeals = raw;
-      } else if (raw && typeof raw === "object") {
-        meta = raw;
-        if (Array.isArray(raw.deals))       pageDeals = raw.deals;
-        else if (Array.isArray(raw.data))   pageDeals = raw.data;
-        else if (Array.isArray(raw.result)) pageDeals = raw.result;
-        else if (Array.isArray(raw.items))  pageDeals = raw.items;
-        else {
-          const arrayKey = Object.keys(raw).find((k) => Array.isArray(raw[k]));
-          if (arrayKey) {
-            console.log(
-              `syncCtraderHistory uid=${uid} chunk ${ci + 1}: ` +
-              `unwrapping deals via key "${arrayKey}"`
-            );
-            pageDeals = raw[arrayKey];
-          } else if (Object.keys(raw).length === 0) {
-            pageDeals = [];
-          } else {
-            console.warn(
-              `syncCtraderHistory uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
-              `object with no array — keys: ${Object.keys(raw).join(", ")} — skipping chunk`
-            );
-            break;
-          }
-        }
-      } else {
+      if (pageDeals === null) {
         console.warn(
-          `syncCtraderHistory uid=${uid} chunk ${ci + 1} page ${page + 1}: ` +
-          `unexpected type "${typeof raw}" — skipping chunk`
+          `syncCtraderHistory uid=${uid} chunk ${ci + 1}/${chunks.length} page ${page + 1}: ` +
+          `response has no recognisable deals array — skipping chunk`
         );
         break;
       }
