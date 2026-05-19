@@ -12,7 +12,7 @@
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, deleteDoc, writeBatch, query, where, onSnapshot, addDoc } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
@@ -43,6 +43,10 @@ window._fbCollection = collection;
 window._fbGetDocs = getDocs;
 window._fbDeleteDoc = deleteDoc;
 window._fbWriteBatch = writeBatch;
+window._fbQuery = query;
+window._fbWhere = where;
+window._fbOnSnapshot = onSnapshot;
+window._fbAddDoc = addDoc;
 window._firebaseReady = true;
 document.dispatchEvent(new Event('firebase-ready'));
 </script>
@@ -866,6 +870,22 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
 .dj-feed-meta{display:flex;gap:5px;margin-top:5px;flex-wrap:wrap}
 .dj-feed-tag{font-size:10px;padding:2px 8px;border-radius:20px;background:var(--bg4);border:1px solid var(--border2);color:var(--text3);font-weight:500}
 .dj-feed-pnl{font-size:12px;font-weight:700;white-space:nowrap;font-family:var(--font-mono)}
+
+/* ── Duplicate warning banner ─────────────────────────────────────────── */
+.dup-banner{display:none;align-items:center;gap:12px;background:rgba(245,166,35,0.08);border-bottom:1px solid rgba(245,166,35,0.2);padding:10px 24px;font-size:13px;color:var(--amber);flex-shrink:0}
+.dup-banner.visible{display:flex}
+.dup-banner-text{flex:1;font-weight:500}
+.dup-banner-btn{padding:5px 14px;border-radius:8px;background:var(--amber);color:#000;font-size:12px;font-weight:600;border:none;cursor:pointer;flex-shrink:0}
+/* ── Duplicate resolution modal ───────────────────────────────────────── */
+.dup-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+.dup-card{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:16px}
+.dup-card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text3);margin-bottom:12px}
+.dup-field{display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.dup-field-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px}
+.dup-field-value{font-size:13px;font-weight:500;color:var(--text)}
+.dup-field-value.differs{color:var(--amber);font-weight:700}
+.dup-nav{font-size:12px;color:var(--text3);text-align:center;margin-bottom:12px}
+.dup-actions{display:flex;gap:10px;justify-content:center;width:100%}
 </style>
 </head>
 <body>
@@ -947,6 +967,12 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
         <button class="topbar-btn" onclick="doSignOut()" title="Sign out"><i class="fa-solid fa-arrow-right-from-bracket"></i></button>
         <button class="topbar-btn accent" onclick="openTradeModal()"><i class="fa-solid fa-plus"></i> Log trade</button>
       </div>
+    </div>
+    <!-- Duplicate resolution warning banner -->
+    <div class="dup-banner" id="dup-banner">
+      <span style="font-size:15px">⚠</span>
+      <span class="dup-banner-text" id="dup-banner-text">trades need your review — possible duplicates detected</span>
+      <button class="dup-banner-btn" onclick="openDupModal()">Review now</button>
     </div>
     <div class="content">
 
@@ -1816,6 +1842,38 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
   </div>
 </div>
 
+
+<!-- DUPLICATE RESOLUTION MODAL -->
+<div class="modal-overlay" id="dup-modal">
+  <div class="modal" style="width:700px;max-width:96vw">
+    <div class="modal-head">
+      <div class="modal-title">⚠ Possible Duplicate Trade</div>
+      <button class="modal-close" onclick="closeModal('dup-modal')"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="modal-body">
+      <div class="dup-nav" id="dup-nav"></div>
+      <div class="dup-modal-grid">
+        <div class="dup-card">
+          <div class="dup-card-title">📋 Existing trade (in journal)</div>
+          <div id="dup-existing-content"></div>
+        </div>
+        <div class="dup-card">
+          <div class="dup-card-title">🔄 Incoming trade (from broker / new entry)</div>
+          <div id="dup-incoming-content"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="justify-content:space-between;align-items:center">
+      <span class="dup-nav" id="dup-nav-footer" style="margin:0;font-size:12px"></span>
+      <div class="dup-actions">
+        <button class="btn-ghost" onclick="resolveDup('keep_existing')">Keep existing</button>
+        <button class="btn-ghost" onclick="resolveDup('keep_both')">Keep both</button>
+        <button class="btn-primary" onclick="resolveDup('replace_prices')"><i class="fa-solid fa-rotate"></i> Replace prices</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ══════════════════════════════════════════════════════
    CONSTANTS
@@ -2119,6 +2177,8 @@ function bootApp(user){
     setTimeout(checkZerodhaStatus, 1000);
     // Check cTrader connection status
     setTimeout(checkCtraderStatus, 1200);
+    // Watch pendingDuplicates collection for banner + resolution UI
+    listenPendingDuplicates(uid);
   },420);
 }
 
@@ -2135,6 +2195,205 @@ document.addEventListener('firebase-ready',()=>{
     }
   });
 });
+
+
+/* ══════════════════════════════════════════════════════
+   DUPLICATE RESOLUTION — banner, modal, 3-way actions
+══════════════════════════════════════════════════════ */
+
+let _pendingDups      = [];   // [{id, incomingTrade, existingTradeId, source}]
+let _dupIdx           = 0;
+let _dupUnsubscribe   = null;
+let _pendingManualTrade = null; // set when manual trade entry hits a local dup
+
+function listenPendingDuplicates(uid){
+  if(_dupUnsubscribe) _dupUnsubscribe();
+  const q = window._fbQuery(
+    window._fbCollection(window._fbDb,'users',uid,'pendingDuplicates'),
+    window._fbWhere('status','==','pending')
+  );
+  _dupUnsubscribe = window._fbOnSnapshot(q, snap=>{
+    _pendingDups = snap.docs.map(d=>({id:d.id,...d.data()}));
+    updateDupBanner();
+  });
+}
+
+function updateDupBanner(){
+  const banner = document.getElementById('dup-banner');
+  const text   = document.getElementById('dup-banner-text');
+  if(!banner) return;
+  if(_pendingDups.length > 0){
+    const n = _pendingDups.length;
+    text.textContent = `${n} trade${n>1?'s need':' needs'} your review — possible duplicate${n>1?'s':''} detected`;
+    banner.classList.add('visible');
+  } else {
+    banner.classList.remove('visible');
+  }
+}
+
+function openDupModal(){
+  if(!_pendingDups.length) return;
+  _dupIdx = 0;
+  renderDupModal();
+  document.getElementById('dup-modal').classList.add('open');
+}
+
+function renderDupModal(){
+  const dup = _pendingDups[_dupIdx];
+  if(!dup) return;
+
+  const nav  = document.getElementById('dup-nav');
+  const navF = document.getElementById('dup-nav-footer');
+  const label = _pendingDups.length > 1 ? `${_dupIdx+1} of ${_pendingDups.length}` : '';
+  if(nav)  nav.textContent  = label;
+  if(navF) navF.textContent = label;
+
+  // Find existing trade — check both numeric and string id match
+  const existing = trades.find(t=>String(t.id)===String(dup.existingTradeId));
+  const incoming = dup.incomingTrade;
+
+  document.getElementById('dup-existing-content').innerHTML = dupTradeCard(existing, null);
+  document.getElementById('dup-incoming-content').innerHTML = dupTradeCard(incoming, existing);
+}
+
+function _dupFld(label, val, differs){
+  return `<div class="dup-field">
+    <span class="dup-field-label">${label}</span>
+    <span class="dup-field-value${differs?' differs':''}">${val??'—'}</span>
+  </div>`;
+}
+
+function dupTradeCard(t, compareWith){
+  if(!t) return '<div style="color:var(--text3);font-size:13px;padding:8px">Trade data unavailable</div>';
+  const sym   = t.symbol || t.tradingsymbol || '—';
+  const dir   = t.direction || (t.transaction_type==='BUY'?'Long':t.transaction_type==='SELL'?'Short':'—');
+  const date  = t.date || (t.fill_timestamp?String(t.fill_timestamp).slice(0,10):'—');
+  const entry = t.entry??t.average_price??null;
+  const exit  = t.exit??null;
+  const size  = t.size??t.quantity??null;
+  const pnl   = t.pnl??null;
+  const strat = t.strategy||'—';
+  const notes = t.notes ? (t.notes.length>80?t.notes.slice(0,80)+'…':t.notes) : '—';
+  const src   = (t.source||t.broker||'manual').toLowerCase();
+
+  let d = {};
+  if(compareWith){
+    const cEntry = compareWith.entry??compareWith.average_price??null;
+    const cExit  = compareWith.exit??null;
+    const cSize  = compareWith.size??compareWith.quantity??null;
+    const cPnl   = compareWith.pnl??null;
+    d.entry = cEntry!==null && entry!==null && Math.abs(cEntry-entry)>0.001;
+    d.exit  = String(cExit)!==String(exit);
+    d.size  = String(cSize)!==String(size);
+    d.pnl   = cPnl!==null && pnl!==null && Math.abs(cPnl-pnl)>0.01;
+  }
+
+  const srcLabel = src==='zerodha'?'Zerodha':src==='ctrader'?'cTrader':src==='csv'?'CSV':'Manual';
+
+  return `
+    ${_dupFld('Symbol',   sym)}
+    ${_dupFld('Direction',dir)}
+    ${_dupFld('Date',     date)}
+    ${_dupFld('Entry',    entry!==null?entry.toFixed(4):'—', d.entry)}
+    ${_dupFld('Exit',     exit!==null?exit.toFixed(4):'—',  d.exit)}
+    ${_dupFld('Size',     size!==null?String(size):'—',     d.size)}
+    ${_dupFld('P&L',      pnl!==null?(pnl>=0?'+':'')+pnl.toFixed(2):'—', d.pnl)}
+    ${_dupFld('Strategy', strat)}
+    ${_dupFld('Notes',    notes)}
+    ${_dupFld('Source',   srcLabel)}
+  `;
+}
+
+async function resolveDup(action){
+  const dup = _pendingDups[_dupIdx];
+  if(!dup) return;
+  const isManual = dup.id === '__manual__';
+  const uid = DataStore._uid;
+
+  if(action==='keep_existing'){
+    if(!isManual) await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',uid,'pendingDuplicates',dup.id));
+    showToast('Existing trade kept','success');
+  } else if(action==='keep_both'){
+    const newTrade = isManual
+      ? {..._pendingManualTrade.incomingTrade, id:Date.now()}
+      : normaliseIncomingTrade(dup.incomingTrade);
+    if(!newTrade.id) newTrade.id = Date.now();
+    trades.unshift(newTrade);
+    DataStore.saveTrades(trades);
+    refreshAll();
+    if(!isManual) await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',uid,'pendingDuplicates',dup.id));
+    showToast('Both trades saved','success');
+  } else if(action==='replace_prices'){
+    const incoming = isManual ? _pendingManualTrade.incomingTrade : dup.incomingTrade;
+    const idx = trades.findIndex(t=>String(t.id)===String(dup.existingTradeId));
+    if(idx>-1){
+      const e  = incoming.entry??incoming.average_price;
+      const ex = typeof incoming.exit==='number' ? incoming.exit : null;
+      const sz = incoming.size??incoming.quantity;
+      const pn = typeof incoming.pnl==='number' ? incoming.pnl : null;
+      if(e!=null)  trades[idx].entry = e;
+      if(ex!=null) trades[idx].exit  = ex;
+      if(sz!=null) trades[idx].size  = sz;
+      if(pn!=null) trades[idx].pnl   = pn;
+      DataStore.saveTrades(trades);
+      refreshAll();
+    }
+    if(!isManual) await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',uid,'pendingDuplicates',dup.id));
+    showToast('Trade updated with broker data','success');
+  }
+
+  // Remove current dup (optimistic) and show next or close
+  _pendingDups.splice(_dupIdx, 1);
+  _pendingManualTrade = null;
+  if(_pendingDups.length===0){
+    closeModal('dup-modal');
+  } else {
+    _dupIdx = Math.min(_dupIdx, _pendingDups.length-1);
+    renderDupModal();
+  }
+}
+
+function normaliseIncomingTrade(t){
+  const dir   = t.direction||(t.transaction_type==='BUY'?'Long':t.transaction_type==='SELL'?'Short':'Long');
+  const date  = t.date||(t.fill_timestamp?String(t.fill_timestamp).slice(0,10):TODAY);
+  const entry = t.entry??t.average_price??0;
+  const exit  = typeof t.exit==='number'?t.exit:null;
+  const size  = t.size??t.quantity??0;
+  const sym   = (t.symbol||t.tradingsymbol||'').toUpperCase();
+  const src   = (t.source||t.broker||'manual').toLowerCase();
+  return {
+    id:Date.now(), date, symbol:sym, asset:t.asset||'eq',
+    direction:dir, entry, exit, size,
+    sl:null, tp:null, strategy:t.strategy||'',
+    emotion:t.emotion||'😌 Calm', notes:t.notes||'',
+    pnl:typeof t.pnl==='number'?t.pnl:null,
+    custom:{}, accountId:t.accountId||null,
+    instrument:null, optionType:null, strike:null, screenshots:[],
+    source:src, broker:t.broker||null,
+    psychology:t.psychology||{preThought:'',executionNote:'',review:''},
+  };
+}
+
+function findLocalDuplicate(sym, date, entry){
+  if(!sym||!date||!entry||isNaN(entry)) return null;
+  for(const t of trades){
+    const tSym = (t.symbol||'').toUpperCase();
+    if(tSym!==sym || t.date!==date) continue;
+    const tEntry = t.entry;
+    if(!tEntry||tEntry<=0) continue;
+    const pctDiff = Math.abs(tEntry-entry)/tEntry;
+    if(pctDiff<=0.005) return t;
+  }
+  return null;
+}
+
+function showManualDupModal(incomingTrade, existingTrade){
+  _pendingManualTrade = {incomingTrade, existingTrade};
+  _pendingDups = [{id:'__manual__', incomingTrade, existingTradeId:String(existingTrade.id), source:'manual'}];
+  _dupIdx = 0;
+  renderDupModal();
+  document.getElementById('dup-modal').classList.add('open');
+}
 
 // ── CTRADER INTEGRATION ──
 const CTRADER_FN = 'https://us-central1-edgebook-2dce2.cloudfunctions.net';
@@ -3386,6 +3645,15 @@ function saveTrade(){
     strike: isFno && document.getElementById('t-instrument').value==='Options' ? (parseFloat(document.getElementById('t-strike').value)||null) : null,
     screenshots: [...currentScreenshots],
   };
+  // For new trades, check for local duplicates before saving
+  if(!editId){
+    const localDup = findLocalDuplicate(sym, date, entry);
+    if(localDup){
+      showManualDupModal(trade, localDup);
+      return;
+    }
+  }
+
   if(editId){const i=trades.findIndex(t=>t.id==editId);if(i>-1)trades[i]=trade;}
   else trades.unshift(trade);
   DataStore.saveTrades(trades);
