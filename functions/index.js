@@ -1107,11 +1107,11 @@ function ctraderCategoryToAsset(category) {
 
 const REQUIRED_DEAL_FIELDS = [
   "dealId",
-  "orderId",
   "positionId",
-  "symbolId",
+  "orderId",
+  "dealType",
   "tradeSide",
-  "volume",
+  "symbolId",
   "filledVolume",
   "executionPrice",
   "executionTimestamp",
@@ -1119,17 +1119,11 @@ const REQUIRED_DEAL_FIELDS = [
 ];
 
 /**
- * Validate and normalise a raw deal from get_deals.
- * symbolInfo is the full entry from symbolDetails (not just the name string).
- *
- * P&L fields use pipValue / pipSize / lotSize from the API symbol entry.
- * If those fields aren't in the API response they are stored as null —
- * the frontend can recalculate once we have values.
- *
- * Throws if any required field is missing or symbolId unresolved.
+ * Validate one raw deal from get_deals — required fields + numeric sanity.
+ * Throws if any required field is missing or a numeric field is invalid.
+ * Note: pnl is intentionally NOT required — ENTRY deals legitimately have null pnl.
  */
-function normaliseDeal(rawDeal, symbolInfo) {
-  // 1. Required field check
+function validateDeal(rawDeal) {
   const missing = REQUIRED_DEAL_FIELDS.filter((f) => rawDeal[f] == null);
   if (missing.length > 0) {
     throw new Error(
@@ -1137,9 +1131,6 @@ function normaliseDeal(rawDeal, symbolInfo) {
     );
   }
 
-  const symbolId = String(rawDeal.symbolId);
-
-  // 2. Numeric field validation
   const executionTimestamp = Number(rawDeal.executionTimestamp);
   if (!Number.isFinite(executionTimestamp) || executionTimestamp <= 0) {
     throw new Error(`cTrader deal ${rawDeal.dealId}: invalid executionTimestamp: ${rawDeal.executionTimestamp}`);
@@ -1154,66 +1145,115 @@ function normaliseDeal(rawDeal, symbolInfo) {
   if (!Number.isFinite(filledVolume) || filledVolume < 0) {
     throw new Error(`cTrader deal ${rawDeal.dealId}: invalid filledVolume: ${rawDeal.filledVolume}`);
   }
+}
 
-  // 3. P&L metadata — from symbol API data only, null if unavailable
+/**
+ * Build one Edgebook trade document from all deals sharing a positionId.
+ *
+ * Deal types:
+ *   ENTRY   — opening fill: provides direction, entry price, size, date
+ *   EXIT    — closing fill: provides actual exit price and API pnl
+ *   REVERSE — close + reopen; treated as EXIT for the current position
+ *
+ * For partial closes (multiple EXIT deals):
+ *   exit = weighted-average price across all exit fills
+ *   pnl  = sum of API pnl values from all exit deals
+ *
+ * User-owned fields (strategy, emotion, notes, screenshots, psychology, tags)
+ * are NOT included in the returned object — set(…, {merge:true}) preserves them.
+ */
+function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const lotSize  = symbolInfo.lotSize  ?? null;
   const pipSize  = symbolInfo.pipSize  ?? null;
   const pipValue = symbolInfo.pipValue ?? null;
 
-  // Compute lots traded (filledVolume / lotSize) only if lotSize is known
-  const lotsTraded = (lotSize != null && lotSize > 0)
-    ? parseFloat((filledVolume / lotSize).toFixed(8))
-    : null;
+  // Sort chronologically so ENTRY comes before EXIT
+  const sorted = [...deals].sort(
+    (a, b) => Number(a.executionTimestamp) - Number(b.executionTimestamp)
+  );
 
-  // ── Frontend-required fields ─────────────────────────────────────────────
-  // The app reads trades via d.data() (no doc ID injected), so every field
-  // the P&L engine / trade table uses must be present as document fields.
+  const entryDeals = sorted.filter((d) => String(d.dealType).toUpperCase() === "ENTRY");
+  const exitDeals  = sorted.filter((d) =>
+    ["EXIT", "REVERSE"].includes(String(d.dealType).toUpperCase())
+  );
 
-  const tradeSideUpper = String(rawDeal.tradeSide).toUpperCase(); // "BUY" | "SELL"
-  const dealPnl        = rawDeal.pnl != null ? Number(rawDeal.pnl) : null;
-  const dealSize       = lotsTraded ?? filledVolume;
+  // Primary entry deal — oldest ENTRY, or first deal if none tagged ENTRY
+  const primaryEntry   = entryDeals[0] ?? sorted[0];
+  const tradeSideUpper = String(primaryEntry.tradeSide).toUpperCase();
+  const direction      = tradeSideUpper === "BUY" ? "Long" : "Short";
 
-  return {
-    // ── App-required fields (read by the P&L engine and trade table) ─────────
-    id:         `ctrader_${String(rawDeal.dealId)}`,       // must match Firestore doc ID
-    date:       new Date(executionTimestamp).toISOString().slice(0, 10), // "YYYY-MM-DD"
-    symbol:     symbolInfo.name,                           // verified name from API
-    asset:      ctraderCategoryToAsset(symbolInfo.symbolCategory), // "fx"/"cx"/"ix"/"cm"/"eq"
-    direction:  tradeSideUpper === "BUY" ? "Long" : "Short",
-    entry:      executionPrice,
-    // exit: set to executionPrice when pnl is present (= closed deal),
-    //        null otherwise (= open/partial fill — treated as open trade by the app)
-    exit:       dealPnl !== null ? executionPrice : null,
-    size:       dealSize,
-    pnl:        dealPnl,                                   // null → app treats as open
-    accountId:  null,                                      // set by caller after normalisation
+  const entryTs   = Number(primaryEntry.executionTimestamp);
+  const date      = new Date(entryTs).toISOString().slice(0, 10);   // YYYY-MM-DD
+  const entryTime = new Date(entryTs).toISOString().slice(11, 16);  // HH:MM
+  const entry     = Number(primaryEntry.executionPrice);
 
-    // ── cTrader-native fields (kept for audit / future use) ──────────────────
-    broker:         "CTRADER",
-    dealId:         String(rawDeal.dealId),
-    orderId:        String(rawDeal.orderId),
-    positionId:     String(rawDeal.positionId),
-    symbolId,
-    symbolCategory: symbolInfo.symbolCategory ?? null,
-    side:           tradeSideUpper,
-    volume:         Number(rawDeal.volume),
-    filledVolume,
-    lotsTraded,
-    executionPrice,
-    dealStatus:     String(rawDeal.dealStatus),
-    executedAt:     admin.firestore.Timestamp.fromMillis(executionTimestamp),
+  // Size: total ENTRY volume → lots
+  const entryVol = entryDeals.length > 0
+    ? entryDeals.reduce((s, d) => s + Number(d.filledVolume), 0)
+    : Number(primaryEntry.filledVolume);
+  const size = (lotSize && lotSize > 0)
+    ? parseFloat((entryVol / lotSize).toFixed(8))
+    : entryVol;
+
+  let exit = null, pnl = null, exitTime = null, isOpen = true;
+
+  if (exitDeals.length > 0) {
+    isOpen = false;
+
+    // Weighted-average exit price across all exit fills
+    const totalExitVol = exitDeals.reduce((s, d) => s + Number(d.filledVolume), 0);
+    const weightedSum  = exitDeals.reduce(
+      (s, d) => s + Number(d.executionPrice) * Number(d.filledVolume), 0
+    );
+    exit = totalExitVol > 0
+      ? parseFloat((weightedSum / totalExitVol).toFixed(8))
+      : null;
+
+    // Sum API-provided pnl from exit deals (null if none provided it)
+    const pnlVals = exitDeals
+      .map((d) => (d.pnl != null ? Number(d.pnl) : null))
+      .filter((v) => v !== null);
+
+    if (pnlVals.length > 0) {
+      pnl = pnlVals.reduce((s, v) => s + v, 0);
+      // Incorporate commission + swap across all deals in this position
+      const commission = deals.reduce(
+        (s, d) => s + (d.commission != null ? Number(d.commission) : 0), 0
+      );
+      const swap = deals.reduce(
+        (s, d) => s + (d.swap != null ? Number(d.swap) : 0), 0
+      );
+      pnl = parseFloat((pnl + commission + swap).toFixed(8));
+    }
+
+    // Exit time from the latest exit deal
+    const latestExit = exitDeals[exitDeals.length - 1];
+    exitTime = new Date(Number(latestExit.executionTimestamp)).toISOString().slice(11, 16);
+  }
+
+  const trade = {
+    id:            `ctrader_${positionId}`,
+    brokerTradeId: positionId,
+    source:        "ctrader",
+    broker:        "ctrader",
+    symbol:        symbolInfo.name,
+    asset:         ctraderCategoryToAsset(symbolInfo.symbolCategory),
+    direction,
+    entry,
+    exit,
+    size,
+    pnl,
+    isOpen,
+    date,
+    entryTime,
+    exitTime,
+    exchange:      symbolInfo.symbolCategory ?? null,
     lotSize,
     pipSize,
     pipValue,
-    // Optional deal-level fields (include only if present in API response)
-    ...(rawDeal.commission != null && { commission:   Number(rawDeal.commission) }),
-    ...(rawDeal.swap       != null && { swap:         Number(rawDeal.swap) }),
-    ...(rawDeal.balance    != null && { balanceAfter: Number(rawDeal.balance) }),
-    ...(rawDeal.label      != null && { label:        String(rawDeal.label) }),
-    ...(rawDeal.comment    != null && { comment:      String(rawDeal.comment) }),
-    importedAt:     admin.firestore.FieldValue.serverTimestamp(),
-    _raw:           rawDeal,  // keep for debugging; prune once stable
   };
+  if (accountId) trade.accountId = accountId;
+  return trade;
 }
 
 /**
@@ -1501,167 +1541,193 @@ async function syncCtraderForUser(uid) {
     console.log(`cTrader uid=${uid}: matched prop account id="${liveAccountId}" for live sync`);
   }
 
-  // ── 5. Per-deal: resolve, validate, check hours ─────────────────────────────
-  const nowMs = toTimestamp;
-  const toProcess   = [];   // deals ready to write
-  const skipped     = [];   // { dealId, symbol, reason }
-  const errors      = [];   // { dealId, error }
-  const symbolLog   = {};   // { symbolName: { count, skippedCount, reason? } }
+  // ── 5. Validate all deals, group by positionId, build one trade per position ──
+  const rawErrors   = [];  // { dealId, error }
+  const skipped     = [];  // { positionId, symbol, reason }
+  const symbolLog   = {};  // { symbolName: { count, skipped } }
   const seenSymbols = new Set();
+  const tradesRef   = db.collection("users").doc(uid).collection("trades");
 
+  // 5a. Per-deal: resolve symbol, validate required fields + numerics.
+  //     Abort entire sync on first unresolved symbolId (same strict policy as before).
+  const validatedDeals = [];
   for (const rawDeal of rawDeals) {
-    const dealId = String(rawDeal.dealId ?? "(unknown)");
-
-    // 5a. Resolve symbolInfo — unknown symbolId → abort entire sync
+    const dealId   = String(rawDeal.dealId   ?? "(unknown)");
     const symbolId = rawDeal.symbolId != null ? String(rawDeal.symbolId) : null;
-    if (!symbolId) {
-      errors.push({ dealId, error: "missing symbolId field — aborting sync" });
-      console.error(`cTrader uid=${uid} deal ${dealId}: missing symbolId`);
-      break; // will abort below
-    }
 
+    if (!symbolId) {
+      rawErrors.push({ dealId, error: "missing symbolId — aborting sync" });
+      console.error(`cTrader uid=${uid} deal ${dealId}: missing symbolId`);
+      break;
+    }
     const symbolInfo = symbolDetails[symbolId];
     if (!symbolInfo) {
-      errors.push({
+      rawErrors.push({
         dealId,
-        error: `symbolId ${symbolId} not in verified symbol map — aborting sync. ` +
+        error: `symbolId ${symbolId} not in verified symbol map — aborting. ` +
                `Known IDs sample: ${Object.keys(symbolDetails).slice(0, 8).join(", ")}`,
       });
       console.error(`cTrader uid=${uid} deal ${dealId}: symbolId ${symbolId} unresolved`);
-      break; // abort entire sync
+      break;
     }
 
-    seenSymbols.add(symbolInfo.name);
-    if (!symbolLog[symbolInfo.name]) symbolLog[symbolInfo.name] = { count: 0, skipped: 0 };
-
-    // 5b. Check enabled flag
-    if (symbolInfo.enabled === false) {
-      const reason = `symbol ${symbolInfo.name} is marked disabled in API`;
-      skipped.push({ dealId, symbol: symbolInfo.name, reason });
-      symbolLog[symbolInfo.name].skipped++;
-      symbolLog[symbolInfo.name].skipReason = reason;
-      console.log(`cTrader uid=${uid} deal ${dealId}: SKIP — ${reason}`);
-      continue;
-    }
-
-    // 5c. Check trading hours + holidays (all data from API)
-    const hoursCheck = checkTradingHours(symbolInfo, nowMs);
-    if (hoursCheck.tradeable === false) {
-      skipped.push({ dealId, symbol: symbolInfo.name, reason: hoursCheck.reason });
-      symbolLog[symbolInfo.name].skipped++;
-      symbolLog[symbolInfo.name].skipReason = hoursCheck.reason;
-      console.log(`cTrader uid=${uid} deal ${dealId}: SKIP — ${hoursCheck.reason}`);
-      continue;
-    }
-    if (hoursCheck.tradeable === null) {
-      // Cannot determine hours from API — log but still process (we can't confirm it's outside)
-      console.warn(`cTrader uid=${uid} deal ${dealId}: trading hours indeterminate — ${hoursCheck.reason} — processing anyway`);
-    }
-
-    // 5d. Validate required fields + numeric sanity
     try {
-      const normalised = normaliseDeal(rawDeal, symbolInfo);
-      // Attach prop account ID (same as history import)
-      if (liveAccountId) normalised.accountId = liveAccountId;
-      toProcess.push(normalised);
-      symbolLog[symbolInfo.name].count++;
-      console.log(
-        `cTrader uid=${uid} deal ${dealId}: OK — ${symbolInfo.name} ` +
-        `${normalised.direction} ${normalised.size} @ ${normalised.entry} ` +
-        `pnl=${normalised.pnl} [${hoursCheck.reason}]`
-      );
+      validateDeal(rawDeal);
+      validatedDeals.push({ ...rawDeal, _symbolInfo: symbolInfo });
     } catch (err) {
-      errors.push({ dealId, error: err.message });
+      rawErrors.push({ dealId, error: err.message });
       console.error(`cTrader uid=${uid} deal ${dealId}: validation FAILED — ${err.message}`);
     }
   }
 
-  // ── 6. Abort if any symbolId was unresolved or validation errors exist ───────
-  if (errors.length > 0) {
-    console.error(
-      `cTrader uid=${uid}: ABORTING — ${errors.length} error(s), refusing partial write:`,
-      errors
-    );
-    throw new Error(
-      `cTrader sync aborted — ${errors.length} error(s). First: ${errors[0].error}`
+  if (rawErrors.length > 0) {
+    console.error(`cTrader uid=${uid}: ABORTING — ${rawErrors.length} error(s):`, rawErrors);
+    throw new Error(`cTrader sync aborted — ${rawErrors.length} error(s). First: ${rawErrors[0].error}`);
+  }
+
+  // 5b. Group by positionId
+  const byPosition = {};
+  for (const deal of validatedDeals) {
+    const pid = String(deal.positionId);
+    if (!byPosition[pid]) byPosition[pid] = [];
+    byPosition[pid].push(deal);
+  }
+  console.log(
+    `cTrader uid=${uid}: ${validatedDeals.length} deal(s) → ` +
+    `${Object.keys(byPosition).length} position(s)`
+  );
+
+  // 5c. Per-position: check enabled/hours, build trade document
+  const toProcess = [];
+  for (const [positionId, posDeals] of Object.entries(byPosition)) {
+    const symbolInfo = posDeals[0]._symbolInfo;
+    seenSymbols.add(symbolInfo.name);
+    if (!symbolLog[symbolInfo.name]) symbolLog[symbolInfo.name] = { count: 0, skipped: 0 };
+
+    if (symbolInfo.enabled === false) {
+      const reason = `symbol ${symbolInfo.name} is disabled in API`;
+      skipped.push({ positionId, symbol: symbolInfo.name, reason });
+      symbolLog[symbolInfo.name].skipped++;
+      console.log(`cTrader uid=${uid} pos ${positionId}: SKIP — ${reason}`);
+      continue;
+    }
+
+    // Check trading hours against the ENTRY deal's timestamp (not "now")
+    const entryDeal  = posDeals.find((d) => String(d.dealType).toUpperCase() === "ENTRY") ?? posDeals[0];
+    const hoursCheck = checkTradingHours(symbolInfo, Number(entryDeal.executionTimestamp));
+    if (hoursCheck.tradeable === false) {
+      skipped.push({ positionId, symbol: symbolInfo.name, reason: hoursCheck.reason });
+      symbolLog[symbolInfo.name].skipped++;
+      console.log(`cTrader uid=${uid} pos ${positionId}: SKIP — ${hoursCheck.reason}`);
+      continue;
+    }
+    if (hoursCheck.tradeable === null) {
+      console.warn(
+        `cTrader uid=${uid} pos ${positionId}: hours indeterminate — ` +
+        `${hoursCheck.reason} — processing anyway`
+      );
+    }
+
+    const trade = buildPositionTrade(positionId, posDeals, symbolInfo, liveAccountId);
+    toProcess.push(trade);
+    symbolLog[symbolInfo.name].count++;
+    console.log(
+      `cTrader uid=${uid} pos ${positionId}: OK — ${symbolInfo.name} ` +
+      `${trade.direction} ${trade.size} @ entry=${trade.entry} exit=${trade.exit} ` +
+      `pnl=${trade.pnl} isOpen=${trade.isOpen}`
     );
   }
 
-  // ── 7. Dedup check + batch upsert ───────────────────────────────────────────
-  const BATCH_SIZE     = 400;
-  let written          = 0;
-  let skippedById      = 0;
-  let flaggedDups      = 0;
+  // ── 6. Batch write — merge by positionId, update only closing fields on existing docs ──
+  const BATCH_SIZE = 400;
+  let written      = 0;
+  let updatedCount = 0;
 
-  // Build index from all existing trades for this user
-  const dedupIndex     = await buildExistingTradeIndex(tradesRef);
-  const ctrPendingRef  = db.collection("users").doc(uid).collection("pendingDuplicates");
-  const toWrite        = [];
+  // Load existing cTrader position docs (brokerTradeId + isOpen only)
+  const existingSnap = await tradesRef
+    .where("broker", "==", "ctrader")
+    .select("brokerTradeId", "isOpen")
+    .get();
+  const existingByPos = new Map();  // positionId → { ref, isOpen }
+  for (const doc of existingSnap.docs) {
+    const d = doc.data();
+    if (d.brokerTradeId) existingByPos.set(String(d.brokerTradeId), { ref: doc.ref, isOpen: d.isOpen });
+  }
+
+  const toWriteNew    = [];
+  const toWriteUpdate = [];
 
   for (const trade of toProcess) {
-    const docId = `ctrader_${trade.dealId}`;
-    const dedup = checkTradeDedup(dedupIndex, docId, trade.symbol, trade.date, trade.entry);
+    const posId    = trade.brokerTradeId;
+    const docRef   = tradesRef.doc(`ctrader_${posId}`);
+    const existing = existingByPos.get(posId);
 
-    if (dedup.action === "skip") {
-      skippedById++;
-      console.log(`cTrader uid=${uid}: SKIP dealId=${trade.dealId} — already in Firestore`);
-    } else if (dedup.action === "flag") {
-      flaggedDups++;
-      console.log(
-        `cTrader uid=${uid}: DUPLICATE FLAGGED dealId=${trade.dealId} ` +
-        `matches existing doc "${dedup.existingTradeId}" — writing to pendingDuplicates`
-      );
-      await ctrPendingRef.add({
-        incomingTrade:   { ...trade, source: "ctrader" },
-        existingTradeId: dedup.existingTradeId,
-        detectedAt:      admin.firestore.FieldValue.serverTimestamp(),
-        source:          "ctrader",
-        status:          "pending",
-      });
+    if (existing) {
+      if (!trade.isOpen && existing.isOpen !== false) {
+        // Position just closed — update only closing fields; never touch user-owned fields
+        toWriteUpdate.push({ ref: existing.ref, fields: {
+          exit:     trade.exit,
+          pnl:      trade.pnl,
+          exitTime: trade.exitTime,
+          isOpen:   false,
+          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }});
+      } else {
+        console.log(`cTrader uid=${uid} pos ${posId}: already in Firestore — no change`);
+      }
     } else {
-      toWrite.push({ ...trade, source: "ctrader" });
+      toWriteNew.push({ ref: docRef, trade });
     }
   }
 
-  for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
+  for (let i = 0; i < toWriteNew.length; i += BATCH_SIZE) {
     const batch = db.batch();
-    for (const trade of toWrite.slice(i, i + BATCH_SIZE)) {
-      // merge:true preserves user-editable fields (notes, emotion, strategy, psychology, tags)
-      batch.set(tradesRef.doc(`ctrader_${trade.dealId}`), trade, { merge: true });
+    for (const { ref, trade } of toWriteNew.slice(i, i + BATCH_SIZE)) {
+      batch.set(ref, { ...trade, syncedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     }
     await batch.commit();
-    written += toWrite.slice(i, i + BATCH_SIZE).length;
+    written += toWriteNew.slice(i, i + BATCH_SIZE).length;
+  }
+
+  for (let i = 0; i < toWriteUpdate.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    for (const { ref, fields } of toWriteUpdate.slice(i, i + BATCH_SIZE)) {
+      batch.set(ref, fields, { merge: true });
+    }
+    await batch.commit();
+    updatedCount += toWriteUpdate.slice(i, i + BATCH_SIZE).length;
   }
 
   console.log(
-    `cTrader uid=${uid} dedup: saved=${written} skippedById=${skippedById} flagged=${flaggedDups}`
+    `cTrader uid=${uid}: new=${written} updated(closed)=${updatedCount} skipped=${skipped.length}`
   );
 
-  // ── 8. Update broker metadata ─────────────────────────────────────────────────
-  const durationMs = Date.now() - syncStart;
+  // ── 7. Update broker metadata ─────────────────────────────────────────────────
+  const durationMs      = Date.now() - syncStart;
   const connectedSymbols = Array.from(seenSymbols).sort();
 
   await brokerRef.set(
     {
-      lastSyncTimestamp:  admin.firestore.Timestamp.fromMillis(toTimestamp),
-      lastSyncAt:         admin.firestore.FieldValue.serverTimestamp(),
-      lastSyncResult:     { saved: written, skipped: skipped.length, errors: 0, durationMs },
+      lastSyncTimestamp: admin.firestore.Timestamp.fromMillis(toTimestamp),
+      lastSyncAt:        admin.firestore.FieldValue.serverTimestamp(),
+      lastSyncResult:    { saved: written + updatedCount, skipped: skipped.length, errors: 0, durationMs },
       connectedSymbols,
     },
     { merge: true }
   );
 
-  // ── Summary log ──────────────────────────────────────────────────────────────
+  // ── Summary log ───────────────────────────────────────────────────────────────
   console.log(
     `cTrader uid=${uid} sync complete — ` +
-    `fetched=${rawDeals.length} saved=${written} skipped=${skipped.length} duration=${durationMs}ms`
+    `fetched=${rawDeals.length} positions=${Object.keys(byPosition).length} ` +
+    `new=${written} updated=${updatedCount} skipped=${skipped.length} duration=${durationMs}ms`
   );
   console.log(`cTrader uid=${uid} symbol breakdown:`, JSON.stringify(symbolLog));
   if (skipped.length > 0) {
-    console.log(`cTrader uid=${uid} skipped deals:`, JSON.stringify(skipped));
+    console.log(`cTrader uid=${uid} skipped positions:`, JSON.stringify(skipped));
   }
 
-  return { saved: written, skipped: skipped.length, errors: [], durationMs, symbolLog };
+  return { saved: written + updatedCount, skipped: skipped.length, errors: [], durationMs, symbolLog };
 }
 
 // ─── Token input parser ───────────────────────────────────────────────────────
@@ -1964,114 +2030,158 @@ exports.syncCtraderHistory = functions
         console.log(`syncCtraderHistory uid=${uid}: no prop/100k/2step account found — accountId will be null`);
       }
 
-      // ── 7. Load existing cTrader deal IDs to skip duplicates ────────────────
-      const existingSnap = await db
-        .collection("users").doc(uid)
-        .collection("trades")
-        .where("broker", "==", "CTRADER")
-        .select("dealId")   // fetch only the dealId field — minimal data transfer
-        .get();
-
-      const existingDealIds = new Set(existingSnap.docs.map((d) => d.data().dealId).filter(Boolean));
-      console.log(`syncCtraderHistory uid=${uid}: ${existingDealIds.size} existing cTrader deals in Firestore`);
-
-      // ── 8. Validate, normalise, skip duplicates ──────────────────────────────
-      const toWrite        = [];
-      const skippedIds     = [];  // duplicate dealIds
+      // ── 7. Validate all deals, group by positionId ──────────────────────────
+      const tradesRef      = db.collection("users").doc(uid).collection("trades");
       const validationErrs = [];
-      const symbolLog      = {}; // { symbolName: count }
+      const symbolLog      = {};  // { symbolName: count }
 
+      // 7a. Per-deal: resolve symbol + validate. Log and skip bad deals (don't abort).
+      const validatedDeals = [];
       for (const rawDeal of allDeals) {
         const dealId   = String(rawDeal.dealId   ?? "(unknown)");
         const symbolId = rawDeal.symbolId != null ? String(rawDeal.symbolId) : null;
 
-        // Skip if already imported
-        if (existingDealIds.has(dealId)) {
-          skippedIds.push(dealId);
-          continue;
-        }
-
-        // Resolve symbol — unknown id → log and skip (don't abort entire history import)
         if (!symbolId) {
           validationErrs.push(`deal ${dealId}: missing symbolId`);
           console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: missing symbolId — skipping`);
           continue;
         }
-
         const symbolInfo = symbolDetails[symbolId];
         if (!symbolInfo) {
           validationErrs.push(`deal ${dealId}: symbolId ${symbolId} unresolved`);
           console.warn(
-            `syncCtraderHistory uid=${uid} deal ${dealId}: symbolId ${symbolId} not in symbol map — skipping. ` +
-            `(symbol map may need refresh — call ctraderConnect to force-refresh)`
+            `syncCtraderHistory uid=${uid} deal ${dealId}: symbolId ${symbolId} not in map — skipping ` +
+            `(call ctraderConnect to force-refresh symbol map)`
+          );
+          continue;
+        }
+        // History import: skip trading-hours check (we're importing closed historical deals).
+        // Symbol enabled check still applies.
+        if (symbolInfo.enabled === false) {
+          console.log(
+            `syncCtraderHistory uid=${uid} deal ${dealId}: ` +
+            `symbol ${symbolInfo.name} disabled — skipping`
           );
           continue;
         }
 
-        // For history imports we skip the trading-hours check — we're importing
-        // closed historical deals, not checking if a market is open right now.
-        // Symbol enabled check still applies.
-        if (symbolInfo.enabled === false) {
-          console.log(`syncCtraderHistory uid=${uid} deal ${dealId}: symbol ${symbolInfo.name} disabled — skipping`);
-          skippedIds.push(dealId);
-          continue;
-        }
-
         try {
-          const normalised = normaliseDeal(rawDeal, symbolInfo);
-          // Attach the resolved prop account
-          if (accountId) normalised.accountId = accountId;
-          normalised.importSource = "history"; // distinguish from live syncs
-          toWrite.push(normalised);
-          symbolLog[symbolInfo.name] = (symbolLog[symbolInfo.name] ?? 0) + 1;
+          validateDeal(rawDeal);
+          validatedDeals.push({ ...rawDeal, _symbolInfo: symbolInfo });
         } catch (err) {
           validationErrs.push(`deal ${dealId}: ${err.message}`);
           console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: validation error — ${err.message}`);
         }
       }
 
+      // 7b. Group validated deals by positionId
+      const byPosition = {};
+      for (const deal of validatedDeals) {
+        const pid = String(deal.positionId);
+        if (!byPosition[pid]) byPosition[pid] = [];
+        byPosition[pid].push(deal);
+      }
       console.log(
-        `syncCtraderHistory uid=${uid}: new=${toWrite.length} duplicate=${skippedIds.length} ` +
-        `validationErrors=${validationErrs.length}`
+        `syncCtraderHistory uid=${uid}: ${validatedDeals.length} valid deal(s) → ` +
+        `${Object.keys(byPosition).length} position(s) | validationErrors=${validationErrs.length}`
       );
-      if (Object.keys(symbolLog).length > 0) {
-        console.log(`syncCtraderHistory uid=${uid}: per-symbol counts →`, JSON.stringify(symbolLog));
+
+      // 7c. Build one trade per positionId
+      const positionTrades = [];
+      for (const [positionId, posDeals] of Object.entries(byPosition)) {
+        const symbolInfo = posDeals[0]._symbolInfo;
+        const trade = buildPositionTrade(positionId, posDeals, symbolInfo, accountId);
+        trade.importSource = "history";
+        positionTrades.push(trade);
+        symbolLog[symbolInfo.name] = (symbolLog[symbolInfo.name] ?? 0) + 1;
       }
 
-      // Log the first trade document in full so the structure is visible in Cloud Logging
-      if (toWrite.length > 0) {
-        const sample = { ...toWrite[0] };
-        // Replace non-serialisable Firestore sentinels with readable placeholders
-        if (sample.executedAt && typeof sample.executedAt.toDate === "function") {
-          sample.executedAt = sample.executedAt.toDate().toISOString();
+      // ── 8. Load existing position docs to skip/update correctly ─────────────
+      const existingSnap = await tradesRef
+        .where("broker", "==", "ctrader")
+        .select("brokerTradeId", "isOpen")
+        .get();
+      const existingByPos = new Map();
+      for (const doc of existingSnap.docs) {
+        const d = doc.data();
+        if (d.brokerTradeId) {
+          existingByPos.set(String(d.brokerTradeId), { ref: doc.ref, isOpen: d.isOpen });
         }
-        sample.importedAt = "<serverTimestamp>";
+      }
+      console.log(
+        `syncCtraderHistory uid=${uid}: ${existingByPos.size} existing cTrader positions in Firestore`
+      );
+
+      // Log sample trade document for diagnostics
+      if (positionTrades.length > 0) {
         console.log(
-          `syncCtraderHistory uid=${uid}: SAMPLE trade document (first of ${toWrite.length}):`,
-          JSON.stringify(sample, null, 2).slice(0, 2000)
+          `syncCtraderHistory uid=${uid}: SAMPLE position trade (first of ${positionTrades.length}):`,
+          JSON.stringify(positionTrades[0], null, 2).slice(0, 1500)
         );
       }
 
-      // ── 9. Batch write ───────────────────────────────────────────────────────
-      const tradesRef  = db.collection("users").doc(uid).collection("trades");
-      const BATCH_SIZE = 400;
-      let written      = 0;
+      // ── 9. Batch write — new positions full-set, closed transitions update-only ─
+      const BATCH_SIZE    = 400;
+      let written         = 0;
+      let updatedCount    = 0;
+      let skippedCount    = 0;
+      const toWriteNew    = [];
+      const toWriteUpdate = [];
 
-      for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
+      for (const trade of positionTrades) {
+        const posId    = trade.brokerTradeId;
+        const docRef   = tradesRef.doc(`ctrader_${posId}`);
+        const existing = existingByPos.get(posId);
+
+        if (existing) {
+          if (!trade.isOpen && existing.isOpen !== false) {
+            // Position closed since last import — update only closing fields
+            toWriteUpdate.push({ ref: existing.ref, fields: {
+              exit:        trade.exit,
+              pnl:         trade.pnl,
+              exitTime:    trade.exitTime,
+              isOpen:      false,
+              importedAt:  admin.firestore.FieldValue.serverTimestamp(),
+            }});
+          } else {
+            skippedCount++;
+          }
+        } else {
+          toWriteNew.push({ ref: docRef, trade });
+        }
+      }
+
+      for (let i = 0; i < toWriteNew.length; i += BATCH_SIZE) {
         const batch = db.batch();
-        for (const trade of toWrite.slice(i, i + BATCH_SIZE)) {
-          batch.set(tradesRef.doc(`ctrader_${trade.dealId}`), trade, { merge: true });
+        for (const { ref, trade } of toWriteNew.slice(i, i + BATCH_SIZE)) {
+          batch.set(ref, { ...trade, importedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
         await batch.commit();
-        written += toWrite.slice(i, i + BATCH_SIZE).length;
-        console.log(`syncCtraderHistory uid=${uid}: wrote batch ${Math.floor(i / BATCH_SIZE) + 1} — total so far ${written}`);
+        written += toWriteNew.slice(i, i + BATCH_SIZE).length;
+        console.log(
+          `syncCtraderHistory uid=${uid}: wrote batch ${Math.floor(i / BATCH_SIZE) + 1} ` +
+          `(${written} new so far)`
+        );
+      }
+
+      for (let i = 0; i < toWriteUpdate.length; i += BATCH_SIZE) {
+        const batch = db.batch();
+        for (const { ref, fields } of toWriteUpdate.slice(i, i + BATCH_SIZE)) {
+          batch.set(ref, fields, { merge: true });
+        }
+        await batch.commit();
+        updatedCount += toWriteUpdate.slice(i, i + BATCH_SIZE).length;
+      }
+
+      if (Object.keys(symbolLog).length > 0) {
+        console.log(`syncCtraderHistory uid=${uid}: per-symbol →`, JSON.stringify(symbolLog));
       }
 
       // Update broker metadata
       await brokerRef.set(
         {
           lastHistoryImportAt:    admin.firestore.FieldValue.serverTimestamp(),
-          lastHistoryImportCount: written,
+          lastHistoryImportCount: written + updatedCount,
         },
         { merge: true }
       );
@@ -2079,21 +2189,24 @@ exports.syncCtraderHistory = functions
       const durationMs = Date.now() - fnStart;
       console.log(
         `syncCtraderHistory uid=${uid}: COMPLETE — ` +
-        `total=${allDeals.length} imported=${written} skipped=${skippedIds.length} ` +
+        `deals=${allDeals.length} positions=${Object.keys(byPosition).length} ` +
+        `new=${written} updated=${updatedCount} skipped=${skippedCount} ` +
         `errors=${validationErrs.length} duration=${durationMs}ms`
       );
 
       return res.status(200).json({
         ok:           true,
         total:        allDeals.length,
+        positions:    Object.keys(byPosition).length,
         imported:     written,
-        skipped:      skippedIds.length,
+        updated:      updatedCount,
+        skipped:      skippedCount,
         errors:       validationErrs.length,
         symbolLog,
         durationMs,
-        note: written === 0
-          ? "No new deals to import — all deals already in Firestore or no deals found in the requested range."
-          : `${written} deal(s) imported. ${skippedIds.length} already existed and were skipped.`,
+        note: written + updatedCount === 0
+          ? "No new positions to import — all already in Firestore or no deals found in the requested range."
+          : `${written} new position(s) imported, ${updatedCount} closed. ${skippedCount} already up-to-date.`,
       });
 
     } catch (err) {
