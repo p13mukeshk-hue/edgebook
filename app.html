@@ -1731,6 +1731,9 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
       <div class="section-divider">Psychology</div>
       <div class="form-grid" style="margin-bottom:14px">
         <div class="field" id="tf-emotion"><label>Pre-trade emotion</label><select id="t-emo"><option>😌 Calm</option><option>🎯 Focused</option><option>😤 Frustrated</option><option>😨 Anxious</option><option>🤑 Greedy</option><option>😴 Tired</option><option>💪 Confident</option></select></div>
+        <div class="field" id="tf-psych-prethought" style="grid-column:1/-1"><label>Pre-trade thought</label><textarea id="t-psych-prethought" placeholder="What was my thesis for this trade?" rows="2" style="resize:vertical"></textarea></div>
+        <div class="field" id="tf-psych-execution" style="grid-column:1/-1"><label>Execution note</label><textarea id="t-psych-execution" placeholder="How did I execute vs my plan?" rows="2" style="resize:vertical"></textarea></div>
+        <div class="field" id="tf-psych-review" style="grid-column:1/-1"><label>Post-trade review</label><textarea id="t-psych-review" placeholder="What did I learn from this trade?" rows="2" style="resize:vertical"></textarea></div>
         <div id="custom-fields-psychology" class="form-grid" style="display:contents"></div>
         <div class="field" id="tf-notes" style="grid-column:1/-1"><label>Notes</label><textarea id="t-notes" placeholder="Why this trade? Thesis, key levels…"></textarea></div>
         <div id="custom-fields-notes" class="form-grid" style="display:contents"></div>
@@ -3288,6 +3291,9 @@ function openTradeModal(id=null){
     document.getElementById('t-date').value=t.date||TODAY;
     document.getElementById('t-strat').value=t.strategy||'';
     document.getElementById('t-emo').value=t.emotion||'😌 Calm';
+    document.getElementById('t-psych-prethought').value=t.psychology?.preThought||'';
+    document.getElementById('t-psych-execution').value=t.psychology?.executionNote||'';
+    document.getElementById('t-psych-review').value=t.psychology?.review||'';
     document.getElementById('t-notes').value=t.notes||'';
     // Restore F&O fields
     if(t.instrument){
@@ -3302,7 +3308,7 @@ function openTradeModal(id=null){
     currentScreenshots = t.screenshots ? [...t.screenshots] : [];
     renderScreenshotPreviews();
   } else {
-    ['t-entry','t-exit','t-size','t-sl','t-tp','t-strat','t-notes'].forEach(x=>document.getElementById(x).value='');
+    ['t-entry','t-exit','t-size','t-sl','t-tp','t-strat','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('t-sym').value='';
     document.getElementById('t-asset').value=S.prefs.defaultAsset||'eq';
     document.getElementById('t-date').value=TODAY;
@@ -3643,6 +3649,11 @@ function saveTrade(){
     tp:parseFloat(document.getElementById('t-tp').value)||null,
     strategy:document.getElementById('t-strat').value,
     emotion:document.getElementById('t-emo').value,
+    psychology:{
+      preThought:   document.getElementById('t-psych-prethought').value,
+      executionNote:document.getElementById('t-psych-execution').value,
+      review:       document.getElementById('t-psych-review').value,
+    },
     notes:document.getElementById('t-notes').value,
     pnl, custom:cfVals, accountId,
     instrument: isFno ? document.getElementById('t-instrument').value : null,
