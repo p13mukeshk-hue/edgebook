@@ -12,35 +12,29 @@ const db = admin.firestore();
 
 const KITE_API_KEY = "ee7h02pr0g6bmxjj";
 
-const ALLOWED_ORIGINS = new Set([
+const ALLOWED_ORIGINS = [
+  "https://www.edgebook.trade",
   "https://edgebook.trade",
   "https://edgebook-2dce2.web.app",
   "https://edgebook-2dce2.firebaseapp.com",
-]);
+  "http://localhost:5000",
+  "http://localhost:3000",
+];
 
 // ─── CORS — manual header injection (most reliable in Firebase Functions) ────
 //
-// Call this as the FIRST line of every HTTP function.
-// Returns true if the request is an OPTIONS preflight (caller must return immediately).
+// Call setCors(req, res) as the first line of every HTTP function,
+// then immediately handle OPTIONS preflights and return.
 
-function handleCors(req, res) {
+function setCors(req, res) {
   const origin = req.headers.origin;
-
-  // Echo back the origin if it's on the allowlist; otherwise omit the header
-  // (browser will block the request — correct behavior for unknown origins)
-  if (origin && ALLOWED_ORIGINS.has(origin)) {
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.set("Access-Control-Allow-Origin", origin);
   }
-
+  res.set("Access-Control-Allow-Credentials", "true");
   res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.set("Access-Control-Max-Age", "3600");
-
-  if (req.method === "OPTIONS") {
-    res.status(204).send("");
-    return true; // caller must return immediately
-  }
-  return false;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -604,17 +598,18 @@ async function syncTradesForUser(uid) {
 // That page must call /zerodhaCallback (POST) with the token + user's ID token.
 
 exports.zerodhaLogin = functions.https.onRequest(async (req, res) => {
-  if (handleCors(req, res)) return;
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
   try {
     if (req.method !== "GET" && req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
     }
     await verifyAuth(req);
     const kite = new KiteConnect({ api_key: KITE_API_KEY });
-    res.json({ loginUrl: kite.getLoginURL() });
+    return res.status(200).json({ loginUrl: kite.getLoginURL() });
   } catch (err) {
     console.error("zerodhaLogin:", err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    return res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -625,7 +620,8 @@ exports.zerodhaLogin = functions.https.onRequest(async (req, res) => {
 // Exchanges request_token → access_token, stores encrypted in Firestore.
 
 exports.zerodhaCallback = functions.https.onRequest(async (req, res) => {
-  if (handleCors(req, res)) return;
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -675,7 +671,8 @@ exports.zerodhaCallback = functions.https.onRequest(async (req, res) => {
 // Syncs today's trades + orders into users/{uid}/trades and users/{uid}/orders.
 
 exports.syncZerodhaTrades = functions.https.onRequest(async (req, res) => {
-  if (handleCors(req, res)) return;
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
   try {
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -703,7 +700,8 @@ exports.syncZerodhaTrades = functions.https.onRequest(async (req, res) => {
 // Always returns 200 immediately; Zerodha retries on anything else.
 
 exports.zerodhaPostback = functions.https.onRequest(async (req, res) => {
-  if (handleCors(req, res)) return;
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
 
   // Respond 200 immediately so Zerodha doesn't retry
   res.status(200).json({ received: true });
@@ -988,6 +986,35 @@ async function callCtraderTool(bearerToken, sessionId, toolName, toolArgs = {}) 
  * On first fetch the full raw symbol[0] is logged so we can see the exact field
  * names the API uses — this helps us adapt if the schema ever changes.
  */
+
+// Fallback lot sizes when cTrader MCP get_symbols doesn't return contract sizing.
+// Values are standard industry lots (units of base currency or contract units).
+const LOT_SIZE_DEFAULTS = {
+  EURUSD: 100000, GBPUSD: 100000, USDJPY: 100000, AUDUSD: 100000,
+  USDCAD: 100000, USDCHF: 100000, NZDUSD: 100000, EURGBP: 100000,
+  EURJPY: 100000, GBPJPY: 100000, EURCHF: 100000, EURAUD: 100000,
+  GBPAUD: 100000, AUDCAD: 100000, CADJPY: 100000, CHFJPY: 100000,
+  XAUUSD: 100,   XAGUSD: 5000,
+  BTCUSD: 1,     ETHUSD: 1,     BTCUSDT: 1,   ETHUSDT: 1,
+  US30: 1,       US500: 1,      NAS100: 1,    UK100: 1,
+  GER40: 1,      AUS200: 1,     JPN225: 1,
+  XTIUSD: 1000,  XBRUSD: 1000,
+};
+
+// Fallback pip sizes (smallest price increment that matters for P&L).
+const PIP_SIZE_DEFAULTS = {
+  EURUSD: 0.0001, GBPUSD: 0.0001, AUDUSD: 0.0001, NZDUSD: 0.0001,
+  USDCAD: 0.0001, USDCHF: 0.0001, EURGBP: 0.0001, EURCHF: 0.0001,
+  EURAUD: 0.0001, GBPAUD: 0.0001, AUDCAD: 0.0001,
+  USDJPY: 0.01,   EURJPY: 0.01,   GBPJPY: 0.01,   CADJPY: 0.01,
+  CHFJPY: 0.01,
+  XAUUSD: 0.01,   XAGUSD: 0.001,
+  BTCUSD: 1,      ETHUSD: 0.01,  BTCUSDT: 1,   ETHUSDT: 0.01,
+  US30: 1,        NAS100: 1,     US500: 0.1,   UK100: 1,
+  GER40: 1,       AUS200: 1,     JPN225: 1,
+  XTIUSD: 0.01,   XBRUSD: 0.01,
+};
+
 async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = false } = {}) {
   const cacheRef = db.collection("system").doc("ctrader");
 
@@ -1072,18 +1099,34 @@ async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = fal
       continue;
     }
 
-    // Extract every field the user requested. Use null when absent — never default.
+    // Extract every field the user requested.
+    // For sizing fields: try API first, fall back to hardcoded industry defaults,
+    // then a safe catch-all (1 lot / 0.0001 pip) so downstream math never gets NaN.
+    const apiLotSize  = extractNumber(s, ["lotSize", "lot_size", "contractSize", "contract_size"]);
+    const apiPipSize  = extractNumber(s, ["pipSize", "pip_size", "pipPosition", "point"]);
+    const apiPipValue = extractNumber(s, ["pipValue", "pip_value", "pipValuePerLot"]);
+
+    const lotSize  = apiLotSize  ?? LOT_SIZE_DEFAULTS[name] ?? 1;
+    const pipSize  = apiPipSize  ?? PIP_SIZE_DEFAULTS[name] ?? 0.0001;
+    const pipValue = apiPipValue ?? null;
+
+    const lotSizeSrc  = apiLotSize  != null ? "api" : (LOT_SIZE_DEFAULTS[name]  != null ? "fallback" : "default");
+    const pipSizeSrc  = apiPipSize  != null ? "api" : (PIP_SIZE_DEFAULTS[name]  != null ? "fallback" : "default");
+
     const entry = {
       id,
       name,
       // Is this symbol currently tradeable?
       enabled: s.enabled ?? s.tradingEnabled ?? s.isEnabled ?? null,
-      // Asset class: Forex / Crypto / Commodity / Index / etc.
-      symbolCategory: s.symbolCategory ?? s.category ?? s.assetClass ?? s.type ?? null,
-      // Contract / volume sizing — from API only
-      lotSize:  extractNumber(s, ["lotSize", "lot_size", "contractSize", "contract_size"]),
-      pipSize:  extractNumber(s, ["pipSize", "pip_size", "pipPosition", "point"]),
-      pipValue: extractNumber(s, ["pipValue", "pip_value", "pipValuePerLot"]),
+      // Asset class — API may return symbolCategoryId (int) rather than a string;
+      // keep whatever the API gives so ctraderCategoryToAsset() can map it.
+      symbolCategory: s.symbolCategory ?? s.category ?? s.assetClass ?? s.type ?? s.symbolCategoryId ?? null,
+      // Contract / volume sizing — API value preferred, then named fallback, then safe default
+      lotSize,
+      pipSize,
+      pipValue,
+      _lotSizeSrc: lotSizeSrc,
+      _pipSizeSrc: pipSizeSrc,
       // Schedule data — from API only
       scheduleTimeZone: s.scheduleTimeZone ?? s.tradingScheduleTimeZone ?? s.timezone ?? null,
       tradingHours:     s.tradingHours ?? s.schedule ?? s.tradingSchedule ?? s.hours ?? null,
@@ -1108,7 +1151,9 @@ async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = fal
     if (found) {
       console.log(
         `cTrader symbol check — ${checkName}: id=${found.id} enabled=${found.enabled} ` +
-        `category=${found.symbolCategory} lotSize=${found.lotSize} pipSize=${found.pipSize} ` +
+        `category=${found.symbolCategory} ` +
+        `lotSize=${found.lotSize} (${found._lotSizeSrc}) ` +
+        `pipSize=${found.pipSize} (${found._pipSizeSrc}) ` +
         `pipValue=${found.pipValue} tz=${found.scheduleTimeZone}`
       );
     }
@@ -2025,7 +2070,8 @@ function parseCtraderBearerInput(raw) {
 // connectivity and symbol data, then stores the encrypted token in Firestore.
 
 exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
-  if (handleCors(req, res)) return;
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
 
   try {
     const decoded = await verifyAuth(req);
@@ -2147,14 +2193,18 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
 // Returns full detail: saved, skipped, durationMs, symbolLog.
 
 exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
-  if (handleCors(req, res)) return;
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
   try {
     const decoded = await verifyAuth(req);
     const uid = decoded.uid;
 
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
+    if (!uid) {
+      return res.status(401).json({ error: "Unauthorized" });
     }
 
     const result = await syncCtraderForUser(uid);
@@ -2207,7 +2257,8 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
 exports.syncCtraderHistory = functions
   .runWith({ timeoutSeconds: 540, memory: "512MB" })
   .https.onRequest(async (req, res) => {
-    if (handleCors(req, res)) return;
+    setCors(req, res);
+    if (req.method === "OPTIONS") { res.status(204).send(""); return; }
 
     const fnStart = Date.now();
 
