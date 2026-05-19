@@ -239,6 +239,158 @@ function zerodhaTradeDocId(symbol, date, entryPrice) {
   return `zerodha_${symbol}_${date}_${entryPrice}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
+/**
+ * FIFO-pair an array of Kite fills into Edgebook trade documents.
+ *
+ * Shared by syncTradesForUser (daily) and syncZerodhaHistory (historical).
+ *
+ * @param {Array}  fills       Raw fill objects from kite.getTrades() / getTradebook()
+ * @param {Set}    openSymbols Symbol names that still have an open net position
+ *                             (pass new Set() for history imports where position data
+ *                              is unavailable — unmatched BUYs will be skipped)
+ * @param {string} uid         UID used only for log labels
+ * @param {string} label       Log prefix (e.g. "syncZerodhaTrades")
+ * @returns {Array} pairedTrades — Edgebook trade objects ready to batch-write
+ */
+function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha") {
+  // Group fills by tradingsymbol, sort by fill time ascending
+  const bySymbol = {};
+  for (const fill of fills) {
+    const sym = (fill.tradingsymbol || "").toUpperCase();
+    if (!sym) { console.warn(`${label} [${uid}]: fill missing tradingsymbol — skipping`); continue; }
+    if (!bySymbol[sym]) bySymbol[sym] = [];
+    bySymbol[sym].push(fill);
+  }
+  for (const sym of Object.keys(bySymbol)) {
+    bySymbol[sym].sort((a, b) => {
+      const ta = new Date(a.fill_timestamp || a.order_timestamp || 0).getTime();
+      const tb = new Date(b.fill_timestamp || b.order_timestamp || 0).getTime();
+      return ta - tb;
+    });
+  }
+
+  const pairedTrades = [];
+
+  for (const [sym, symFills] of Object.entries(bySymbol)) {
+    const buyQueue = [];  // unmatched BUY fills (FIFO)
+
+    for (const fill of symFills) {
+      const txType = (fill.transaction_type || "").toUpperCase();
+      const qty    = Number(fill.quantity || fill.filled_quantity || 0);
+      const price  = Number(fill.average_price || 0);
+      const ts     = fill.fill_timestamp || fill.order_timestamp || fill.exchange_timestamp;
+      const date   = extractDateStr(ts);
+      const time   = ts ? String(ts).slice(11, 16) : null;
+
+      if (txType === "BUY") {
+        buyQueue.push({ fill, qty, price, date, time });
+        continue;
+      }
+
+      if (txType === "SELL") {
+        const buyEntry = buyQueue.shift();
+        const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+        const matchQty = buyEntry ? Math.min(buyEntry.qty, qty) : qty;
+
+        if (buyEntry) {
+          // Matched Long round-trip
+          const entry = buyEntry.price;
+          const exit  = price;
+          const pnl   = parseFloat(((exit - entry) * matchQty).toFixed(2));
+          pairedTrades.push({
+            id:            zerodhaTradeDocId(sym, buyEntry.date, entry),
+            brokerTradeId: fill.order_id || fill.trade_id,
+            source:        "zerodha",
+            broker:        "zerodha",
+            symbol:        sym,
+            asset,
+            instrument:    instrument ?? null,
+            optionType:    optionType ?? null,
+            strike:        fill.strike    ? Number(fill.strike)    : null,
+            expiry:        fill.expiry    || null,
+            exchange:      fill.exchange  || null,
+            product:       fill.product   || null,
+            direction:     "Long",
+            entry,
+            exit,
+            size:          matchQty,
+            pnl,
+            isOpen:        false,
+            date:          buyEntry.date,
+            entryTime:     buyEntry.time,
+            exitTime:      time,
+            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } else {
+          // SELL with no preceding BUY — Short entry
+          pairedTrades.push({
+            id:            zerodhaTradeDocId(sym, date, price),
+            brokerTradeId: fill.order_id || fill.trade_id,
+            source:        "zerodha",
+            broker:        "zerodha",
+            symbol:        sym,
+            asset,
+            instrument:    instrument ?? null,
+            optionType:    optionType ?? null,
+            strike:        fill.strike  ? Number(fill.strike) : null,
+            expiry:        fill.expiry  || null,
+            exchange:      fill.exchange || null,
+            product:       fill.product  || null,
+            direction:     "Short",
+            entry:         price,
+            exit:          null,
+            size:          qty,
+            pnl:           null,
+            isOpen:        true,
+            date,
+            entryTime:     time,
+            exitTime:      null,
+            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+        continue;
+      }
+
+      console.warn(`${label} [${uid}]: unknown transaction_type "${txType}" for ${sym} — skipping fill`);
+    }
+
+    // Remaining unmatched BUY fills → open Long positions (skip if not in openSymbols)
+    for (const { fill, qty, price, date, time } of buyQueue) {
+      if (!openSymbols.has(sym)) {
+        console.log(`${label} [${uid}]: unmatched BUY ${sym} not in openSymbols — skipping`);
+        continue;
+      }
+      const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+      pairedTrades.push({
+        id:            zerodhaTradeDocId(sym, date, price),
+        brokerTradeId: fill.order_id || fill.trade_id,
+        source:        "zerodha",
+        broker:        "zerodha",
+        symbol:        sym,
+        asset,
+        instrument:    instrument ?? null,
+        optionType:    optionType ?? null,
+        strike:        fill.strike  ? Number(fill.strike) : null,
+        expiry:        fill.expiry  || null,
+        exchange:      fill.exchange || null,
+        product:       fill.product  || null,
+        direction:     "Long",
+        entry:         price,
+        exit:          null,
+        size:          qty,
+        pnl:           null,
+        isOpen:        true,
+        date,
+        entryTime:     time,
+        exitTime:      null,
+        syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  return pairedTrades;
+}
+
 async function syncTradesForUser(uid) {
   const kite = await getKiteForUser(uid);
 
@@ -306,145 +458,11 @@ async function syncTradesForUser(uid) {
   const tradesRef = db.collection("users").doc(uid).collection("trades");
   const ordersRef = db.collection("users").doc(uid).collection("orders");
 
-  // ── 3. Group fills by tradingsymbol, sort by fill time ascending ─────────────
-  const bySymbol = {};
-  for (const fill of fills) {
-    const sym = (fill.tradingsymbol || "").toUpperCase();
-    if (!sym) { console.warn(`syncZerodhaTrades [${uid}]: fill missing tradingsymbol — skipping`); continue; }
-    if (!bySymbol[sym]) bySymbol[sym] = [];
-    bySymbol[sym].push(fill);
-  }
-  for (const sym of Object.keys(bySymbol)) {
-    bySymbol[sym].sort((a, b) => {
-      const ta = new Date(a.fill_timestamp || a.order_timestamp || 0).getTime();
-      const tb = new Date(b.fill_timestamp || b.order_timestamp || 0).getTime();
-      return ta - tb;
-    });
-  }
-
-  // ── 4. Resolve prop accountId from user settings ──────────────────────────────
+  // ── 3. Resolve prop accountId from user settings ──────────────────────────────
   const accountId = await resolvePropAccountId(uid);
 
-  // ── 5. FIFO pair BUY + SELL fills per symbol → round-trip trades ─────────────
-  const pairedTrades = [];
-
-  for (const [sym, symFills] of Object.entries(bySymbol)) {
-    const buyQueue = [];  // unmatched BUY fills
-
-    for (const fill of symFills) {
-      const txType = (fill.transaction_type || "").toUpperCase();
-      const qty    = Number(fill.quantity || fill.filled_quantity || 0);
-      const price  = Number(fill.average_price || 0);
-      const ts     = fill.fill_timestamp || fill.order_timestamp || fill.exchange_timestamp;
-      const date   = extractDateStr(ts);
-      const time   = ts ? String(ts).slice(11, 16) : null;
-
-      if (txType === "BUY") {
-        buyQueue.push({ fill, qty, price, date, time });
-        continue;
-      }
-
-      if (txType === "SELL") {
-        const buyEntry = buyQueue.shift();
-        const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
-        const matchQty = buyEntry ? Math.min(buyEntry.qty, qty) : qty;
-
-        if (buyEntry) {
-          // Matched Long round-trip
-          const entry = buyEntry.price;
-          const exit  = price;
-          const pnl   = parseFloat(((exit - entry) * matchQty).toFixed(2));
-          pairedTrades.push({
-            id:            zerodhaTradeDocId(sym, buyEntry.date, entry),
-            brokerTradeId: fill.order_id || fill.trade_id,
-            source:        "zerodha",
-            broker:        "zerodha",
-            symbol:        sym,
-            asset,
-            instrument:    instrument ?? null,
-            optionType:    optionType ?? null,
-            strike:        fill.strike    ? Number(fill.strike)    : null,
-            expiry:        fill.expiry    || null,
-            exchange:      fill.exchange  || null,
-            product:       fill.product   || null,
-            direction:     "Long",
-            entry,
-            exit,
-            size:          matchQty,
-            pnl,
-            isOpen:        false,
-            date:          buyEntry.date,
-            entryTime:     buyEntry.time,
-            exitTime:      time,
-            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
-          });
-        } else {
-          // SELL with no preceding BUY — Short position (no exit yet today)
-          pairedTrades.push({
-            id:            zerodhaTradeDocId(sym, date, price),
-            brokerTradeId: fill.order_id || fill.trade_id,
-            source:        "zerodha",
-            broker:        "zerodha",
-            symbol:        sym,
-            asset,
-            instrument:    instrument ?? null,
-            optionType:    optionType ?? null,
-            strike:        fill.strike  ? Number(fill.strike) : null,
-            expiry:        fill.expiry  || null,
-            exchange:      fill.exchange || null,
-            product:       fill.product  || null,
-            direction:     "Short",
-            entry:         price,
-            exit:          null,
-            size:          qty,
-            pnl:           null,
-            isOpen:        true,
-            date,
-            entryTime:     time,
-            exitTime:      null,
-            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
-          });
-        }
-        continue;
-      }
-
-      console.warn(`syncZerodhaTrades [${uid}]: unknown transaction_type "${txType}" for ${sym} — skipping fill`);
-    }
-
-    // Remaining unmatched BUY fills → open Long positions
-    for (const { fill, qty, price, date, time } of buyQueue) {
-      if (!openSymbols.has(sym)) {
-        // Position was closed in a previous day's sync — skip
-        console.log(`syncZerodhaTrades [${uid}]: unmatched BUY ${sym} not in openSymbols — skipping (closed prior day)`);
-        continue;
-      }
-      const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
-      pairedTrades.push({
-        id:            zerodhaTradeDocId(sym, date, price),
-        brokerTradeId: fill.order_id || fill.trade_id,
-        source:        "zerodha",
-        broker:        "zerodha",
-        symbol:        sym,
-        asset,
-        instrument:    instrument ?? null,
-        optionType:    optionType ?? null,
-        strike:        fill.strike  ? Number(fill.strike) : null,
-        expiry:        fill.expiry  || null,
-        exchange:      fill.exchange || null,
-        product:       fill.product  || null,
-        direction:     "Long",
-        entry:         price,
-        exit:          null,
-        size:          qty,
-        pnl:           null,
-        isOpen:        true,
-        date,
-        entryTime:     time,
-        exitTime:      null,
-        syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
-      });
-    }
-  }
+  // ── 4. FIFO pair BUY + SELL fills per symbol → round-trip trades ─────────────
+  const pairedTrades = pairFillsIntoTrades(fills, openSymbols, uid, "syncZerodhaTrades");
 
   // Create open Long trades from positions that have no fills today
   // (e.g. position opened on a previous day, still running)
@@ -693,7 +711,131 @@ exports.syncZerodhaTrades = functions.https.onRequest(async (req, res) => {
   }
 });
 
-// ─── 4. zerodhaPostback ───────────────────────────────────────────────────────
+// ─── 4. syncZerodhaHistory ────────────────────────────────────────────────────
+//
+// POST /syncZerodhaHistory  (Authorization: Bearer <Firebase ID token>)
+// Body (optional): { force: true }
+//
+// Attempts to import historical Zerodha trades:
+//   1. Tries kite.getTradebook() — available on some Kite plans / future API versions.
+//   2. Falls back to kite.getOrders() filtered to status === "COMPLETE".
+//
+// NOTE: The standard Kite Connect API (free tier) only provides same-day fills
+// via getTrades() / getOrders(). Neither endpoint accepts date-range parameters.
+// If getTradebook() is unavailable, this function imports whatever the API returns.
+// Pass force:true to overwrite trades that already exist in Firestore.
+
+exports.syncZerodhaHistory = functions.https.onRequest(async (req, res) => {
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  try {
+    const { uid } = await verifyAuth(req);
+    const kite = await getKiteForUser(uid);
+    const force = req.body?.force === true;
+
+    console.log(`syncZerodhaHistory [${uid}]: starting — force=${force}`);
+
+    // ── 1. Fetch fills — try getTradebook() first, fall back to getOrders() ──────
+    let fills = [];
+    try {
+      fills = await kite.getTradebook();
+      console.log(`syncZerodhaHistory [${uid}]: getTradebook() returned ${fills.length} fill(s)`);
+    } catch (tbErr) {
+      console.warn(
+        `syncZerodhaHistory [${uid}]: getTradebook() unavailable (${tbErr.message}) ` +
+        `— falling back to getOrders()`
+      );
+      const orders = await kite.getOrders();
+      // Normalise complete orders to look like fill objects
+      fills = orders
+        .filter((o) => (o.status || "").toUpperCase() === "COMPLETE")
+        .map((o) => ({
+          ...o,
+          quantity:         o.filled_quantity ?? o.quantity,
+          fill_timestamp:   o.exchange_update_timestamp || o.order_timestamp,
+        }));
+      console.log(`syncZerodhaHistory [${uid}]: ${fills.length} complete order(s) from fallback`);
+    }
+
+    if (fills.length === 0) {
+      return res.status(200).json({
+        saved: 0,
+        skipped: 0,
+        message:
+          "No fills found. The standard Kite Connect API provides same-day data only; " +
+          "historical trade data accumulates via the daily scheduled sync.",
+      });
+    }
+
+    // ── 2. Pair fills into trades using shared FIFO helper ──────────────────────
+    // Pass an empty openSymbols Set — for historical data we don't have live
+    // position state, so unmatched BUYs are skipped (they will appear via daily sync).
+    const pairedTrades = pairFillsIntoTrades(fills, new Set(), uid, "syncZerodhaHistory");
+    console.log(
+      `syncZerodhaHistory [${uid}]: ${fills.length} fill(s) → ` +
+      `${pairedTrades.length} paired trade(s)`
+    );
+
+    // ── 3. Resolve prop account ID ───────────────────────────────────────────────
+    const accountId = await resolvePropAccountId(uid);
+    if (accountId) {
+      for (const t of pairedTrades) t.accountId = accountId;
+    }
+
+    // ── 4. Load existing Zerodha trades for dedup ───────────────────────────────
+    const tradesRef = db.collection("users").doc(uid).collection("trades");
+    const existingSnap = await tradesRef
+      .where("broker", "==", "zerodha")
+      .select("id", "isOpen")
+      .get();
+    const existingIds = new Set(existingSnap.docs.map((d) => d.id));
+
+    // ── 5. Batch write — skip existing unless force=true ────────────────────────
+    const BATCH_SIZE = 400;
+    let saved = 0, skipped = 0;
+    const toWrite = [];
+
+    for (const trade of pairedTrades) {
+      if (existingIds.has(trade.id) && !force) {
+        skipped++;
+        continue;
+      }
+      toWrite.push({ ref: tradesRef.doc(trade.id), trade });
+    }
+
+    for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
+      const batch = db.batch();
+      for (const { ref, trade } of toWrite.slice(i, i + BATCH_SIZE)) {
+        batch.set(ref, trade, { merge: true });
+      }
+      await batch.commit();
+      saved += toWrite.slice(i, i + BATCH_SIZE).length;
+    }
+
+    console.log(`syncZerodhaHistory [${uid}]: saved=${saved} skipped=${skipped}`);
+
+    await db.collection("users").doc(uid).collection("brokers").doc("zerodha")
+      .update({ lastSync: admin.firestore.FieldValue.serverTimestamp() });
+
+    return res.status(200).json({
+      saved,
+      skipped,
+      message: saved > 0
+        ? `Imported ${saved} trade(s) from Zerodha (${skipped} already existed)`
+        : "No new trades to import — all already in Firestore or no data available",
+    });
+
+  } catch (err) {
+    console.error("syncZerodhaHistory error:", err.message);
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── 5. zerodhaPostback ───────────────────────────────────────────────────────
 //
 // POST /zerodhaPostback  (no auth — called by Zerodha's servers)
 // Set this URL as the Postback URL in your Kite developer console.
