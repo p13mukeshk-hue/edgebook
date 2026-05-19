@@ -2044,6 +2044,42 @@ const SettingsManager = {
 /* ══════════════════════════════════════════════════════
    DATA STORE (swap-ready)
 ══════════════════════════════════════════════════════ */
+// Normalise a trade doc loaded from Firestore.
+// Trades written by the app already have the correct shape.
+// Trades written by the Cloud Function (Zerodha Kite raw format) may have
+// `tradingsymbol` / `average_price` / `fill_timestamp` instead of the app fields.
+function normaliseFsTrade(t){
+  if(t.symbol && t.entry != null) return t; // already normalised
+  const sym  = t.tradingsymbol || t.symbol || '';
+  const entry= parseFloat(t.average_price ?? t.entry ?? 0);
+  let date   = t.date || '';
+  if(!date && t.fill_timestamp){
+    // fill_timestamp: "2024-01-15 09:15:00" or ISO string
+    date = String(t.fill_timestamp).slice(0,10);
+  }
+  if(!date && t.order_timestamp) date = String(t.order_timestamp).slice(0,10);
+  return {
+    id:        t.id ?? Date.now(),
+    symbol:    sym,
+    entry:     entry,
+    exit:      t.exit ?? null,
+    date:      date,
+    asset:     t.asset || 'eq',
+    direction: t.direction || (t.transaction_type==='BUY'?'Long':'Short'),
+    size:      t.size ?? t.quantity ?? 1,
+    pnl:       t.pnl ?? null,
+    strategy:  t.strategy || '',
+    emotion:   t.emotion || '',
+    notes:     t.notes || '',
+    source:    t.source || 'zerodha',
+    sl:        t.sl ?? null,
+    tp:        t.tp ?? null,
+    accountId: t.accountId ?? null,
+    instrument:t.instrument || '',
+    screenshots: t.screenshots || [],
+  };
+}
+
 const DataStore = {
   _uid:'guest',
   _tk(){ return `tradedesk_trades_${this._uid}`; },
@@ -2061,7 +2097,7 @@ const DataStore = {
   loadMoods(){ try{return JSON.parse(localStorage.getItem(this._mk()))||[];}catch{return[];} },
   saveMoods(m){ try{localStorage.setItem(this._mk(),JSON.stringify(m));}catch{} },
   // Load trades from Firestore and merge with localStorage
-  async loadFromFirestore(){ if(!window._firebaseReady||this._uid==='guest') return; try{ const snap=await window._fbGetDocs(window._fbCollection(window._fbDb,'users',this._uid,'trades')); if(!snap.empty){ const fsTrades=snap.docs.map(d=>d.data()); localStorage.setItem(this._tk(),JSON.stringify(fsTrades)); trades=fsTrades; refreshAll(); } }catch(e){ console.warn('Firestore load:',e); } },
+  async loadFromFirestore(){ if(!window._firebaseReady||this._uid==='guest') return; try{ const snap=await window._fbGetDocs(window._fbCollection(window._fbDb,'users',this._uid,'trades')); if(!snap.empty){ const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null); localStorage.setItem(this._tk(),JSON.stringify(fsTrades)); trades=fsTrades; refreshAll(); } }catch(e){ console.warn('Firestore load:',e); } },
 };
 
 /* ══════════════════════════════════════════════════════
@@ -2222,6 +2258,10 @@ function listenPendingDuplicates(uid){
   );
   _dupUnsubscribe = window._fbOnSnapshot(q, snap=>{
     _pendingDups = snap.docs.map(d=>({id:d.id,...d.data()}));
+    updateDupBanner();
+  }, err=>{
+    console.warn('[DupListener]', err.code, err.message);
+    _pendingDups = [];
     updateDupBanner();
   });
 }
@@ -3812,8 +3852,8 @@ function tradeRow(t){
       <span class="badge badge-${t.direction==='Long'?'long':'short'}">${t.direction}</span>
       ${t.instrument ? `<span class="badge" style="background:var(--bg4);color:var(--text2);margin-left:3px;font-size:10px">${t.instrument==='Options'&&t.optionType ? t.optionType : t.instrument}</span>` : ''}
     </td>
-    <td class="td-mono" title="${t.strike?'Strike: '+t.strike:''}">${c}${t.entry.toFixed(t.asset==='fx'?4:2)}${t.strike?` <span style="font-size:10px;color:var(--text3)">@${t.strike}</span>`:''}</td>
-    <td class="td-mono">${t.exit!=null?c+t.exit.toFixed(t.asset==='fx'?4:2):'—'}</td>
+    <td class="td-mono" title="${t.strike?'Strike: '+t.strike:''}">${c}${(t.entry??0).toFixed(t.asset==='fx'?4:2)}${t.strike?` <span style="font-size:10px;color:var(--text3)">@${t.strike}</span>`:''}</td>
+    <td class="td-mono">${t.exit!=null?c+(t.exit??0).toFixed(t.asset==='fx'?4:2):'—'}</td>
     <td class="td-mono" title="${szLabel}">${t.size} <span style="font-size:10px;color:var(--text3)">${szLabel}</span></td>
     <td class="td-mono" style="color:var(--text3)">${rr}</td>
     <td>${t.emotion?.split(' ')[0]||'—'}</td>
@@ -3851,18 +3891,20 @@ const TABLE_HEADS = '<thead><tr><th>Date</th><th>Symbol</th><th>Class</th><th>Di
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
 
+const _safeRow = t => { try{ return tradeRow(t); }catch(e){ console.warn('[tradeRow]',t?.id,e); return ''; } };
+
 function renderTradeTable(){
   const filtered=getFilteredTrades('dashboard','dash-search','dash-filter-asset','dash-filter-dir','').slice(0,rows());
   const wrap=document.getElementById('trade-table-wrap');
   if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-table-list"></i><p>No trades match.</p></div>';return;}
-  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
+  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(_safeRow).join('')}</tbody></table>`;
   applyCompact();
 }
 function renderFullJournal(){
   const filtered=getFilteredTrades('journal','j-search','j-asset','j-dir','j-result');
   const wrap=document.getElementById('full-journal-wrap');
   if(!filtered.length){wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-book-open"></i><p>No trades match.</p></div>';return;}
-  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(tradeRow).join('')}</tbody></table>`;
+  wrap.innerHTML=`<table>${TABLE_HEADS}<tbody>${filtered.map(_safeRow).join('')}</tbody></table>`;
   applyCompact();
 }
 

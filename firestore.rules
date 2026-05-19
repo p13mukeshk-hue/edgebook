@@ -31,6 +31,14 @@ service cloud.firestore {
         allow read, write: if isOwner(userId);
       }
 
+      // ── Pending duplicates ────────────────────────────────────────────────
+      // users/{userId}/pendingDuplicates/{docId}
+      // Written by Cloud Function; client reads and deletes after resolution.
+      match /pendingDuplicates/{docId} {
+        allow read, delete: if isOwner(userId);
+        allow write: if false; // Cloud Function (Admin SDK) only
+      }
+
       // ── Order updates (real-time postbacks) ───────────────────────────────
       // users/{userId}/orderUpdates/{updateId}
       // Written by the Cloud Function (Admin SDK bypasses rules).
