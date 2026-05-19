@@ -143,6 +143,70 @@ async function markZerodhaDisconnected(uid, reason) {
     .update({ connected: false, disconnectedAt: admin.firestore.FieldValue.serverTimestamp(), disconnectReason: reason });
 }
 
+// ─── Deduplication helpers ────────────────────────────────────────────────────
+
+/** Extract YYYY-MM-DD from any timestamp format the brokers may send. */
+function extractDateStr(val) {
+  if (!val) return null;
+  if (typeof val === "string")           return val.slice(0, 10);
+  if (val && typeof val.toDate === "function") return val.toDate().toISOString().slice(0, 10);
+  if (val instanceof Date)               return val.toISOString().slice(0, 10);
+  if (typeof val === "number")           return new Date(val).toISOString().slice(0, 10);
+  return null;
+}
+
+/**
+ * Snapshot all existing trade docs into two fast-lookup structures:
+ *   byDocId  — Set of doc IDs          (condition-1 check: same broker ID)
+ *   byKey    — Map of "SYMBOL|DATE" → [{docId, entry}]  (conditions 2 & 3)
+ */
+async function buildExistingTradeIndex(tradesRef) {
+  const snap = await tradesRef.get();
+  const byDocId = new Set();
+  const byKey   = new Map();
+
+  for (const docSnap of snap.docs) {
+    byDocId.add(docSnap.id);
+    const d = docSnap.data();
+    const sym   = (d.symbol || d.tradingsymbol || "").toUpperCase().trim();
+    const date  = d.date || extractDateStr(
+      d.fill_timestamp || d.order_timestamp || d.exchange_timestamp || d.openTimestamp
+    );
+    const entry = typeof d.entry === "number"         ? d.entry
+                : typeof d.average_price === "number" ? d.average_price
+                : null;
+
+    if (sym && date && entry !== null) {
+      const key = `${sym}|${date}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({ docId: docSnap.id, entry });
+    }
+  }
+  return { byDocId, byKey };
+}
+
+/**
+ * Classify one incoming trade against the index:
+ *   "skip"  — condition 1: same broker doc ID already in Firestore  → silent skip
+ *   "flag"  — condition 2/3: same symbol + date, entry within 0.5%  → pendingDuplicates
+ *   "save"  — no match → safe to write
+ */
+function checkTradeDedup(index, docId, symbol, date, entry) {
+  if (index.byDocId.has(docId)) return { action: "skip" };
+  if (!symbol || !date || !entry) return { action: "save" };
+
+  const key        = `${symbol.toUpperCase()}|${date}`;
+  const candidates = index.byKey.get(key) || [];
+
+  for (const c of candidates) {
+    if (!c.entry || c.entry <= 0) continue;
+    const pctDiff = Math.abs(c.entry - entry) / c.entry;
+    if (pctDiff <= 0.005) return { action: "flag", existingTradeId: c.docId };
+  }
+  return { action: "save" };
+}
+
+
 /**
  * Fetch today's trades + orders from Kite and upsert into Firestore.
  *
@@ -203,18 +267,56 @@ async function syncTradesForUser(uid) {
   }
 
   // Persist whatever the exchange returned (may be [] on weekends/holidays)
+  const tradesRef   = db.collection("users").doc(uid).collection("trades");
+  const ordersRef   = db.collection("users").doc(uid).collection("orders");
+  const pendingRef  = db.collection("users").doc(uid).collection("pendingDuplicates");
+
   if (trades.length > 0 || orders.length > 0) {
-    const batch = db.batch();
-    const tradesRef = db.collection("users").doc(uid).collection("trades");
-    const ordersRef = db.collection("users").doc(uid).collection("orders");
+    // Build dedup index once across all existing trades for this user
+    const dedupIndex = await buildExistingTradeIndex(tradesRef);
+    const batch      = db.batch();
+    let savedCount   = 0;
+    let skippedCount = 0;
+    let flaggedCount = 0;
 
     for (const trade of trades) {
-      batch.set(
-        tradesRef.doc(String(trade.trade_id)),
-        { ...trade, broker: "zerodha", syncedAt: admin.firestore.FieldValue.serverTimestamp() },
-        { merge: true }
+      const docId  = String(trade.trade_id);
+      const symbol = (trade.tradingsymbol || "").toUpperCase();
+      const date   = extractDateStr(
+        trade.fill_timestamp || trade.order_timestamp || trade.exchange_timestamp
       );
+      const entry  = trade.average_price;
+
+      const dedup = checkTradeDedup(dedupIndex, docId, symbol, date, entry);
+
+      if (dedup.action === "skip") {
+        skippedCount++;
+        console.log(`syncZerodhaTrades [${uid}]: SKIP trade_id=${docId} — already in Firestore`);
+      } else if (dedup.action === "flag") {
+        flaggedCount++;
+        console.log(
+          `syncZerodhaTrades [${uid}]: DUPLICATE FLAGGED trade_id=${docId} ` +
+          `matches existing doc "${dedup.existingTradeId}" — writing to pendingDuplicates`
+        );
+        await pendingRef.add({
+          incomingTrade:   { ...trade, broker: "zerodha", source: "zerodha" },
+          existingTradeId: dedup.existingTradeId,
+          detectedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          source:          "zerodha",
+          status:          "pending",
+        });
+      } else {
+        // Preserve user-editable fields if the doc already has them (merge:true handles this,
+        // but we explicitly avoid overwriting notes/emotion/strategy/psychology/screenshots/tags).
+        batch.set(
+          tradesRef.doc(docId),
+          { ...trade, broker: "zerodha", source: "zerodha", syncedAt: admin.firestore.FieldValue.serverTimestamp() },
+          { merge: true }
+        );
+        savedCount++;
+      }
     }
+
     for (const order of orders) {
       batch.set(
         ordersRef.doc(String(order.order_id)),
@@ -222,7 +324,11 @@ async function syncTradesForUser(uid) {
         { merge: true }
       );
     }
-    await batch.commit();
+
+    if (savedCount > 0 || orders.length > 0) await batch.commit();
+    console.log(
+      `syncZerodhaTrades [${uid}]: saved=${savedCount} skipped=${skippedCount} flagged=${flaggedCount}`
+    );
   }
 
   await db.collection("users").doc(uid).collection("brokers").doc("zerodha")
@@ -1481,19 +1587,55 @@ async function syncCtraderForUser(uid) {
     );
   }
 
-  // ── 7. Batch upsert ──────────────────────────────────────────────────────────
-  const tradesRef  = db.collection("users").doc(uid).collection("trades");
-  const BATCH_SIZE = 400;
-  let written      = 0;
+  // ── 7. Dedup check + batch upsert ───────────────────────────────────────────
+  const BATCH_SIZE     = 400;
+  let written          = 0;
+  let skippedById      = 0;
+  let flaggedDups      = 0;
 
-  for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+  // Build index from all existing trades for this user
+  const dedupIndex     = await buildExistingTradeIndex(tradesRef);
+  const ctrPendingRef  = db.collection("users").doc(uid).collection("pendingDuplicates");
+  const toWrite        = [];
+
+  for (const trade of toProcess) {
+    const docId = `ctrader_${trade.dealId}`;
+    const dedup = checkTradeDedup(dedupIndex, docId, trade.symbol, trade.date, trade.entry);
+
+    if (dedup.action === "skip") {
+      skippedById++;
+      console.log(`cTrader uid=${uid}: SKIP dealId=${trade.dealId} — already in Firestore`);
+    } else if (dedup.action === "flag") {
+      flaggedDups++;
+      console.log(
+        `cTrader uid=${uid}: DUPLICATE FLAGGED dealId=${trade.dealId} ` +
+        `matches existing doc "${dedup.existingTradeId}" — writing to pendingDuplicates`
+      );
+      await ctrPendingRef.add({
+        incomingTrade:   { ...trade, source: "ctrader" },
+        existingTradeId: dedup.existingTradeId,
+        detectedAt:      admin.firestore.FieldValue.serverTimestamp(),
+        source:          "ctrader",
+        status:          "pending",
+      });
+    } else {
+      toWrite.push({ ...trade, source: "ctrader" });
+    }
+  }
+
+  for (let i = 0; i < toWrite.length; i += BATCH_SIZE) {
     const batch = db.batch();
-    for (const trade of toProcess.slice(i, i + BATCH_SIZE)) {
+    for (const trade of toWrite.slice(i, i + BATCH_SIZE)) {
+      // merge:true preserves user-editable fields (notes, emotion, strategy, psychology, tags)
       batch.set(tradesRef.doc(`ctrader_${trade.dealId}`), trade, { merge: true });
     }
     await batch.commit();
-    written += toProcess.slice(i, i + BATCH_SIZE).length;
+    written += toWrite.slice(i, i + BATCH_SIZE).length;
   }
+
+  console.log(
+    `cTrader uid=${uid} dedup: saved=${written} skippedById=${skippedById} flagged=${flaggedDups}`
+  );
 
   // ── 8. Update broker metadata ─────────────────────────────────────────────────
   const durationMs = Date.now() - syncStart;
