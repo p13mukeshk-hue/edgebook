@@ -876,7 +876,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
     <div class="login-logo"><div class="login-logo-mark">E</div><div class="login-logo-name">Edgebook</div></div>
     <div class="login-title">Welcome back,<br><em>trader.</em></div>
     <div class="login-sub">Trades to Insights. Insights to Edge.</div>
-    <button class="google-btn" onclick="doGoogleLogin()" id="google-login-btn">
+    <button class="google-btn" onclick="doGoogleLogin()" id="google-login-btn" disabled style="opacity:0.6;cursor:not-allowed">
       <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg>
       Continue with Google
     </button>
@@ -2030,40 +2030,48 @@ function fmtDate(d){
 document.getElementById('topbar-sub').textContent =
   new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
 
+const GOOGLE_BTN_HTML = `<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg> Continue with Google`;
+
 async function doGoogleLogin(){
+  console.log('[Auth] doGoogleLogin called');
   const btn=document.getElementById('google-login-btn');
   const errEl=document.getElementById('login-error');
-  btn.disabled=true; btn.textContent='Signing in…';
-  errEl.style.display='none';
 
-  // Wait for Firebase to be ready (module script may not have run yet)
-  let attempts=0;
-  while(!window._firebaseReady && attempts<20){
-    await new Promise(r=>setTimeout(r,200));
-    attempts++;
-  }
+  // Guard: button is only enabled after firebase-ready fires, so this shouldn't
+  // happen — but log it clearly if it somehow does
   if(!window._firebaseReady || !window._fbSignInWithPopup){
-    btn.disabled=false;
-    btn.innerHTML=`<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg> Continue with Google`;
+    console.error('[Auth] Firebase not ready when button clicked — this should not happen');
     errEl.textContent='Firebase not ready. Please refresh and try again.';
     errEl.style.display='block';
     return;
   }
 
+  btn.disabled=true;
+  btn.innerHTML=`<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg> Signing in…`;
+  errEl.style.display='none';
+
+  console.log('[Auth] Calling signInWithPopup — auth:', !!window._fbAuth, 'provider:', !!window._fbProvider);
   try{
     const result=await window._fbSignInWithPopup(window._fbAuth, window._fbProvider);
+    console.log('[Auth] Sign-in successful:', result.user.email);
     bootApp(result.user);
   }catch(e){
+    console.error('[Auth] Sign-in error — code:', e.code, 'message:', e.message);
     btn.disabled=false;
-    btn.innerHTML=`<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg> Continue with Google`;
-    errEl.textContent = e.code==='auth/popup-closed-by-user' ? 'Sign-in cancelled.' :
-                        e.code==='auth/popup-blocked' ? 'Popup blocked. Please allow popups for this site.' :
-                        e.code==='auth/unauthorized-domain' ? 'Domain not authorised. Add it in Firebase Auth settings.' :
-                        'Sign-in failed. Please try again.';
+    btn.innerHTML=GOOGLE_BTN_HTML;
+
+    const msg = e.code==='auth/popup-closed-by-user'    ? 'Sign-in cancelled.' :
+                e.code==='auth/popup-blocked'           ? 'Popup blocked — please allow popups for this site and try again.' :
+                e.code==='auth/unauthorized-domain'     ? 'This domain is not authorised in Firebase. Contact support.' :
+                e.code==='auth/cancelled-popup-request' ? 'Sign-in cancelled.' :
+                `Sign-in failed (${e.code||'unknown'}). Please try again.`;
+
+    errEl.textContent=msg;
     errEl.style.display='block';
-    console.error('Auth error:',e.code, e.message);
+    showToast(msg, 'error');
   }
 }
+
 
 async function doSignOut(){
   await window._fbSignOut(window._fbAuth);
@@ -2114,10 +2122,15 @@ function bootApp(user){
   },420);
 }
 
-// Auto sign-in if user already logged in (persisted session)
+// Enable login button and auto sign-in once Firebase modules have loaded
 document.addEventListener('firebase-ready',()=>{
+  console.log('[Auth] Firebase ready — enabling Google sign-in button');
+  const btn = document.getElementById('google-login-btn');
+  if(btn){ btn.disabled=false; btn.style.opacity=''; btn.style.cursor=''; }
+
   window._fbOnAuthStateChanged(window._fbAuth, user=>{
     if(user && document.getElementById('login-screen').style.display!=='none'){
+      console.log('[Auth] Existing session detected, booting app for', user.email);
       bootApp(user);
     }
   });
