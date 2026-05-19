@@ -1594,6 +1594,8 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                   <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
                     <span id="zerodha-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
                     <button class="btn-ghost" id="zerodha-sync-btn" style="display:none" onclick="syncZerodhaTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
+                    <button class="btn-ghost" id="zerodha-history-btn" style="display:none" onclick="importZerodhaHistory()" title="Import historical trades from your Zerodha account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
+                    <button class="btn-ghost" id="zerodha-reimport-btn" style="display:none;color:var(--amber);border-color:rgba(245,166,35,0.3)" onclick="forceReimportZerodha()" title="Delete all Zerodha trades and re-import fresh"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
                     <button class="btn-accent" id="zerodha-connect-btn" onclick="connectZerodha()"><i class="fa-solid fa-link"></i> Connect</button>
                     <button class="btn-ghost" id="zerodha-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectZerodha()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
                   </div>
@@ -1613,6 +1615,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                     <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
                     <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
                     <button class="btn-ghost" id="ctrader-history-btn" style="display:none" onclick="importCtraderHistory()" title="Import all historical deals from your cTrader account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
+                    <button class="btn-ghost" id="ctrader-reimport-btn" style="display:none;color:var(--amber);border-color:rgba(245,166,35,0.3)" onclick="forceReimportCtrader()" title="Delete all cTrader trades and re-import fresh"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
                     <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
                     <button class="btn-ghost" id="ctrader-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectCtrader()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
                   </div>
@@ -2533,6 +2536,7 @@ function updateCtraderUI(connected){
   document.getElementById('ctrader-disconnect-btn').style.display  = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-sync-btn').style.display        = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-history-btn').style.display     = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-reimport-btn').style.display    = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-status-badge').style.display    = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-last-sync').style.display       = connected ? 'block'       : 'none';
   document.getElementById('ctrader-status-desc').textContent = connected
@@ -2564,6 +2568,211 @@ async function importCtraderHistory(){
     showToast(`cTrader history import failed: ${e.message}`, 'error');
   }
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Import history';
+}
+
+async function importZerodhaHistory(){
+  if(!confirm('Import historical trades from Zerodha?\n\nThis fetches available trades from the Kite API. Existing trades will not be duplicated. This may take up to a minute.')) return;
+  const idToken = await getIdToken(); if(!idToken) return;
+  const btn = document.getElementById('zerodha-history-btn');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing…';
+  try{
+    const res = await fetch(`${ZERODHA_FN}/syncZerodhaHistory`,{
+      method:'POST',
+      headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
+      body:JSON.stringify({})
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Import failed');
+    if(data.saved > 0){
+      await DataStore.loadFromFirestore();
+      showToast(data.message || `Imported ${data.saved} trade(s) from Zerodha`, 'success');
+    } else {
+      showToast(data.message || 'No new trades found', 'info');
+    }
+  } catch(e){
+    showToast(`Zerodha history import failed: ${e.message}`, 'error');
+  }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Import history';
+}
+
+async function forceReimportZerodha(){
+  if(!confirm('This will delete all Zerodha trades and re-import them fresh from your broker.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nContinue?')) return;
+  const idToken = await getIdToken(); if(!idToken) return;
+  const uid = DataStore._uid;
+  const btn = document.getElementById('zerodha-reimport-btn');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working…';
+  const BATCH = 400;
+  try{
+    // STEP A — preserve user-owned fields keyed by symbol+date+entry
+    showToast('Saving your notes and screenshots…', 'info');
+    const oldSnap = await window._fbGetDocs(window._fbQuery(
+      window._fbCollection(window._fbDb,'users',uid,'trades'),
+      window._fbWhere('source','==','zerodha')
+    ));
+    const preserved = {};
+    for(const doc of oldSnap.docs){
+      const d = doc.data();
+      if(!d.symbol || !d.date || d.entry == null) continue;
+      const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
+      preserved[key] = {
+        notes:       d.notes       ?? null,
+        screenshots: d.screenshots ?? null,
+        psychology:  d.psychology  ?? null,
+        strategy:    d.strategy    ?? null,
+        emotion:     d.emotion     ?? null,
+        tags:        d.tags        ?? null,
+      };
+    }
+
+    // STEP B — delete all existing Zerodha trades in batches
+    showToast('Deleting old Zerodha trades…', 'info');
+    for(let i=0; i<oldSnap.docs.length; i+=BATCH){
+      const batch = window._fbWriteBatch(window._fbDb);
+      oldSnap.docs.slice(i, i+BATCH).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+    // Reset lastSync so history import treats everything as new
+    await window._fbSetDoc(window._fbDoc(window._fbDb,'users',uid,'brokers','zerodha'),
+      { lastSync: null }, { merge: true });
+    trades = trades.filter(t => (t.source||t.broker) !== 'zerodha');
+    DataStore.saveTrades(trades);
+
+    // STEP C — re-import fresh (force=true overwrites anything the API returns)
+    showToast('Re-importing from Zerodha…', 'info');
+    const res = await fetch(`${ZERODHA_FN}/syncZerodhaHistory`,{
+      method:'POST',
+      headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ force: true })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Re-import failed');
+
+    // STEP D — re-apply preserved user fields to matching new trades
+    const hasPreserved = Object.keys(preserved).length > 0;
+    if(hasPreserved){
+      showToast('Re-applying your notes and screenshots…', 'info');
+      const newSnap = await window._fbGetDocs(window._fbQuery(
+        window._fbCollection(window._fbDb,'users',uid,'trades'),
+        window._fbWhere('source','==','zerodha')
+      ));
+      for(let i=0; i<newSnap.docs.length; i+=BATCH){
+        const batch = window._fbWriteBatch(window._fbDb);
+        let dirty = false;
+        for(const doc of newSnap.docs.slice(i, i+BATCH)){
+          const d = doc.data();
+          if(!d.symbol || !d.date || d.entry == null) continue;
+          const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
+          const saved = preserved[key]; if(!saved) continue;
+          // Only write non-null saved fields that the new trade doesn't already have
+          const toMerge = {};
+          for(const [k,v] of Object.entries(saved)){
+            if(v != null && !d[k]) toMerge[k] = v;
+          }
+          if(!Object.keys(toMerge).length) continue;
+          batch.set(doc.ref, toMerge, { merge: true });
+          dirty = true;
+        }
+        if(dirty) await batch.commit();
+      }
+    }
+
+    // STEP E — reload and refresh
+    await DataStore.loadFromFirestore();
+    showToast(`Done! Imported ${data.saved} trade(s) from Zerodha`, 'success');
+  } catch(e){
+    showToast(`Zerodha re-import failed: ${e.message}`, 'error');
+  }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i> Force re-import';
+}
+
+async function forceReimportCtrader(){
+  if(!confirm('This will delete all cTrader trades and re-import them fresh from your broker.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nContinue?')) return;
+  const idToken = await getIdToken(); if(!idToken) return;
+  const uid = DataStore._uid;
+  const btn = document.getElementById('ctrader-reimport-btn');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working…';
+  const BATCH = 400;
+  try{
+    // STEP A — preserve user-owned fields keyed by symbol+date+entry
+    showToast('Saving your notes and screenshots…', 'info');
+    const oldSnap = await window._fbGetDocs(window._fbQuery(
+      window._fbCollection(window._fbDb,'users',uid,'trades'),
+      window._fbWhere('source','==','ctrader')
+    ));
+    const preserved = {};
+    for(const doc of oldSnap.docs){
+      const d = doc.data();
+      if(!d.symbol || !d.date || d.entry == null) continue;
+      const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
+      preserved[key] = {
+        notes:       d.notes       ?? null,
+        screenshots: d.screenshots ?? null,
+        psychology:  d.psychology  ?? null,
+        strategy:    d.strategy    ?? null,
+        emotion:     d.emotion     ?? null,
+        tags:        d.tags        ?? null,
+      };
+    }
+
+    // STEP B — delete all existing cTrader trades in batches
+    showToast('Deleting old cTrader trades…', 'info');
+    for(let i=0; i<oldSnap.docs.length; i+=BATCH){
+      const batch = window._fbWriteBatch(window._fbDb);
+      oldSnap.docs.slice(i, i+BATCH).forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+    // Reset lastSyncTimestamp so history import starts from the account beginning
+    await window._fbSetDoc(window._fbDoc(window._fbDb,'users',uid,'brokers','ctrader'),
+      { lastSyncTimestamp: null }, { merge: true });
+    trades = trades.filter(t => (t.source||t.broker) !== 'ctrader');
+    DataStore.saveTrades(trades);
+
+    // STEP C — re-import full history via syncCtraderHistory
+    showToast('Re-importing from cTrader…', 'info');
+    const res = await fetch(`${CTRADER_FN}/syncCtraderHistory`,{
+      method:'POST',
+      headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({})
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Re-import failed');
+
+    // STEP D — re-apply preserved user fields to matching new trades
+    const hasPreserved = Object.keys(preserved).length > 0;
+    if(hasPreserved){
+      showToast('Re-applying your notes and screenshots…', 'info');
+      const newSnap = await window._fbGetDocs(window._fbQuery(
+        window._fbCollection(window._fbDb,'users',uid,'trades'),
+        window._fbWhere('source','==','ctrader')
+      ));
+      for(let i=0; i<newSnap.docs.length; i+=BATCH){
+        const batch = window._fbWriteBatch(window._fbDb);
+        let dirty = false;
+        for(const doc of newSnap.docs.slice(i, i+BATCH)){
+          const d = doc.data();
+          if(!d.symbol || !d.date || d.entry == null) continue;
+          const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
+          const saved = preserved[key]; if(!saved) continue;
+          const toMerge = {};
+          for(const [k,v] of Object.entries(saved)){
+            if(v != null && !d[k]) toMerge[k] = v;
+          }
+          if(!Object.keys(toMerge).length) continue;
+          batch.set(doc.ref, toMerge, { merge: true });
+          dirty = true;
+        }
+        if(dirty) await batch.commit();
+      }
+    }
+
+    // STEP E — reload and refresh
+    await DataStore.loadFromFirestore();
+    const imported = data.imported ?? data.saved ?? 0;
+    showToast(`Done! Imported ${imported} trade(s) from cTrader`, 'success');
+  } catch(e){
+    showToast(`cTrader re-import failed: ${e.message}`, 'error');
+  }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i> Force re-import';
 }
 
 async function checkCtraderStatus(){
@@ -2676,6 +2885,8 @@ function updateZerodhaUI(connected){
   document.getElementById('zerodha-connect-btn').style.display = connected?'none':'inline-flex';
   document.getElementById('zerodha-disconnect-btn').style.display = connected?'inline-flex':'none';
   document.getElementById('zerodha-sync-btn').style.display = connected?'inline-flex':'none';
+  document.getElementById('zerodha-history-btn').style.display = connected?'inline-flex':'none';
+  document.getElementById('zerodha-reimport-btn').style.display = connected?'inline-flex':'none';
   document.getElementById('zerodha-status-badge').style.display = connected?'inline-flex':'none';
   document.getElementById('zerodha-last-sync').style.display = connected?'block':'none';
   document.getElementById('zerodha-status-desc').textContent = connected
