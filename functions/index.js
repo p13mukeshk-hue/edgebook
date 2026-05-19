@@ -219,122 +219,368 @@ function checkTradeDedup(index, docId, symbol, date, entry) {
  *   On weekends / market holidays the exchange is closed, so both endpoints
  *   legitimately return [] — this is not a bug.
  */
+/**
+ * Map a Kite fill's instrument_type to Edgebook asset + instrument fields.
+ * Kite instrument_type values: EQ, FUT, CE, PE (options).
+ */
+function mapZerodhaInstrument(fill) {
+  const itype = (fill.instrument_type || "EQ").toUpperCase();
+  switch (itype) {
+    case "FUT":
+      return { asset: "eq", instrument: "Futures",  optionType: null };
+    case "CE":
+      return { asset: "eq", instrument: "Options",  optionType: "CE" };
+    case "PE":
+      return { asset: "eq", instrument: "Options",  optionType: "PE" };
+    default:
+      return { asset: "eq", instrument: null,        optionType: null };
+  }
+}
+
+/**
+ * Build a stable Edgebook doc ID for a matched Zerodha round-trip.
+ * Uses symbol + date + entry so it survives re-syncs that produce the same trade.
+ */
+function zerodhaTradeDocId(symbol, date, entryPrice) {
+  return `zerodha_${symbol}_${date}_${entryPrice}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
 async function syncTradesForUser(uid) {
   const kite = await getKiteForUser(uid);
 
-  // Validate the token is still alive with a lightweight profile call before
-  // making the real data requests — gives a clear error if it's expired.
-  let profile;
+  // ── 1. Token validation ──────────────────────────────────────────────────────
   try {
-    profile = await kite.getProfile();
-    console.log(`syncZerodhaTrades [${uid}]: token valid, Kite user=${profile.user_id} (${profile.user_name})`);
+    const profile = await kite.getProfile();
+    console.log(
+      `syncZerodhaTrades [${uid}]: token valid, Kite user=${profile.user_id} (${profile.user_name})`
+    );
   } catch (tokenErr) {
-    console.error(`syncZerodhaTrades [${uid}]: token validation failed —`, tokenErr.message, "| error_type:", tokenErr.error_type);
+    console.error(
+      `syncZerodhaTrades [${uid}]: token validation failed —`,
+      tokenErr.message, "| error_type:", tokenErr.error_type
+    );
     if (isTokenExpiredError(tokenErr)) {
       await markZerodhaDisconnected(uid, "access_token_expired");
       const err = new Error("Zerodha access token has expired. Please reconnect via Settings → Brokers.");
-      err.status = 401;
-      err.code = "TOKEN_EXPIRED";
+      err.status = 401; err.code = "TOKEN_EXPIRED";
       throw err;
     }
     throw tokenErr;
   }
 
-  // Fetch trades and orders for the current trading day
-  let trades = [], orders = [];
+  // ── 2. Fetch fills, positions, orders ────────────────────────────────────────
+  let fills = [], positionsData = null, orders = [];
   try {
-    [trades, orders] = await Promise.all([kite.getTrades(), kite.getOrders()]);
+    [fills, positionsData, orders] = await Promise.all([
+      kite.getTrades(),
+      kite.getPositions().catch((e) => {
+        console.warn(`syncZerodhaTrades [${uid}]: getPositions failed (${e.message}) — assuming all fills are closed`);
+        return null;
+      }),
+      kite.getOrders(),
+    ]);
   } catch (apiErr) {
-    console.error(`syncZerodhaTrades [${uid}]: Kite API error —`, apiErr.message, "| error_type:", apiErr.error_type, "| full:", JSON.stringify(apiErr));
+    console.error(
+      `syncZerodhaTrades [${uid}]: Kite API error —`, apiErr.message,
+      "| error_type:", apiErr.error_type
+    );
     if (isTokenExpiredError(apiErr)) {
       await markZerodhaDisconnected(uid, "access_token_expired");
       const err = new Error("Zerodha access token has expired. Please reconnect via Settings → Brokers.");
-      err.status = 401;
-      err.code = "TOKEN_EXPIRED";
+      err.status = 401; err.code = "TOKEN_EXPIRED";
       throw err;
     }
     throw apiErr;
   }
 
-  // Log the raw response so we can diagnose future issues in Cloud Logging
+  // Build a set of symbols that still have open net positions
+  const openSymbols = new Set(
+    ((positionsData && positionsData.net) || [])
+      .filter((p) => p.quantity !== 0)
+      .map((p) => (p.tradingsymbol || "").toUpperCase())
+  );
+
   const today = new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata" });
-  console.log(`syncZerodhaTrades [${uid}]: date(IST)=${today} trades=${trades.length} orders=${orders.length}`);
-  if (trades.length > 0) {
-    console.log(`syncZerodhaTrades [${uid}]: sample trade —`, JSON.stringify(trades[0]));
+  console.log(
+    `syncZerodhaTrades [${uid}]: date(IST)=${today} ` +
+    `fills=${fills.length} orders=${orders.length} openSymbols=${openSymbols.size}`
+  );
+  if (fills.length > 0) {
+    console.log(`syncZerodhaTrades [${uid}]: sample fill —`, JSON.stringify(fills[0]));
   }
-  if (orders.length > 0) {
-    console.log(`syncZerodhaTrades [${uid}]: sample order —`, JSON.stringify(orders[0]));
+
+  const tradesRef = db.collection("users").doc(uid).collection("trades");
+  const ordersRef = db.collection("users").doc(uid).collection("orders");
+
+  // ── 3. Group fills by tradingsymbol, sort by fill time ascending ─────────────
+  const bySymbol = {};
+  for (const fill of fills) {
+    const sym = (fill.tradingsymbol || "").toUpperCase();
+    if (!sym) { console.warn(`syncZerodhaTrades [${uid}]: fill missing tradingsymbol — skipping`); continue; }
+    if (!bySymbol[sym]) bySymbol[sym] = [];
+    bySymbol[sym].push(fill);
+  }
+  for (const sym of Object.keys(bySymbol)) {
+    bySymbol[sym].sort((a, b) => {
+      const ta = new Date(a.fill_timestamp || a.order_timestamp || 0).getTime();
+      const tb = new Date(b.fill_timestamp || b.order_timestamp || 0).getTime();
+      return ta - tb;
+    });
   }
 
-  // Persist whatever the exchange returned (may be [] on weekends/holidays)
-  const tradesRef   = db.collection("users").doc(uid).collection("trades");
-  const ordersRef   = db.collection("users").doc(uid).collection("orders");
-  const pendingRef  = db.collection("users").doc(uid).collection("pendingDuplicates");
+  // ── 4. Resolve prop accountId from user settings ──────────────────────────────
+  const accountId = await resolvePropAccountId(uid);
 
-  if (trades.length > 0 || orders.length > 0) {
-    // Build dedup index once across all existing trades for this user
-    const dedupIndex = await buildExistingTradeIndex(tradesRef);
-    const batch      = db.batch();
-    let savedCount   = 0;
-    let skippedCount = 0;
-    let flaggedCount = 0;
+  // ── 5. FIFO pair BUY + SELL fills per symbol → round-trip trades ─────────────
+  const pairedTrades = [];
 
-    for (const trade of trades) {
-      const docId  = String(trade.trade_id);
-      const symbol = (trade.tradingsymbol || "").toUpperCase();
-      const date   = extractDateStr(
-        trade.fill_timestamp || trade.order_timestamp || trade.exchange_timestamp
-      );
-      const entry  = trade.average_price;
+  for (const [sym, symFills] of Object.entries(bySymbol)) {
+    const buyQueue = [];  // unmatched BUY fills
 
-      const dedup = checkTradeDedup(dedupIndex, docId, symbol, date, entry);
+    for (const fill of symFills) {
+      const txType = (fill.transaction_type || "").toUpperCase();
+      const qty    = Number(fill.quantity || fill.filled_quantity || 0);
+      const price  = Number(fill.average_price || 0);
+      const ts     = fill.fill_timestamp || fill.order_timestamp || fill.exchange_timestamp;
+      const date   = extractDateStr(ts);
+      const time   = ts ? String(ts).slice(11, 16) : null;
 
-      if (dedup.action === "skip") {
-        skippedCount++;
-        console.log(`syncZerodhaTrades [${uid}]: SKIP trade_id=${docId} — already in Firestore`);
-      } else if (dedup.action === "flag") {
-        flaggedCount++;
-        console.log(
-          `syncZerodhaTrades [${uid}]: DUPLICATE FLAGGED trade_id=${docId} ` +
-          `matches existing doc "${dedup.existingTradeId}" — writing to pendingDuplicates`
-        );
-        await pendingRef.add({
-          incomingTrade:   { ...trade, broker: "zerodha", source: "zerodha" },
-          existingTradeId: dedup.existingTradeId,
-          detectedAt:      admin.firestore.FieldValue.serverTimestamp(),
-          source:          "zerodha",
-          status:          "pending",
-        });
+      if (txType === "BUY") {
+        buyQueue.push({ fill, qty, price, date, time });
+        continue;
+      }
+
+      if (txType === "SELL") {
+        const buyEntry = buyQueue.shift();
+        const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+        const matchQty = buyEntry ? Math.min(buyEntry.qty, qty) : qty;
+
+        if (buyEntry) {
+          // Matched Long round-trip
+          const entry = buyEntry.price;
+          const exit  = price;
+          const pnl   = parseFloat(((exit - entry) * matchQty).toFixed(2));
+          pairedTrades.push({
+            id:            zerodhaTradeDocId(sym, buyEntry.date, entry),
+            brokerTradeId: fill.order_id || fill.trade_id,
+            source:        "zerodha",
+            broker:        "zerodha",
+            symbol:        sym,
+            asset,
+            instrument:    instrument ?? null,
+            optionType:    optionType ?? null,
+            strike:        fill.strike    ? Number(fill.strike)    : null,
+            expiry:        fill.expiry    || null,
+            exchange:      fill.exchange  || null,
+            product:       fill.product   || null,
+            direction:     "Long",
+            entry,
+            exit,
+            size:          matchQty,
+            pnl,
+            isOpen:        false,
+            date:          buyEntry.date,
+            entryTime:     buyEntry.time,
+            exitTime:      time,
+            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } else {
+          // SELL with no preceding BUY — Short position (no exit yet today)
+          pairedTrades.push({
+            id:            zerodhaTradeDocId(sym, date, price),
+            brokerTradeId: fill.order_id || fill.trade_id,
+            source:        "zerodha",
+            broker:        "zerodha",
+            symbol:        sym,
+            asset,
+            instrument:    instrument ?? null,
+            optionType:    optionType ?? null,
+            strike:        fill.strike  ? Number(fill.strike) : null,
+            expiry:        fill.expiry  || null,
+            exchange:      fill.exchange || null,
+            product:       fill.product  || null,
+            direction:     "Short",
+            entry:         price,
+            exit:          null,
+            size:          qty,
+            pnl:           null,
+            isOpen:        true,
+            date,
+            entryTime:     time,
+            exitTime:      null,
+            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+        continue;
+      }
+
+      console.warn(`syncZerodhaTrades [${uid}]: unknown transaction_type "${txType}" for ${sym} — skipping fill`);
+    }
+
+    // Remaining unmatched BUY fills → open Long positions
+    for (const { fill, qty, price, date, time } of buyQueue) {
+      if (!openSymbols.has(sym)) {
+        // Position was closed in a previous day's sync — skip
+        console.log(`syncZerodhaTrades [${uid}]: unmatched BUY ${sym} not in openSymbols — skipping (closed prior day)`);
+        continue;
+      }
+      const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+      pairedTrades.push({
+        id:            zerodhaTradeDocId(sym, date, price),
+        brokerTradeId: fill.order_id || fill.trade_id,
+        source:        "zerodha",
+        broker:        "zerodha",
+        symbol:        sym,
+        asset,
+        instrument:    instrument ?? null,
+        optionType:    optionType ?? null,
+        strike:        fill.strike  ? Number(fill.strike) : null,
+        expiry:        fill.expiry  || null,
+        exchange:      fill.exchange || null,
+        product:       fill.product  || null,
+        direction:     "Long",
+        entry:         price,
+        exit:          null,
+        size:          qty,
+        pnl:           null,
+        isOpen:        true,
+        date,
+        entryTime:     time,
+        exitTime:      null,
+        syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  // Create open Long trades from positions that have no fills today
+  // (e.g. position opened on a previous day, still running)
+  if (positionsData && positionsData.net) {
+    for (const pos of positionsData.net) {
+      if (pos.quantity === 0) continue;
+      const sym = (pos.tradingsymbol || "").toUpperCase();
+      const alreadyBuilt = pairedTrades.some((t) => t.symbol === sym && t.isOpen);
+      if (alreadyBuilt) continue;
+
+      const entry = Number(pos.average_price || 0);
+      const date  = new Date().toISOString().slice(0, 10);  // today — best we can do
+      const { asset, instrument, optionType } = mapZerodhaInstrument(pos);
+      pairedTrades.push({
+        id:            zerodhaTradeDocId(sym, date, entry),
+        brokerTradeId: pos.product || sym,
+        source:        "zerodha",
+        broker:        "zerodha",
+        symbol:        sym,
+        asset,
+        instrument:    instrument ?? null,
+        optionType:    optionType ?? null,
+        strike:        pos.strike  ? Number(pos.strike) : null,
+        expiry:        pos.expiry  || null,
+        exchange:      pos.exchange || null,
+        product:       pos.product  || null,
+        direction:     pos.quantity > 0 ? "Long" : "Short",
+        entry,
+        exit:          null,
+        size:          Math.abs(pos.quantity),
+        pnl:           null,
+        isOpen:        true,
+        date,
+        entryTime:     null,
+        exitTime:      null,
+        syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  if (accountId) {
+    for (const t of pairedTrades) t.accountId = accountId;
+  }
+
+  console.log(
+    `syncZerodhaTrades [${uid}]: fills=${fills.length} → ` +
+    `${pairedTrades.length} paired trade(s) ` +
+    `(${pairedTrades.filter((t) => !t.isOpen).length} closed, ` +
+    `${pairedTrades.filter((t) => t.isOpen).length} open)`
+  );
+
+  // ── 6. Load existing Zerodha trade docs (id + isOpen) for dedup/update ────────
+  const existingSnap = await tradesRef
+    .where("broker", "==", "zerodha")
+    .select("id", "isOpen")
+    .get();
+  const existingByDocId = new Map();
+  for (const doc of existingSnap.docs) {
+    existingByDocId.set(doc.id, { ref: doc.ref, isOpen: doc.data().isOpen });
+  }
+
+  // ── 7. Batch write — new trades full-set, open→closed transitions update-only ─
+  const BATCH_SIZE    = 400;
+  let   written       = 0;
+  let   updatedCount  = 0;
+  const toWriteNew    = [];
+  const toWriteUpdate = [];
+
+  for (const trade of pairedTrades) {
+    const docRef   = tradesRef.doc(trade.id);
+    const existing = existingByDocId.get(trade.id);
+
+    if (existing) {
+      if (!trade.isOpen && existing.isOpen !== false) {
+        // Trade just closed — update only closing fields, preserve user-owned fields
+        toWriteUpdate.push({ ref: existing.ref, fields: {
+          exit:     trade.exit,
+          pnl:      trade.pnl,
+          exitTime: trade.exitTime,
+          isOpen:   false,
+          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }});
       } else {
-        // Preserve user-editable fields if the doc already has them (merge:true handles this,
-        // but we explicitly avoid overwriting notes/emotion/strategy/psychology/screenshots/tags).
+        console.log(`syncZerodhaTrades [${uid}]: ${trade.id} already up-to-date — no change`);
+      }
+    } else {
+      toWriteNew.push({ ref: docRef, trade });
+    }
+  }
+
+  for (let i = 0; i < toWriteNew.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    for (const { ref, trade } of toWriteNew.slice(i, i + BATCH_SIZE)) {
+      batch.set(ref, trade, { merge: true });
+    }
+    await batch.commit();
+    written += toWriteNew.slice(i, i + BATCH_SIZE).length;
+  }
+
+  for (let i = 0; i < toWriteUpdate.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    for (const { ref, fields } of toWriteUpdate.slice(i, i + BATCH_SIZE)) {
+      batch.set(ref, fields, { merge: true });
+    }
+    await batch.commit();
+    updatedCount += toWriteUpdate.slice(i, i + BATCH_SIZE).length;
+  }
+
+  // ── 8. Persist orders (unchanged) ────────────────────────────────────────────
+  if (orders.length > 0) {
+    for (let i = 0; i < orders.length; i += BATCH_SIZE) {
+      const batch = db.batch();
+      for (const order of orders.slice(i, i + BATCH_SIZE)) {
         batch.set(
-          tradesRef.doc(docId),
-          { ...trade, broker: "zerodha", source: "zerodha", syncedAt: admin.firestore.FieldValue.serverTimestamp() },
+          ordersRef.doc(String(order.order_id)),
+          { ...order, broker: "zerodha", syncedAt: admin.firestore.FieldValue.serverTimestamp() },
           { merge: true }
         );
-        savedCount++;
       }
+      await batch.commit();
     }
-
-    for (const order of orders) {
-      batch.set(
-        ordersRef.doc(String(order.order_id)),
-        { ...order, broker: "zerodha", syncedAt: admin.firestore.FieldValue.serverTimestamp() },
-        { merge: true }
-      );
-    }
-
-    if (savedCount > 0 || orders.length > 0) await batch.commit();
-    console.log(
-      `syncZerodhaTrades [${uid}]: saved=${savedCount} skipped=${skippedCount} flagged=${flaggedCount}`
-    );
   }
+
+  console.log(
+    `syncZerodhaTrades [${uid}]: new=${written} updated(closed)=${updatedCount} orders=${orders.length}`
+  );
 
   await db.collection("users").doc(uid).collection("brokers").doc("zerodha")
     .update({ lastSync: admin.firestore.FieldValue.serverTimestamp() });
 
-  // Derive a human-readable reason for the caller when counts are 0
   const dayOfWeek = new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "long" });
   const isWeekend = ["Saturday", "Sunday"].includes(dayOfWeek);
   const noTradesReason = isWeekend
@@ -342,10 +588,10 @@ async function syncTradesForUser(uid) {
     : "No trades executed today";
 
   return {
-    trades: trades.length,
-    orders: orders.length,
-    note: trades.length === 0
-      ? `${noTradesReason}. Kite Connect only provides same-day data; 30-day history accumulates automatically via the daily scheduled sync.`
+    trades:  written + updatedCount,
+    orders:  orders.length,
+    note:    fills.length === 0
+      ? `${noTradesReason}. Kite Connect only provides same-day data; 30-day history accumulates via the daily scheduled sync.`
       : null,
   };
 }
