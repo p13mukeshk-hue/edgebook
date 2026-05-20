@@ -1556,6 +1556,42 @@ const SYMBOL_ASSET_MAP = {
   "S&P500": "ix", SPXUSD: "ix",
 };
 
+// Sanitizes user-owned fields before writing to Firestore.
+// Firestore rejects: undefined values, nested arrays, oversized strings.
+function sanitizeUserFields(fields) {
+  return {
+    strategy:    fields.strategy    ?? null,
+    emotion:     fields.emotion     ?? null,
+    notes:       fields.notes       ?? null,
+    tags: Array.isArray(fields.tags)
+      ? fields.tags.filter((t) => typeof t === "string")
+      : [],
+    screenshots: Array.isArray(fields.screenshots)
+      ? fields.screenshots.filter((s) => typeof s === "string" && s.length < 900000)
+      : [],
+    psychology: {
+      preThought:    fields.psychology?.preThought    ?? null,
+      executionNote: fields.psychology?.executionNote ?? null,
+      review:        fields.psychology?.review        ?? null,
+    },
+  };
+}
+
+// Returns the quote currency for a forex/commodity symbol, or "USD" as default.
+// Used to detect JPY-quoted pairs whose PnL the cTrader MCP returns in JPY, not USD.
+function getQuoteCurrency(symbolName) {
+  const name = String(symbolName).toUpperCase().replace(/[^A-Z]/g, "");
+  if (name.endsWith("JPY")) return "JPY";
+  if (name.endsWith("USD")) return "USD";
+  if (name.endsWith("EUR")) return "EUR";
+  if (name.endsWith("GBP")) return "GBP";
+  if (name.endsWith("CHF")) return "CHF";
+  if (name.endsWith("CAD")) return "CAD";
+  if (name.endsWith("AUD")) return "AUD";
+  if (name.endsWith("NZD")) return "NZD";
+  return "USD";
+}
+
 function ctraderCategoryToAsset(category, symbolName = "") {
   // 1. Check symbol name first (most reliable — API-agnostic)
   const nameKey = String(symbolName).toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -1741,21 +1777,22 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
       ? parseFloat((weightedSum / totalExitVol).toFixed(8))
       : (getPrice(exitDeals[exitDeals.length - 1]) ?? null);
 
-    // Commission + swap — also in cents from the API, convert to USD
-    const commission = deals.reduce((s, d) => s + (d.commission != null ? Number(d.commission) / 100 : 0), 0);
-    const swap       = deals.reduce((s, d) => s + (d.swap       != null ? Number(d.swap)       / 100 : 0), 0);
-
-    // Prefer API-provided pnl; compute from price diff as fallback
-    const apiPnlVals = exitDeals.map((d) => getDealPnl(d)).filter((v) => v !== null);
-    if (apiPnlVals.length > 0) {
-      pnl = parseFloat((apiPnlVals.reduce((s, v) => s + v, 0) + commission + swap).toFixed(2));
-    } else if (exit !== null) {
-      const priceDiff = direction === "Long" ? exit - entry : entry - exit;
-      pnl = parseFloat(((priceDiff * entryVol) + commission + swap).toFixed(2));
-    }
-
     const latestExit = exitDeals[exitDeals.length - 1];
     exitTime = new Date(Number(latestExit.executionTimestamp)).toISOString().slice(11, 16);
+
+    // Calculate P&L from price diff × size × lotSize (not the API pnl field).
+    // This keeps P&L consistent with the displayed size regardless of how the
+    // broker's API scales its internal monetary values.
+    if (exit !== null && size > 0) {
+      const priceDiff = direction === "Long" ? exit - entry : entry - exit;
+      let rawPnl = priceDiff * size * (lotSize ?? 1);
+      // JPY-quoted pairs: convert result from JPY to USD using the exit rate
+      if (getQuoteCurrency(symbolInfo.name) === "JPY") {
+        const rate = exit ?? entry;
+        if (rate > 0) rawPnl = rawPnl / rate;
+      }
+      pnl = parseFloat(rawPnl.toFixed(2));
+    }
   }
 
   console.log(
@@ -2539,12 +2576,26 @@ exports.forceReimportCtrader = functions
       const decoded = await verifyAuth(req);
       const uid = decoded.uid;
 
-      // Step 1: delete all cTrader trade docs server-side
-      const tradesRef = db.collection("users").doc(uid).collection("trades");
-      const allSnap   = await tradesRef.get();
+      // Step 1: read all cTrader docs and preserve user-owned fields before deleting
+      const tradesRef   = db.collection("users").doc(uid).collection("trades");
+      const allSnap     = await tradesRef.get();
       const ctraderDocs = allSnap.docs.filter((d) => d.id.startsWith("ctrader_"));
-      console.log(`forceReimportCtrader uid=${uid}: deleting ${ctraderDocs.length} cTrader docs`);
+      console.log(`forceReimportCtrader uid=${uid}: found ${ctraderDocs.length} cTrader docs`);
 
+      const USER_FIELDS = ["notes", "screenshots", "psychology", "strategy", "emotion", "tags"];
+      const userFieldsMap = {};
+      for (const doc of ctraderDocs) {
+        const data = doc.data();
+        const saved = {};
+        let hasData = false;
+        for (const f of USER_FIELDS) {
+          if (data[f] != null) { saved[f] = data[f]; hasData = true; }
+        }
+        if (hasData) userFieldsMap[doc.id] = saved;
+      }
+      console.log(`forceReimportCtrader uid=${uid}: preserved user fields for ${Object.keys(userFieldsMap).length} doc(s)`);
+
+      // Step 2: delete all cTrader trade docs
       const BATCH = 400;
       for (let i = 0; i < ctraderDocs.length; i += BATCH) {
         const batch = db.batch();
@@ -2553,8 +2604,54 @@ exports.forceReimportCtrader = functions
       }
       console.log(`forceReimportCtrader uid=${uid}: delete complete`);
 
-      // Step 2: run full history sync
+      // Step 3: run full history sync
       const result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null);
+
+      // Step 4: re-apply preserved user fields to newly imported docs
+      const preservedEntries = Object.entries(userFieldsMap);
+      if (preservedEntries.length > 0) {
+        console.log(`forceReimportCtrader uid=${uid}: re-applying user fields for ${preservedEntries.length} doc(s)`);
+        const newSnap = await tradesRef.get();
+        const newDocIds = new Set(newSnap.docs.filter((d) => d.id.startsWith("ctrader_")).map((d) => d.id));
+
+        let batch = db.batch();
+        let opCount = 0;
+
+        for (const [docId, fields] of preservedEntries) {
+          if (!newDocIds.has(docId)) continue;
+          const clean = sanitizeUserFields(fields);
+          batch.set(tradesRef.doc(docId), clean, { merge: true });
+          opCount++;
+
+          if (opCount >= 490) {
+            try {
+              await batch.commit();
+            } catch (err) {
+              console.error(
+                `forceReimportCtrader uid=${uid}: batch commit failed:`, err.message,
+                "sample:", JSON.stringify(preservedEntries.slice(0, 2)).slice(0, 500)
+              );
+              throw err;
+            }
+            batch = db.batch();
+            opCount = 0;
+          }
+        }
+
+        if (opCount > 0) {
+          try {
+            await batch.commit();
+          } catch (err) {
+            console.error(
+              `forceReimportCtrader uid=${uid}: final batch commit failed:`, err.message,
+              "sample:", JSON.stringify(preservedEntries.slice(0, 2)).slice(0, 500)
+            );
+            throw err;
+          }
+        }
+
+        console.log(`forceReimportCtrader uid=${uid}: user fields restored (${opCount} written in last batch)`);
+      }
 
       return res.status(200).json({
         ok: true,
