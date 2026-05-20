@@ -2729,20 +2729,14 @@ async function forceReimportCtrader(){
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working…';
   const BATCH = 400;
   try{
-    // STEP A — preserve user-owned fields keyed by symbol+date+entry
-    // Query by BOTH source and broker to catch old raw-deal docs that have
-    // broker:'ctrader' but no source field (written by a previous code version).
-    showToast('Saving your notes and screenshots…', 'info');
+    // STEP A — find ALL cTrader docs by Firestore document ID prefix.
+    // Field-based queries (source/broker) miss old raw-deal docs whose fields
+    // may differ. Filtering on doc.id is bulletproof regardless of field values.
+    showToast('Scanning for existing cTrader trades…', 'info');
     const col = window._fbCollection(window._fbDb,'users',uid,'trades');
-    const [snapBySource, snapByBroker] = await Promise.all([
-      window._fbGetDocsFromServer(window._fbQuery(col, window._fbWhere('source','==','ctrader'))),
-      window._fbGetDocsFromServer(window._fbQuery(col, window._fbWhere('broker','==','ctrader'))),
-    ]);
-    // Merge both result sets, deduplicated by doc ID
-    const oldDocMap = new Map();
-    for(const d of [...snapBySource.docs, ...snapByBroker.docs]) oldDocMap.set(d.id, d);
-    const oldDocs = [...oldDocMap.values()];
-    console.log(`[forceReimportCtrader] found ${oldDocs.length} existing cTrader docs (${snapBySource.size} by source, ${snapByBroker.size} by broker)`);
+    const allSnap = await window._fbGetDocsFromServer(col);
+    const oldDocs = allSnap.docs.filter(d => d.id.startsWith('ctrader_'));
+    console.log(`[forceReimportCtrader] found ${oldDocs.length} cTrader docs by ID prefix (of ${allSnap.size} total)`);
 
     const preserved = {};
     for(const doc of oldDocs){
