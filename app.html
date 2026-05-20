@@ -2153,17 +2153,24 @@ let activePageAcct={dashboard:'all',journal:'all',analytics:'all'};
 const cur  = ()=> S.prefs?.currency||'$';
 const rows = ()=> S.prefs?.rowsPerPage||25;
 
-function fmtDate(d){
-  if(!d) return '—';
-  const [y,m,day]=d.split('-');
-  const MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  switch(S.prefs.dateFormat){
-    case 'DD/MM/YYYY': return `${day}/${m}/${y}`;
-    case 'MM/DD/YYYY': return `${m}/${day}/${y}`;
-    case 'MMM DD YYYY': return `${MO[+m-1]} ${day} ${y}`;
-    default: return d;
+function formatDate(dateStr){
+  if(!dateStr) return '—';
+  if(dateStr.toDate){
+    const d=dateStr.toDate();
+    const dd=String(d.getDate()).padStart(2,'0');
+    const mm=String(d.getMonth()+1).padStart(2,'0');
+    const yy=String(d.getFullYear()).slice(2);
+    return dd+'/'+mm+'/'+yy;
   }
+  const parts=String(dateStr).split('-');
+  if(parts.length===3){
+    const [yyyy,mm,dd]=parts;
+    return dd+'/'+mm+'/'+yyyy.slice(2);
+  }
+  return dateStr;
 }
+
+function fmtDate(d){ return formatDate(d); }
 
 /* ══════════════════════════════════════════════════════
    BOOT
@@ -2380,7 +2387,7 @@ function dupTradeCard(t, compareWith){
   return `
     ${_dupFld('Symbol',   sym)}
     ${_dupFld('Direction',dir)}
-    ${_dupFld('Date',     date)}
+    ${_dupFld('Date',     formatDate(date))}
     ${_dupFld('Entry',    entry!==null?entry.toFixed(4):'—', d.entry)}
     ${_dupFld('Exit',     exit!==null?exit.toFixed(4):'—',  d.exit)}
     ${_dupFld('Size',     size!==null?String(size):'—',     d.size)}
@@ -4186,7 +4193,7 @@ function setJournalPage(p){
   renderFullJournal();
 }
 
-const TABLE_HEADS = '<thead><tr><th>Date</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
+const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
 
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
@@ -5287,7 +5294,7 @@ function makeHmCell(t, maxAbs){
       ${camHtml}
     </div>
     ${pnlHtml}
-    <div class="hm-meta">${t.direction} · ${t.date||'—'}</div>`;
+    <div class="hm-meta">${t.direction} · ${formatDate(t.date)}</div>`;
   return div;
 }
 
@@ -5433,7 +5440,7 @@ function renderHmInsert(t, container){
       <span class="hm-ins-pnl ${t.pnl>=0?'pos':'neg'}" style="color:${color}">${str}</span>
       <span class="hm-mpill">${t.optionType||t.direction}</span>
       <span class="hm-mpill">${ASSET_LABELS[t.asset]}</span>
-      ${t.date?`<span class="hm-mpill">${t.date}</span>`:''}
+      ${t.date?`<span class="hm-mpill">${formatDate(t.date)}</span>`:''}
       ${t.strategy?`<span class="hm-mpill">${t.strategy}</span>`:''}
       ${acct?`<span class="hm-mpill">${acct.name}</span>`:''}
       <button class="hm-ins-close" onclick="hmSelectTrade(${t.id})"><i class="fa-solid fa-xmark" style="font-size:11px"></i></button>
@@ -5677,7 +5684,7 @@ function getStepContent(step){
           <tbody>
             ${s.parsedTrades.map((t,i)=>`<tr>
               <td><input type="checkbox" ${s.importSelection[i]!==false?'checked':''} onchange="csvToggleRow(${i},this.checked)"></td>
-              <td>${t.date||'—'}</td>
+              <td>${formatDate(t.date)}</td>
               <td style="font-weight:500">${t.symbol||'—'}</td>
               <td><span class="badge badge-${t.direction==='Long'?'long':'short'}" style="font-size:10px">${t.direction}</span></td>
               <td class="td-mono">${t.entry||'—'}</td>
@@ -5988,7 +5995,7 @@ function buildDdSeries(src){
     equityCurve.push(parseFloat(equity.toFixed(2)));
     ddPct.push(parseFloat(drawPct.toFixed(2)));
     ddAbs.push(parseFloat(drawAbs.toFixed(2)));
-    labels.push(t.date||('T'+(i+1)));
+    labels.push(formatDate(t.date)||('T'+(i+1)));
   });
   return {equityCurve, ddPct, ddAbs, labels};
 }
@@ -6139,7 +6146,7 @@ function renderDrawdown(){
     const depthStr = ddMode==='pct' ? ev.depthPct.toFixed(1)+'%' : cs+Math.abs(ev.depthAbs).toFixed(0);
     return `<div class="dd-event-row${isSel?' dd-sel':''}" onclick="ddSelectEvent(${i})">
       <div class="dd-rank${i===0?' dd-rank-top':''}">${i+1}</div>
-      <div style="min-width:100px;font-size:12px;font-weight:500">${ev.startDate||'?'} → ${ev.endDate||'?'}</div>
+      <div style="min-width:100px;font-size:12px;font-weight:500">${formatDate(ev.startDate)} → ${formatDate(ev.endDate)}</div>
       <div class="dd-bar-bg"><div class="dd-bar-fill" style="width:${barW}%"></div></div>
       <div class="dd-pct">${depthStr}</div>
       <div class="dd-dur">${ev.durDays} day${ev.durDays!==1?'s':''}</div>
