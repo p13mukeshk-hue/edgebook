@@ -2724,51 +2724,12 @@ async function forceReimportZerodha(){
 async function forceReimportCtrader(){
   if(!confirm('This will delete all cTrader trades and re-import them fresh from your broker.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nContinue?')) return;
   const idToken = await getIdToken(); if(!idToken) return;
-  const uid = DataStore._uid;
   const btn = document.getElementById('ctrader-reimport-btn');
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working…';
-  const BATCH = 400;
   try{
-    // STEP A — find ALL cTrader docs by Firestore document ID prefix.
-    // Field-based queries (source/broker) miss old raw-deal docs whose fields
-    // may differ. Filtering on doc.id is bulletproof regardless of field values.
-    showToast('Scanning for existing cTrader trades…', 'info');
-    const col = window._fbCollection(window._fbDb,'users',uid,'trades');
-    const allSnap = await window._fbGetDocsFromServer(col);
-    const oldDocs = allSnap.docs.filter(d => d.id.startsWith('ctrader_'));
-    console.log(`[forceReimportCtrader] found ${oldDocs.length} cTrader docs by ID prefix (of ${allSnap.size} total)`);
-
-    const preserved = {};
-    for(const doc of oldDocs){
-      const d = doc.data();
-      if(!d.symbol || !d.date || d.entry == null) continue;
-      const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
-      preserved[key] = {
-        notes:       d.notes       ?? null,
-        screenshots: d.screenshots ?? null,
-        psychology:  d.psychology  ?? null,
-        strategy:    d.strategy    ?? null,
-        emotion:     d.emotion     ?? null,
-        tags:        d.tags        ?? null,
-      };
-    }
-
-    // STEP B — delete ALL found cTrader docs (both source and broker matches)
-    showToast(`Deleting ${oldDocs.length} old cTrader docs…`, 'info');
-    for(let i=0; i<oldDocs.length; i+=BATCH){
-      const batch = window._fbWriteBatch(window._fbDb);
-      oldDocs.slice(i, i+BATCH).forEach(d => batch.delete(d.ref));
-      await batch.commit();
-    }
-    // Reset lastSyncTimestamp so history import starts from the account beginning
-    await window._fbSetDoc(window._fbDoc(window._fbDb,'users',uid,'brokers','ctrader'),
-      { lastSyncTimestamp: null }, { merge: true });
-    trades = trades.filter(t => (t.source||t.broker) !== 'ctrader');
-    DataStore.saveTrades(trades);
-
-    // STEP C — re-import full history via syncCtraderHistory
-    showToast('Re-importing from cTrader…', 'info');
-    const res = await fetch(`${CTRADER_FN}/syncCtraderHistory`,{
+    showToast('Deleting old trades & re-importing from cTrader…', 'info');
+    // Single server-side call: deletes all ctrader_ docs then re-imports full history
+    const res = await fetch(`${CTRADER_FN}/forceReimportCtrader`,{
       method:'POST',
       headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
       body: JSON.stringify({})
@@ -2776,40 +2737,11 @@ async function forceReimportCtrader(){
     const data = await res.json();
     if(!res.ok || data.error) throw new Error(data.error || 'Re-import failed');
 
-    // STEP D — re-apply preserved user fields to matching new trades
-    const hasPreserved = Object.keys(preserved).length > 0;
-    if(hasPreserved){
-      showToast('Re-applying your notes and screenshots…', 'info');
-      const newSnap = await window._fbGetDocs(window._fbQuery(
-        window._fbCollection(window._fbDb,'users',uid,'trades'),
-        window._fbWhere('source','==','ctrader')
-      ));
-      for(let i=0; i<newSnap.docs.length; i+=BATCH){
-        const batch = window._fbWriteBatch(window._fbDb);
-        let dirty = false;
-        for(const doc of newSnap.docs.slice(i, i+BATCH)){
-          const d = doc.data();
-          if(!d.symbol || !d.date || d.entry == null) continue;
-          const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
-          const saved = preserved[key]; if(!saved) continue;
-          const toMerge = {};
-          for(const [k,v] of Object.entries(saved)){
-            if(v != null && !d[k]) toMerge[k] = v;
-          }
-          if(!Object.keys(toMerge).length) continue;
-          batch.set(doc.ref, toMerge, { merge: true });
-          dirty = true;
-        }
-        if(dirty) await batch.commit();
-      }
-    }
-
-    // STEP E — clear cache and force-reload fresh from server
+    // Reload UI from server
     trades = [];
     localStorage.removeItem(DataStore._tk());
     await DataStore.loadFromFirestore({ forceServer: true });
-    const imported = data.imported ?? data.saved ?? 0;
-    showToast(`Done! Imported ${imported} trade(s) from cTrader`, 'success');
+    showToast(`Done! Deleted ${data.deleted} old, imported ${data.imported ?? 0} trade(s) from cTrader`, 'success');
   } catch(e){
     showToast(`cTrader re-import failed: ${e.message}`, 'error');
   }

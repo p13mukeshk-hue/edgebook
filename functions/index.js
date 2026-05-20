@@ -2520,6 +2520,53 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
   }
 });
 
+// ─── 8b. forceReimportCtrader ────────────────────────────────────────────────
+//
+// POST /forceReimportCtrader
+// Server-side full reset + reimport in one call:
+//   1. Delete every doc in users/{uid}/trades whose ID starts with "ctrader_"
+//   2. Run syncCtraderHistory from scratch
+// No console commands needed — the Force re-import button calls this directly.
+
+exports.forceReimportCtrader = functions
+  .runWith({ timeoutSeconds: 540, memory: "512MB" })
+  .https.onRequest(async (req, res) => {
+    setCors(req, res);
+    if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+    try {
+      const decoded = await verifyAuth(req);
+      const uid = decoded.uid;
+
+      // Step 1: delete all cTrader trade docs server-side
+      const tradesRef = db.collection("users").doc(uid).collection("trades");
+      const allSnap   = await tradesRef.get();
+      const ctraderDocs = allSnap.docs.filter((d) => d.id.startsWith("ctrader_"));
+      console.log(`forceReimportCtrader uid=${uid}: deleting ${ctraderDocs.length} cTrader docs`);
+
+      const BATCH = 400;
+      for (let i = 0; i < ctraderDocs.length; i += BATCH) {
+        const batch = db.batch();
+        ctraderDocs.slice(i, i + BATCH).forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+      console.log(`forceReimportCtrader uid=${uid}: delete complete`);
+
+      // Step 2: run full history sync
+      const result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null);
+
+      return res.status(200).json({
+        ok: true,
+        deleted: ctraderDocs.length,
+        ...result,
+      });
+    } catch (err) {
+      console.error("forceReimportCtrader error:", err);
+      return res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
 // ─── 9. ctraderScheduledSync ──────────────────────────────────────────────────
 //
 // Single job — every 5 minutes, 24/7 (*/5 * * * *).
@@ -2552,212 +2599,168 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
 // We deliberately set a 540-second timeout (max for 1st-gen) because a full
 // account history fetch can be large.
 
+async function runCtraderHistorySync(uid, fromTimestamp) {
+  const fnStart = Date.now();
+
+  // ── 1. Load broker state + token ──────────────────────────────────────────
+  const brokerRef  = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+  const brokerSnap = await brokerRef.get();
+
+  if (!brokerSnap.exists || !brokerSnap.data().connected) {
+    const err = new Error("cTrader is not connected for this account");
+    err.status = 403;
+    throw err;
+  }
+
+  const brokerData = brokerSnap.data();
+
+  let bearerToken;
+  const tokenExpiresAt = brokerData.tokenExpiresAt?.toMillis?.() ?? null;
+  const msUntilExpiry  = tokenExpiresAt ? tokenExpiresAt - Date.now() : null;
+  if (msUntilExpiry !== null && msUntilExpiry <= TOKEN_REFRESH_THRESHOLD_MS) {
+    console.log(`syncCtraderHistory uid=${uid}: token near expiry — auto-refreshing`);
+    bearerToken = await refreshCtraderToken(uid, brokerRef, brokerData);
+  } else {
+    bearerToken = decrypt(brokerData.accessToken);
+  }
+
+  // ── 2. Open MCP session ───────────────────────────────────────────────────
+  const sessionId = await initCtraderSession(bearerToken);
+
+  // ── 3. Symbol map — always force-refresh ─────────────────────────────────
+  const symbolDetails = await getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh: true });
+  console.log(`syncCtraderHistory uid=${uid}: symbol map loaded (fresh) — ${Object.keys(symbolDetails).length} symbols`);
+
+  // ── 4+5. Fetch all pages of historical deals ──────────────────────────────
+  const explicitFrom = (fromTimestamp != null && Number.isFinite(Number(fromTimestamp)) && Number(fromTimestamp) >= 0)
+    ? Number(fromTimestamp) : null;
+  const toTimestamp  = Date.now();
+
+  const allDeals = await fetchAllHistoricalDeals(bearerToken, sessionId, uid, explicitFrom, toTimestamp);
+  console.log(`syncCtraderHistory uid=${uid}: total deals fetched = ${allDeals.length}`);
+
+  // ── 6. Resolve prop account ───────────────────────────────────────────────
+  const accountId = await resolvePropAccountId(uid);
+
+  // ── 7. Validate + group by positionId ────────────────────────────────────
+  const tradesRef      = db.collection("users").doc(uid).collection("trades");
+  const validationErrs = [];
+  const symbolLog      = {};
+  const validatedDeals = [];
+
+  for (const rawDeal of allDeals) {
+    const dealId   = String(rawDeal.dealId ?? "(unknown)");
+    const symbolId = rawDeal.symbolId != null ? String(rawDeal.symbolId) : null;
+
+    if (!symbolId) {
+      validationErrs.push(`deal ${dealId}: missing symbolId`);
+      console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: missing symbolId — skipping`);
+      continue;
+    }
+    const symbolInfo = symbolDetails[symbolId];
+    if (!symbolInfo) {
+      validationErrs.push(`deal ${dealId}: symbolId ${symbolId} unresolved`);
+      console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: symbolId ${symbolId} not in map — skipping`);
+      continue;
+    }
+    if (symbolInfo.enabled === false) {
+      console.log(`syncCtraderHistory uid=${uid} deal ${dealId}: symbol ${symbolInfo.name} disabled — skipping`);
+      continue;
+    }
+    try {
+      validateDeal(rawDeal);
+      validatedDeals.push({ ...rawDeal, _symbolInfo: symbolInfo });
+    } catch (err) {
+      validationErrs.push(`deal ${dealId}: ${err.message}`);
+      console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: validation error — ${err.message}`);
+    }
+  }
+
+  const byPosition = {};
+  for (const deal of validatedDeals) {
+    const pid = String(deal.positionId);
+    if (!byPosition[pid]) byPosition[pid] = [];
+    byPosition[pid].push(deal);
+  }
+  console.log(
+    `syncCtraderHistory uid=${uid}: ${validatedDeals.length} valid deal(s) → ` +
+    `${Object.keys(byPosition).length} position(s) | validationErrors=${validationErrs.length}`
+  );
+
+  // 7c. Build one trade per positionId
+  const positionTrades = [];
+  for (const [positionId, posDeals] of Object.entries(byPosition)) {
+    const symbolInfo = posDeals[0]._symbolInfo;
+    const trade = buildPositionTrade(positionId, posDeals, symbolInfo, accountId);
+    trade.importSource = "history";
+    positionTrades.push(trade);
+    symbolLog[symbolInfo.name] = (symbolLog[symbolInfo.name] ?? 0) + 1;
+  }
+
+  if (positionTrades.length > 0) {
+    console.log(
+      `syncCtraderHistory uid=${uid}: SAMPLE trade:`,
+      JSON.stringify(positionTrades[0], null, 2).slice(0, 1000)
+    );
+  }
+
+  // ── 8. Batch write ────────────────────────────────────────────────────────
+  const BATCH_SIZE = 400;
+  let written = 0;
+  for (let i = 0; i < positionTrades.length; i += BATCH_SIZE) {
+    const batch = db.batch();
+    for (const trade of positionTrades.slice(i, i + BATCH_SIZE)) {
+      const docRef = tradesRef.doc(`ctrader_${trade.brokerTradeId}`);
+      batch.set(docRef, { ...trade, importedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    }
+    await batch.commit();
+    written += positionTrades.slice(i, i + BATCH_SIZE).length;
+    console.log(`syncCtraderHistory uid=${uid}: wrote batch (${written} positions so far)`);
+  }
+
+  if (Object.keys(symbolLog).length > 0) {
+    console.log(`syncCtraderHistory uid=${uid}: per-symbol →`, JSON.stringify(symbolLog));
+  }
+
+  await brokerRef.set(
+    { lastHistoryImportAt: admin.firestore.FieldValue.serverTimestamp(), lastHistoryImportCount: written },
+    { merge: true }
+  );
+
+  const durationMs = Date.now() - fnStart;
+  console.log(
+    `syncCtraderHistory uid=${uid}: COMPLETE — ` +
+    `deals=${allDeals.length} positions=${Object.keys(byPosition).length} ` +
+    `written=${written} errors=${validationErrs.length} duration=${durationMs}ms`
+  );
+
+  return {
+    ok:        true,
+    total:     allDeals.length,
+    positions: Object.keys(byPosition).length,
+    imported:  written,
+    errors:    validationErrs.length,
+    symbolLog,
+    durationMs,
+    note: written === 0
+      ? "No positions found in the requested range."
+      : `${written} position(s) written to Firestore.`,
+  };
+}
+
 exports.syncCtraderHistory = functions
   .runWith({ timeoutSeconds: 540, memory: "512MB" })
   .https.onRequest(async (req, res) => {
     setCors(req, res);
     if (req.method === "OPTIONS") { res.status(204).send(""); return; }
-
-    const fnStart = Date.now();
-
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
     try {
       const decoded = await verifyAuth(req);
-      const uid = decoded.uid;
-
-      if (req.method !== "POST") {
-        return res.status(405).json({ error: "Method not allowed" });
-      }
-
-      // ── 1. Load broker state + token ────────────────────────────────────────
-      const brokerRef  = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
-      const brokerSnap = await brokerRef.get();
-
-      if (!brokerSnap.exists || !brokerSnap.data().connected) {
-        return res.status(403).json({ error: "cTrader is not connected for this account" });
-      }
-
-      const brokerData = brokerSnap.data();
-
-      // Auto-refresh token if within 7-day window
-      let bearerToken;
-      const tokenExpiresAt  = brokerData.tokenExpiresAt?.toMillis?.() ?? null;
-      const msUntilExpiry   = tokenExpiresAt ? tokenExpiresAt - Date.now() : null;
-      if (msUntilExpiry !== null && msUntilExpiry <= TOKEN_REFRESH_THRESHOLD_MS) {
-        console.log(`syncCtraderHistory uid=${uid}: token near expiry — auto-refreshing`);
-        bearerToken = await refreshCtraderToken(uid, brokerRef, brokerData);
-      } else {
-        bearerToken = decrypt(brokerData.accessToken);
-      }
-
-      // ── 2. Open MCP session ─────────────────────────────────────────────────
-      const sessionId = await initCtraderSession(bearerToken);
-
-      // ── 3. Symbol map — always force-refresh on history import so lotSize
-      //       normalisation changes take effect immediately (don't serve stale cache)
-      const symbolDetails = await getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh: true });
-      console.log(`syncCtraderHistory uid=${uid}: symbol map loaded (fresh) — ${Object.keys(symbolDetails).length} symbols`);
-
-      // ── 4+5. Fetch all pages of historical deals ────────────────────────────
-
-      // fromTimestamp: accept from request body; if absent, fetchAllHistoricalDeals
-      // will call getCtraderAccountStartDate() to determine the account creation date
-      // (or fall back to 2 years ago). Pass null to trigger that auto-discovery.
-      const explicitFrom = req.body?.fromTimestamp != null
-        ? Number(req.body.fromTimestamp)
-        : null;
-
-      if (explicitFrom !== null && (!Number.isFinite(explicitFrom) || explicitFrom < 0)) {
-        return res.status(400).json({ error: "Invalid fromTimestamp — must be a Unix ms number" });
-      }
-
-      const toTimestamp = Date.now();
-
-      const allDeals = await fetchAllHistoricalDeals(
-        bearerToken, sessionId, uid, explicitFrom, toTimestamp
-      );
-
-      console.log(`syncCtraderHistory uid=${uid}: total deals fetched across all pages = ${allDeals.length}`);
-
-      // ── 6. Resolve prop account from user's Firestore settings ──────────────
-      const accountId = await resolvePropAccountId(uid);
-      if (accountId) {
-        console.log(`syncCtraderHistory uid=${uid}: matched prop account id="${accountId}"`);
-      } else {
-        console.log(`syncCtraderHistory uid=${uid}: no prop/100k/2step account found — accountId will be null`);
-      }
-
-      // ── 7. Validate all deals, group by positionId ──────────────────────────
-      const tradesRef      = db.collection("users").doc(uid).collection("trades");
-      const validationErrs = [];
-      const symbolLog      = {};  // { symbolName: count }
-
-      // 7a. Per-deal: resolve symbol + validate. Log and skip bad deals (don't abort).
-      const validatedDeals = [];
-      for (const rawDeal of allDeals) {
-        const dealId   = String(rawDeal.dealId   ?? "(unknown)");
-        const symbolId = rawDeal.symbolId != null ? String(rawDeal.symbolId) : null;
-
-        if (!symbolId) {
-          validationErrs.push(`deal ${dealId}: missing symbolId`);
-          console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: missing symbolId — skipping`);
-          continue;
-        }
-        const symbolInfo = symbolDetails[symbolId];
-        if (!symbolInfo) {
-          validationErrs.push(`deal ${dealId}: symbolId ${symbolId} unresolved`);
-          console.warn(
-            `syncCtraderHistory uid=${uid} deal ${dealId}: symbolId ${symbolId} not in map — skipping ` +
-            `(call ctraderConnect to force-refresh symbol map)`
-          );
-          continue;
-        }
-        // History import: skip trading-hours check (we're importing closed historical deals).
-        // Symbol enabled check still applies.
-        if (symbolInfo.enabled === false) {
-          console.log(
-            `syncCtraderHistory uid=${uid} deal ${dealId}: ` +
-            `symbol ${symbolInfo.name} disabled — skipping`
-          );
-          continue;
-        }
-
-        try {
-          validateDeal(rawDeal);
-          validatedDeals.push({ ...rawDeal, _symbolInfo: symbolInfo });
-        } catch (err) {
-          validationErrs.push(`deal ${dealId}: ${err.message}`);
-          console.warn(`syncCtraderHistory uid=${uid} deal ${dealId}: validation error — ${err.message}`);
-        }
-      }
-
-      // 7b. Group validated deals by positionId
-      const byPosition = {};
-      for (const deal of validatedDeals) {
-        const pid = String(deal.positionId);
-        if (!byPosition[pid]) byPosition[pid] = [];
-        byPosition[pid].push(deal);
-      }
-      console.log(
-        `syncCtraderHistory uid=${uid}: ${validatedDeals.length} valid deal(s) → ` +
-        `${Object.keys(byPosition).length} position(s) | validationErrors=${validationErrs.length}`
-      );
-
-      // 7c. Build one trade per positionId
-      const positionTrades = [];
-      for (const [positionId, posDeals] of Object.entries(byPosition)) {
-        const symbolInfo = posDeals[0]._symbolInfo;
-        const trade = buildPositionTrade(positionId, posDeals, symbolInfo, accountId);
-        trade.importSource = "history";
-        positionTrades.push(trade);
-        symbolLog[symbolInfo.name] = (symbolLog[symbolInfo.name] ?? 0) + 1;
-      }
-
-      // Log sample trade document for diagnostics
-      if (positionTrades.length > 0) {
-        console.log(
-          `syncCtraderHistory uid=${uid}: SAMPLE position trade (first of ${positionTrades.length}):`,
-          JSON.stringify(positionTrades[0], null, 2).slice(0, 1500)
-        );
-      }
-
-      // ── 8. Batch write — always set+merge by positionId ──────────────────────
-      // merge:true preserves user-owned fields (notes, screenshots, strategy, psychology)
-      // while always overwriting all broker-computed fields (including size, entry, exit,
-      // pnl) so stale data from earlier buggy imports is corrected on every sync.
-      const BATCH_SIZE = 400;
-      let written      = 0;
-
-      for (let i = 0; i < positionTrades.length; i += BATCH_SIZE) {
-        const batch = db.batch();
-        for (const trade of positionTrades.slice(i, i + BATCH_SIZE)) {
-          const docRef = tradesRef.doc(`ctrader_${trade.brokerTradeId}`);
-          batch.set(docRef, { ...trade, importedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        }
-        await batch.commit();
-        written += positionTrades.slice(i, i + BATCH_SIZE).length;
-        console.log(
-          `syncCtraderHistory uid=${uid}: wrote batch ${Math.floor(i / BATCH_SIZE) + 1} ` +
-          `(${written} positions so far)`
-        );
-      }
-
-      if (Object.keys(symbolLog).length > 0) {
-        console.log(`syncCtraderHistory uid=${uid}: per-symbol →`, JSON.stringify(symbolLog));
-      }
-
-      // Update broker metadata
-      await brokerRef.set(
-        {
-          lastHistoryImportAt:    admin.firestore.FieldValue.serverTimestamp(),
-          lastHistoryImportCount: written,
-        },
-        { merge: true }
-      );
-
-      const durationMs = Date.now() - fnStart;
-      console.log(
-        `syncCtraderHistory uid=${uid}: COMPLETE — ` +
-        `deals=${allDeals.length} positions=${Object.keys(byPosition).length} ` +
-        `written=${written} errors=${validationErrs.length} duration=${durationMs}ms`
-      );
-
-      return res.status(200).json({
-        ok:        true,
-        total:     allDeals.length,
-        positions: Object.keys(byPosition).length,
-        imported:  written,
-        errors:    validationErrs.length,
-        symbolLog,
-        durationMs,
-        note: written === 0
-          ? "No positions found in the requested range."
-          : `${written} position(s) written to Firestore.`,
-      });
-
+      const result  = await runCtraderHistorySync(decoded.uid, req.body?.fromTimestamp ?? null);
+      return res.status(200).json(result);
     } catch (err) {
-      const status = err.status || 500;
       console.error("syncCtraderHistory error:", err);
-      return res.status(status).json({ error: err.message });
+      return res.status(err.status || 500).json({ error: err.message });
     }
   });
 
