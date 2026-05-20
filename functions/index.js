@@ -2449,9 +2449,10 @@ exports.syncCtraderHistory = functions
       // ── 2. Open MCP session ─────────────────────────────────────────────────
       const sessionId = await initCtraderSession(bearerToken);
 
-      // ── 3. Symbol map (cached 6h) ───────────────────────────────────────────
-      const symbolDetails = await getVerifiedSymbolMap(bearerToken, sessionId);
-      console.log(`syncCtraderHistory uid=${uid}: symbol map loaded — ${Object.keys(symbolDetails).length} symbols`);
+      // ── 3. Symbol map — always force-refresh on history import so lotSize
+      //       normalisation changes take effect immediately (don't serve stale cache)
+      const symbolDetails = await getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh: true });
+      console.log(`syncCtraderHistory uid=${uid}: symbol map loaded (fresh) — ${Object.keys(symbolDetails).length} symbols`);
 
       // ── 4+5. Fetch all pages of historical deals ────────────────────────────
 
