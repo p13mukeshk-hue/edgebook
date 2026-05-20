@@ -2726,11 +2726,29 @@ async function forceReimportZerodha(){
 async function forceReimportCtrader(){
   if(!confirm('This will delete all cTrader trades and re-import them fresh from your broker.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nContinue?')) return;
   const idToken = await getIdToken(); if(!idToken) return;
+  const uid = DataStore._uid;
   const btn = document.getElementById('ctrader-reimport-btn');
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Working…';
+  const BATCH = 400;
   try{
-    showToast('Deleting old trades & re-importing from cTrader…', 'info');
-    // Single server-side call: deletes all ctrader_ docs then re-imports full history
+    // STEP A — snapshot user-owned fields from local trades before server call
+    showToast('Saving your notes and screenshots…', 'info');
+    const USER_FIELDS = ['notes','screenshots','psychology','strategy','emotion','tags'];
+    const preserved = {};
+    for(const t of trades){
+      if(!t.id || !String(t.id).startsWith('ctrader_')) continue;
+      const saved = {};
+      let hasData = false;
+      for(const f of USER_FIELDS){
+        if(t[f] != null){ saved[f] = t[f]; hasData = true; }
+      }
+      if(hasData) preserved[t.id] = saved;
+    }
+    console.log('[forceReimportCtrader] preserved user fields for', Object.keys(preserved).length, 'trade(s)');
+
+    // STEP B — single server-side call: deletes all ctrader_ docs then re-imports full history
+    // (server also does its own preservation as a safety net)
+    showToast('Re-importing from cTrader…', 'info');
     const res = await fetch(`${CTRADER_FN}/forceReimportCtrader`,{
       method:'POST',
       headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
@@ -2739,7 +2757,34 @@ async function forceReimportCtrader(){
     const data = await res.json();
     if(!res.ok || data.error) throw new Error(data.error || 'Re-import failed');
 
-    // Reload UI from server
+    // STEP C — re-apply preserved user fields to newly imported Firestore docs
+    // (server already did this, but frontend layer ensures correctness if server missed any)
+    const preservedCount = Object.keys(preserved).length;
+    if(preservedCount > 0){
+      showToast('Re-applying your notes and screenshots…', 'info');
+      const newSnap = await window._fbGetDocs(window._fbQuery(
+        window._fbCollection(window._fbDb,'users',uid,'trades'),
+        window._fbWhere('source','==','ctrader')
+      ));
+      for(let i=0; i<newSnap.docs.length; i+=BATCH){
+        const batch = window._fbWriteBatch(window._fbDb);
+        let dirty = false;
+        for(const doc of newSnap.docs.slice(i, i+BATCH)){
+          const saved = preserved[doc.id]; if(!saved) continue;
+          const d = doc.data();
+          const toMerge = {};
+          for(const [k,v] of Object.entries(saved)){
+            if(v != null && !d[k]) toMerge[k] = v;
+          }
+          if(!Object.keys(toMerge).length) continue;
+          batch.set(doc.ref, toMerge, { merge: true });
+          dirty = true;
+        }
+        if(dirty) await batch.commit();
+      }
+    }
+
+    // STEP D — clear cache and force-reload fresh from server
     trades = [];
     localStorage.removeItem(DataStore._tk());
     await DataStore.loadFromFirestore({ forceServer: true });
@@ -3931,6 +3976,29 @@ function saveTrade(){
         isOpen:      orig.isOpen      ?? trade.isOpen,
         syncedAt:    orig.syncedAt    || null,
       };
+      // Write the edited trade directly to Firestore — don't rely on _syncTrades batch
+      // which can fail silently if any trade has large screenshots.
+      if(window._firebaseReady && DataStore._uid !== 'guest'){
+        const docRef = window._fbDoc(window._fbDb, 'users', DataStore._uid, 'trades', String(orig.id));
+        window._fbSetDoc(docRef, {
+          notes:       trade.notes       ?? null,
+          strategy:    trade.strategy    ?? null,
+          emotion:     trade.emotion     ?? null,
+          psychology:  trade.psychology  ?? {},
+          tags:        trade.tags        ?? [],
+          screenshots: trade.screenshots ?? [],
+          entry:       trade.entry,
+          exit:        trade.exit       ?? null,
+          size:        trade.size,
+          direction:   trade.direction,
+          date:        trade.date,
+          sl:          trade.sl         ?? null,
+          tp:          trade.tp         ?? null,
+          pnl:         trade.pnl        ?? null,
+        }, { merge: true })
+          .then(()  => console.log('[saveTrade] Firestore updated:', String(orig.id), 'notes:', trade.notes))
+          .catch(err => console.error('[saveTrade] Firestore write failed:', String(orig.id), err.message));
+      }
     }
   }
   else trades.unshift(trade);
