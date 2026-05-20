@@ -1533,20 +1533,56 @@ function checkTradingHours(symbolInfo, nowMs) {
 }
 
 /**
- * Map a cTrader symbolCategory string to the app's asset class code.
- * Returns "fx" as the default (most cTrader accounts are FX/CFD).
+ * Map a cTrader symbolCategory + symbol name to the app's asset class code.
+ * Returns "fx" as the default.
  *
  * App codes: "eq" Equities · "cx" Crypto · "fx" Forex · "cm" Commodities · "ix" Index
  */
-function ctraderCategoryToAsset(category) {
+
+// Symbol-name overrides — checked before category ID so well-known symbols are always right
+const SYMBOL_ASSET_MAP = {
+  // Commodities — metals
+  XAUUSD: "cm", XAUEUR: "cm", XAGUSD: "cm", XAGEUR: "cm",
+  GOLD: "cm", SILVER: "cm",
+  // Commodities — energy
+  XTIUSD: "cm", XBRUSD: "cm", WTI: "cm", OIL: "cm", BRENT: "cm", NATGAS: "cm",
+  // Crypto
+  BTCUSD: "cx", ETHUSD: "cx", BTCUSDT: "cx", ETHUSDT: "cx",
+  BNBUSD: "cx", SOLUSD: "cx", XRPUSD: "cx", ADAUSD: "cx",
+  // Indices
+  SP500: "ix", SPX500: "ix", US500: "ix", NAS100: "ix", US30: "ix",
+  UK100: "ix", GER40: "ix", AUS200: "ix", JPN225: "ix", FRA40: "ix",
+  // SP500 alternate spellings
+  "S&P500": "ix", SPXUSD: "ix",
+};
+
+function ctraderCategoryToAsset(category, symbolName = "") {
+  // 1. Check symbol name first (most reliable — API-agnostic)
+  const nameKey = String(symbolName).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (SYMBOL_ASSET_MAP[nameKey]) return SYMBOL_ASSET_MAP[nameKey];
+  // Also check with slashes stripped differently
+  const nameRaw = String(symbolName).toUpperCase();
+  if (SYMBOL_ASSET_MAP[nameRaw]) return SYMBOL_ASSET_MAP[nameRaw];
+
+  // 2. Map standard cTrader numeric category IDs (broker-agnostic)
+  const numId = Number(category);
+  if (Number.isFinite(numId)) {
+    if (numId === 1) return "fx";   // Forex
+    if (numId === 2) return "cm";   // Metals
+    if (numId === 3) return "cm";   // Energy
+    if (numId === 4) return "ix";   // Indices
+    if (numId === 5) return "eq";   // Equities
+    if (numId === 6) return "cx";   // Crypto
+  }
+
+  // 3. String category name fallback
   if (!category) return "fx";
   const c = String(category).toLowerCase();
-  if (c.includes("crypto")  || c.includes("coin"))                              return "cx";
-  if (c.includes("index")   || c.includes("indice") || c.includes("indices"))   return "ix";
-  if (c.includes("commodit") || c.includes("metal") || c.includes("energy")
-      || c.includes("oil")  || c.includes("gas"))                               return "cm";
-  if (c.includes("stock")   || c.includes("equit")  || c.includes("share"))     return "eq";
-  // "FX", "Forex", "CFD", "Spot", "Currencies" → fx
+  if (c.includes("crypto")   || c.includes("coin"))                             return "cx";
+  if (c.includes("index")    || c.includes("indice") || c.includes("indices"))  return "ix";
+  if (c.includes("commodit") || c.includes("metal")  || c.includes("energy")
+      || c.includes("oil")   || c.includes("gas"))                              return "cm";
+  if (c.includes("stock")    || c.includes("equit")  || c.includes("share"))    return "eq";
   return "fx";
 }
 
@@ -1655,10 +1691,9 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   };
   const entry    = getPrice(primaryEntry) ?? 0;
   const entryVol = Number(primaryEntry.filledVolume ?? primaryEntry.volume ?? primaryEntry.quantity ?? 0);
-  const size     = (lotSize && lotSize > 0)
-    ? parseFloat((entryVol / lotSize).toFixed(8))
-    : entryVol;
-  console.log(`[buildPositionTrade] pos=${positionId} symbol=${symbolInfo.name} lotSize=${lotSize} entryVol=${entryVol} size=${size}`);
+  // cTrader MCP returns filledVolume in centilots (1/100 of a standard lot) for all instruments.
+  const size = parseFloat((entryVol / 100).toFixed(6));
+  console.log(`[buildPositionTrade] pos=${positionId} symbol=${symbolInfo.name} entryVol=${entryVol} size=${size} (entryVol/100)`);
 
   // ── STEP 2: try multiple pnl field names ────────────────────────────────────
   const PNL_FIELDS = ["pnl", "grossPnl", "netPnl", "profit", "dealPnl", "realizedPnl", "grossProfit", "netProfit"];
@@ -1730,7 +1765,7 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
     source:        "ctrader",
     broker:        "ctrader",
     symbol:        symbolInfo.name,
-    asset:         ctraderCategoryToAsset(symbolInfo.symbolCategory),
+    asset:         ctraderCategoryToAsset(symbolInfo.symbolCategory, symbolInfo.name),
     direction,
     entry,
     exit,
@@ -2361,22 +2396,21 @@ exports.ctraderSymbolInfo = functions.https.onRequest(async (req, res) => {
     const decoded = await verifyAuth(req);
     const uid = decoded.uid;
 
-    const userDoc = await db.collection("users").doc(uid).get();
-    const userData = userDoc.data() || {};
-    const encryptedBearer = userData.ctraderBearerToken;
-    if (!encryptedBearer) {
-      return res.status(400).json({ error: "No cTrader token stored. Connect cTrader first." });
+    const brokerRef  = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+    const brokerSnap = await brokerRef.get();
+    if (!brokerSnap.exists || !brokerSnap.data().connected) {
+      return res.status(400).json({ error: "cTrader not connected. Connect it in Settings first." });
     }
 
     let bearerToken;
-    try { bearerToken = decrypt(encryptedBearer); } catch {
+    try { bearerToken = decrypt(brokerSnap.data().accessToken); } catch {
       return res.status(400).json({ error: "Failed to decrypt cTrader token." });
     }
 
     const sessionId = await initCtraderSession(bearerToken);
-    const symbolsRaw = await callCtraderTool(bearerToken, sessionId, "get_symbols");
 
-    // Unwrap envelope if needed
+    // Step 1: get light symbol list
+    const symbolsRaw = await callCtraderTool(bearerToken, sessionId, "get_symbols");
     let rawSymbols;
     if (Array.isArray(symbolsRaw)) {
       rawSymbols = symbolsRaw;
@@ -2391,17 +2425,53 @@ exports.ctraderSymbolInfo = functions.https.onRequest(async (req, res) => {
     const { filter } = req.body || {};
     const filtered = filter
       ? rawSymbols.filter((s) => {
-          const n = String(s.name ?? s.symbolName ?? "").toUpperCase();
+          const n = String(s.name ?? s.symbolName ?? s.symbol ?? "").toUpperCase();
           return n.includes(filter.toUpperCase());
         })
-      : rawSymbols;
+      : rawSymbols.slice(0, 5);
+
+    // Step 2: for each filtered symbol, try get_symbol (singular) with its id
+    // to discover the full contract specification fields (lotSize, pipSize, etc.)
+    const enriched = [];
+    for (const s of filtered) {
+      const symId = s.symbolId ?? s.id ?? s.symbol_id;
+      const symName = s.symbolName ?? s.name ?? s.symbol;
+      let fullDetails = null;
+      let detailsError = null;
+
+      // Try every plausible endpoint name + parameter shape
+      const attempts = [
+        { tool: "get_symbol",         args: { symbolId: symId } },
+        { tool: "get_symbol",         args: { id: symId } },
+        { tool: "get_symbol",         args: { symbol: symName } },
+        { tool: "get_symbol_details", args: { symbolId: symId } },
+        { tool: "get_symbol_info",    args: { symbolId: symId } },
+        { tool: "get_contract",       args: { symbolId: symId } },
+      ];
+
+      for (const attempt of attempts) {
+        try {
+          const raw = await callCtraderTool(bearerToken, sessionId, attempt.tool, attempt.args);
+          fullDetails = { _endpoint: attempt.tool, _args: attempt.args, ...( Array.isArray(raw) ? { result: raw } : raw ) };
+          break;
+        } catch (e) {
+          detailsError = `${attempt.tool}: ${e.message}`;
+        }
+      }
+
+      enriched.push({
+        light: s,
+        fullDetails,
+        detailsError: fullDetails ? null : detailsError,
+      });
+    }
 
     return res.status(200).json({
       total: rawSymbols.length,
       returned: filtered.length,
       filter: filter ?? null,
-      firstRaw: rawSymbols[0] ?? null,
-      symbols: filtered,
+      lightSymbolFields: rawSymbols[0] ? Object.keys(rawSymbols[0]) : [],
+      enriched,
     });
 
   } catch (err) {
