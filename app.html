@@ -2716,6 +2716,8 @@ async function forceReimportZerodha(){
     trades = [];
     localStorage.removeItem(DataStore._tk());
     await DataStore.loadFromFirestore({ forceServer: true });
+    await new Promise(r => setTimeout(r, 500));
+    refreshAll();
     showToast(`Done! Imported ${data.saved} trade(s) from Zerodha`, 'success');
   } catch(e){
     showToast(`Zerodha re-import failed: ${e.message}`, 'error');
@@ -2788,6 +2790,8 @@ async function forceReimportCtrader(){
     trades = [];
     localStorage.removeItem(DataStore._tk());
     await DataStore.loadFromFirestore({ forceServer: true });
+    await new Promise(r => setTimeout(r, 500));
+    refreshAll();
     showToast(`Done! Deleted ${data.deleted} old, imported ${data.imported ?? 0} trade(s) from cTrader`, 'success');
   } catch(e){
     showToast(`cTrader re-import failed: ${e.message}`, 'error');
@@ -3552,10 +3556,10 @@ function openTradeModal(id=null){
   document.getElementById('t-edit-id').value=id||'';
   updateAccountSelect();
   if(id){
-    const t=trades.find(x=>String(x.id)===String(id));
+    const t=trades.find(x=>String(x.id)===String(id)||String(x.brokerTradeId)===String(id));
     if(!t){
-      console.error('[openTradeModal] trade not found:', id, 'available ids:', trades.slice(0,5).map(x=>x.id));
-      showToast('Trade not found','error');
+      console.error('[openTradeModal] not found:', id, 'total trades:', trades.length, 'sample ids:', trades.slice(0,3).map(x=>x.id));
+      showToast('Please refresh the page and try again','error');
       return;
     }
     console.log('[edit] opening trade:', t.symbol, t.source, t.id);
@@ -5051,8 +5055,13 @@ function handleDrop(e){
 }
 
 function openLightbox(tradeId, startIdx){
-  const t = trades.find(x=>x.id==tradeId);
-  if(!t?.screenshots?.length) return;
+  const t = trades.find(x=>String(x.id)===String(tradeId)||String(x.brokerTradeId)===String(tradeId));
+  console.log('[lightbox] id:', tradeId, 'trade found:', !!t, 'screenshots:', t?.screenshots?.length);
+  if(!t || !t.screenshots?.length){
+    console.error('[lightbox] no screenshots for:', tradeId);
+    showToast('No screenshots found','error');
+    return;
+  }
   lightboxTradeId = tradeId;
   lightboxIdx = startIdx||0;
   showLightboxImage();
@@ -5066,7 +5075,7 @@ function showLightboxImageDirect(){
   document.getElementById('lightbox-counter').textContent = `${lightboxIdx+1} / ${currentScreenshots.length}`;
 }
 function showLightboxImage(){
-  const t = trades.find(x=>x.id==lightboxTradeId);
+  const t = trades.find(x=>String(x.id)===String(lightboxTradeId)||String(x.brokerTradeId)===String(lightboxTradeId));
   if(!t?.screenshots) return;
   const ss = t.screenshots[lightboxIdx];
   document.getElementById('lightbox-img').src = ss.src;
@@ -5074,7 +5083,7 @@ function showLightboxImage(){
 }
 function lightboxNav(dir){
   if(lightboxTradeId){
-    const t=trades.find(x=>x.id==lightboxTradeId);
+    const t=trades.find(x=>String(x.id)===String(lightboxTradeId)||String(x.brokerTradeId)===String(lightboxTradeId));
     if(!t) return;
     lightboxIdx=(lightboxIdx+dir+t.screenshots.length)%t.screenshots.length;
     showLightboxImage();
@@ -5233,7 +5242,7 @@ function calSelectDay(d){
     ${ts.map(t=>{
       const ac=acctCur(t.accountId);
       const pnlStr=t.pnl===null?'<span style="color:var(--text3)">Open</span>':`<span style="color:${t.pnl>=0?'var(--green)':'var(--red)'};">${t.pnl>=0?'+':''}${ac}${t.pnl.toFixed(0)}</span>`;
-      const thumb=t.screenshots?.length?`<span class="ss-cell-thumb" onclick="openLightbox(${t.id},0)" style="margin-right:6px"><img src="${t.screenshots[0].src}" alt="chart"></span>`:'';
+      const thumb=t.screenshots?.length?`<span class="ss-cell-thumb" onclick="openLightbox('${t.id}',0)" style="margin-right:6px"><img src="${t.screenshots[0].src}" alt="chart"></span>`:'';
       return `<div class="cal-trade-row">
         <span>${thumb}<span style="font-weight:500">${t.symbol}</span><span style="font-size:10px;color:var(--text3);margin-left:6px">${t.instrument||ASSET_LABELS[t.asset]} · ${t.optionType||t.direction}</span></span>
         <span>${pnlStr}</span>
@@ -5361,7 +5370,7 @@ function makeHmCell(t, maxAbs){
   div.onclick = ()=>hmSelectTrade(t.id);
 
   const camHtml = hasSS
-    ? `<button class="hm-cam" title="${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}" onclick="event.stopPropagation();openLightbox(${t.id},0)"><i class="fa-solid fa-camera"></i>${t.screenshots.length>1?`<sup style="font-size:8px">${t.screenshots.length}</sup>`:''}</button>`
+    ? `<button class="hm-cam" title="${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}" onclick="event.stopPropagation();openLightbox('${t.id}',0)"><i class="fa-solid fa-camera"></i>${t.screenshots.length>1?`<sup style="font-size:8px">${t.screenshots.length}</sup>`:''}</button>`
     : `<span class="hm-cam hm-cam-none" title="No screenshots"><i class="fa-regular fa-image"></i></span>`;
 
   const instrBadge = t.optionType
@@ -5509,7 +5518,7 @@ function renderHmInsert(t, container){
 
   const ssGrid = ssCount
     ? t.screenshots.map((ss,i)=>`
-        <div class="hm-ins-ss-thumb" onclick="openLightbox(${t.id},${i})">
+        <div class="hm-ins-ss-thumb" onclick="openLightbox('${t.id}',${i})">
           <img src="${ss.src}" alt="chart ${i+1}">
           <div class="hm-ins-ss-ov"><i class="fa-solid fa-maximize"></i></div>
         </div>`).join('')

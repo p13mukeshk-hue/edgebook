@@ -1745,18 +1745,23 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   };
 
   // Try pnl-based exit detection first (API sets pnl on closing deals)
-  let exitDeals = sorted.filter((d) => getDealPnl(d) !== null);
+  // ── STEP 4: identify closing deals — must be in the opposing tradeSide direction
+  // Never treat the opening deal as an exit even if it has a pnl (e.g. commission).
+  const entryIsBuy = tradeSideUpper === "BUY";
+  let exitDeals = sorted.filter((d) => {
+    const side = String(d.tradeSide ?? "").toUpperCase();
+    const isClosingDir = entryIsBuy ? side === "SELL" : side === "BUY";
+    return isClosingDir && getDealPnl(d) !== null;
+  });
 
-  // ── STEP 4: tradeSide-pairing fallback when pnl is absent on all deals ──────
-  // The opening deal is the first by timestamp; closing deals have the opposite tradeSide.
+  // Fallback: if no closing deals found with pnl, pair by tradeSide alone
   if (exitDeals.length === 0 && sorted.length > 1) {
-    const entryIsBuy = tradeSideUpper === "BUY";
     exitDeals = sorted.slice(1).filter((d) => {
       const side = String(d.tradeSide ?? "").toUpperCase();
       return entryIsBuy ? side === "SELL" : side === "BUY";
     });
     console.log(
-      `[buildPositionTrade] pos=${positionId}: pnl null on all deals — ` +
+      `[buildPositionTrade] pos=${positionId}: pnl null on closing deals — ` +
       `tradeSide pairing found ${exitDeals.length} exit deal(s)`
     );
   }
