@@ -1691,9 +1691,13 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   };
   const entry    = getPrice(primaryEntry) ?? 0;
   const entryVol = Number(primaryEntry.filledVolume ?? primaryEntry.volume ?? primaryEntry.quantity ?? 0);
-  // cTrader MCP returns filledVolume in centilots (1/100 of a standard lot) for all instruments.
-  const size = parseFloat((entryVol / 100).toFixed(6));
-  console.log(`[buildPositionTrade] pos=${positionId} symbol=${symbolInfo.name} entryVol=${entryVol} size=${size} (entryVol/100)`);
+  // cTrader MCP returns filledVolume in (native contract units × 100), i.e. centilots.
+  // Correct formula: filledVolume / lotSize / 100.
+  // Example: XAUUSD filledVolume=600, lotSize=100 → 600/100/100 = 0.06 lots.
+  const size = (lotSize && lotSize > 0)
+    ? parseFloat((entryVol / lotSize / 100).toFixed(6))
+    : parseFloat((entryVol / 100).toFixed(6));
+  console.log(`[buildPositionTrade] pos=${positionId} symbol=${symbolInfo.name} lotSize=${lotSize} entryVol=${entryVol} size=${size} (entryVol/lotSize/100)`);
 
   // ── STEP 2: try multiple pnl field names ────────────────────────────────────
   const PNL_FIELDS = ["pnl", "grossPnl", "netPnl", "profit", "dealPnl", "realizedPnl", "grossProfit", "netProfit"];
