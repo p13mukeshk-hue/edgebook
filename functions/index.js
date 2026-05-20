@@ -2343,6 +2343,73 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
   }
 });
 
+// ─── 8a. ctraderSymbolInfo ────────────────────────────────────────────────────
+//
+// POST /ctraderSymbolInfo  (no body required, or { filter: "XAUUSD" })
+// Returns the RAW symbol objects from get_symbols exactly as the API sends them.
+// Use this to discover which field names carry lotSize / contractSize / pipSize
+// so we can trust the API without any hardcoded fallbacks.
+
+exports.ctraderSymbolInfo = functions.https.onRequest(async (req, res) => {
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  try {
+    const decoded = await verifyAuth(req);
+    const uid = decoded.uid;
+
+    const userDoc = await db.collection("users").doc(uid).get();
+    const userData = userDoc.data() || {};
+    const encryptedBearer = userData.ctraderBearerToken;
+    if (!encryptedBearer) {
+      return res.status(400).json({ error: "No cTrader token stored. Connect cTrader first." });
+    }
+
+    let bearerToken;
+    try { bearerToken = decrypt(encryptedBearer); } catch {
+      return res.status(400).json({ error: "Failed to decrypt cTrader token." });
+    }
+
+    const sessionId = await initCtraderSession(bearerToken);
+    const symbolsRaw = await callCtraderTool(bearerToken, sessionId, "get_symbols");
+
+    // Unwrap envelope if needed
+    let rawSymbols;
+    if (Array.isArray(symbolsRaw)) {
+      rawSymbols = symbolsRaw;
+    } else if (symbolsRaw && typeof symbolsRaw === "object") {
+      rawSymbols = symbolsRaw.symbols ?? symbolsRaw.data ?? symbolsRaw.result ?? symbolsRaw.items
+        ?? symbolsRaw[Object.keys(symbolsRaw).find((k) => Array.isArray(symbolsRaw[k]))]
+        ?? [];
+    } else {
+      rawSymbols = [];
+    }
+
+    const { filter } = req.body || {};
+    const filtered = filter
+      ? rawSymbols.filter((s) => {
+          const n = String(s.name ?? s.symbolName ?? "").toUpperCase();
+          return n.includes(filter.toUpperCase());
+        })
+      : rawSymbols;
+
+    return res.status(200).json({
+      total: rawSymbols.length,
+      returned: filtered.length,
+      filter: filter ?? null,
+      firstRaw: rawSymbols[0] ?? null,
+      symbols: filtered,
+    });
+
+  } catch (err) {
+    console.error("ctraderSymbolInfo error:", err);
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 // ─── 8. syncCtraderTrades ─────────────────────────────────────────────────────
 //
 // POST /syncCtraderTrades  (no body required)
