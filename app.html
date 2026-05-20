@@ -3501,12 +3501,19 @@ function showSPanel(id,el){
    MODALS
 ══════════════════════════════════════════════════════ */
 function openTradeModal(id=null){
+  console.log('[openTradeModal] called with id:', id);
   editId=id;
   document.getElementById('trade-modal-title').textContent=id?'Edit trade':'Log a trade';
   document.getElementById('t-edit-id').value=id||'';
   updateAccountSelect();
   if(id){
-    const t=trades.find(x=>x.id==id); if(!t) return;
+    const t=trades.find(x=>String(x.id)===String(id));
+    if(!t){
+      console.error('[openTradeModal] trade not found:', id, 'available ids:', trades.slice(0,5).map(x=>x.id));
+      showToast('Trade not found','error');
+      return;
+    }
+    console.log('[edit] opening trade:', t.symbol, t.source, t.id);
     document.getElementById('t-asset').value=t.asset;
     // Build dropdown for this asset class first
     updateSymbolDropdown();
@@ -3896,7 +3903,7 @@ function saveTrade(){
     strike: isFno && document.getElementById('t-instrument').value==='Options' ? (parseFloat(document.getElementById('t-strike').value)||null) : null,
     screenshots: [...currentScreenshots],
     source: editId
-      ? (trades.find(t=>t.id==editId)?.source || 'manual')
+      ? (trades.find(t=>String(t.id)===String(editId))?.source || 'manual')
       : 'manual',
   };
   // For new trades, check for local duplicates before saving
@@ -3908,7 +3915,24 @@ function saveTrade(){
     }
   }
 
-  if(editId){const i=trades.findIndex(t=>t.id==editId);if(i>-1)trades[i]=trade;}
+  if(editId){
+    const i=trades.findIndex(t=>String(t.id)===String(editId));
+    if(i>-1){
+      // Preserve broker-owned fields that the modal doesn't touch
+      const orig=trades[i];
+      trades[i]={
+        ...orig,
+        ...trade,
+        // Always keep identity + broker provenance fields from original
+        id:          orig.id,
+        source:      orig.source      || trade.source,
+        broker:      orig.broker      || null,
+        brokerTradeId: orig.brokerTradeId || null,
+        isOpen:      orig.isOpen      ?? trade.isOpen,
+        syncedAt:    orig.syncedAt    || null,
+      };
+    }
+  }
   else trades.unshift(trade);
   DataStore.saveTrades(trades);
   closeModal('trade-modal');
@@ -3917,7 +3941,7 @@ function saveTrade(){
 }
 function deleteTrade(id){
   showConfirm('Delete trade?','This trade will be permanently removed.',()=>{
-    trades=trades.filter(t=>t.id!=id); DataStore.saveTrades(trades); refreshAll(); showToast('Trade deleted','success');
+    trades=trades.filter(t=>String(t.id)!==String(id)); DataStore.saveTrades(trades); refreshAll(); showToast('Trade deleted','success');
   });
 }
 
@@ -4074,11 +4098,11 @@ function tradeRow(t){
     <td style="font-size:12px;color:var(--text3)">${t.strategy||'—'}</td>
     <td>${acctTagCell(t)}</td>
     <td>${sourceBadge(t)}</td>
-    <td>${t.screenshots&&t.screenshots.length?`<span class="ss-cell-thumb" onclick="openLightbox(${t.id},0)" title="View ${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}"><img src="${t.screenshots[0].src}" alt="chart"></span>${t.screenshots.length>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${t.screenshots.length-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>'}</td>
+    <td>${t.screenshots&&t.screenshots.length?`<span class="ss-cell-thumb" onclick="openLightbox('${t.id}',0)" title="View ${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}"><img src="${t.screenshots[0].src}" alt="chart"></span>${t.screenshots.length>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${t.screenshots.length-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>'}</td>
     <td>${pnlStr}</td>
     <td style="white-space:nowrap">
-      <button class="action-btn" onclick="openTradeModal(${t.id})" title="Edit"><i class="fa-solid fa-pen-to-square"></i></button>
-      <button class="action-btn del" onclick="deleteTrade(${t.id})" title="Delete"><i class="fa-solid fa-trash"></i></button>
+      <button class="action-btn" onclick="openTradeModal('${t.id}')" title="Edit"><i class="fa-solid fa-pen-to-square"></i></button>
+      <button class="action-btn del" onclick="deleteTrade('${t.id}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
     </td>
   </tr>`;
 }
