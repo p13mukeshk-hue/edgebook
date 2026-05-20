@@ -2605,52 +2605,46 @@ exports.forceReimportCtrader = functions
       console.log(`forceReimportCtrader uid=${uid}: delete complete`);
 
       // Step 3: run full history sync
-      const result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null);
+      let result;
+      try {
+        result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null);
+      } catch (err) {
+        console.error(`forceReimportCtrader uid=${uid}: sync step failed:`, err.message);
+        throw new Error("Sync failed: " + err.message);
+      }
 
       // Step 4: re-apply preserved user fields to newly imported docs
+      // Uses individual writes (not batch) so one bad doc never aborts the whole re-import.
       const preservedEntries = Object.entries(userFieldsMap);
       if (preservedEntries.length > 0) {
         console.log(`forceReimportCtrader uid=${uid}: re-applying user fields for ${preservedEntries.length} doc(s)`);
         const newSnap = await tradesRef.get();
         const newDocIds = new Set(newSnap.docs.filter((d) => d.id.startsWith("ctrader_")).map((d) => d.id));
-
-        let batch = db.batch();
-        let opCount = 0;
+        let reapplied = 0;
 
         for (const [docId, fields] of preservedEntries) {
           if (!newDocIds.has(docId)) continue;
-          const clean = sanitizeUserFields(fields);
-          batch.set(tradesRef.doc(docId), clean, { merge: true });
-          opCount++;
 
-          if (opCount >= 490) {
-            try {
-              await batch.commit();
-            } catch (err) {
-              console.error(
-                `forceReimportCtrader uid=${uid}: batch commit failed:`, err.message,
-                "sample:", JSON.stringify(preservedEntries.slice(0, 2)).slice(0, 500)
-              );
-              throw err;
-            }
-            batch = db.batch();
-            opCount = 0;
-          }
-        }
+          const hasUserData = fields.notes || fields.strategy || fields.emotion ||
+            (fields.psychology && (
+              fields.psychology.preThought ||
+              fields.psychology.executionNote ||
+              fields.psychology.review
+            ));
+          if (!hasUserData) continue;
 
-        if (opCount > 0) {
           try {
-            await batch.commit();
+            const clean = sanitizeUserFields(fields);
+            console.log(`[reapply] docId=${docId} fields=${JSON.stringify(clean).slice(0, 200)}`);
+            await tradesRef.doc(docId).set(clean, { merge: true });
+            reapplied++;
           } catch (err) {
-            console.error(
-              `forceReimportCtrader uid=${uid}: final batch commit failed:`, err.message,
-              "sample:", JSON.stringify(preservedEntries.slice(0, 2)).slice(0, 500)
-            );
-            throw err;
+            console.error(`[reapply] FAILED docId=${docId} error=${err.message} raw=${JSON.stringify(fields).slice(0, 500)}`);
+            // Continue — don't let one bad doc abort the entire re-import
           }
         }
 
-        console.log(`forceReimportCtrader uid=${uid}: user fields restored (${opCount} written in last batch)`);
+        console.log(`forceReimportCtrader uid=${uid}: user fields restored for ${reapplied} doc(s)`);
       }
 
       return res.status(200).json({
