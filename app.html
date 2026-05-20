@@ -2730,13 +2730,22 @@ async function forceReimportCtrader(){
   const BATCH = 400;
   try{
     // STEP A — preserve user-owned fields keyed by symbol+date+entry
+    // Query by BOTH source and broker to catch old raw-deal docs that have
+    // broker:'ctrader' but no source field (written by a previous code version).
     showToast('Saving your notes and screenshots…', 'info');
-    const oldSnap = await window._fbGetDocs(window._fbQuery(
-      window._fbCollection(window._fbDb,'users',uid,'trades'),
-      window._fbWhere('source','==','ctrader')
-    ));
+    const col = window._fbCollection(window._fbDb,'users',uid,'trades');
+    const [snapBySource, snapByBroker] = await Promise.all([
+      window._fbGetDocsFromServer(window._fbQuery(col, window._fbWhere('source','==','ctrader'))),
+      window._fbGetDocsFromServer(window._fbQuery(col, window._fbWhere('broker','==','ctrader'))),
+    ]);
+    // Merge both result sets, deduplicated by doc ID
+    const oldDocMap = new Map();
+    for(const d of [...snapBySource.docs, ...snapByBroker.docs]) oldDocMap.set(d.id, d);
+    const oldDocs = [...oldDocMap.values()];
+    console.log(`[forceReimportCtrader] found ${oldDocs.length} existing cTrader docs (${snapBySource.size} by source, ${snapByBroker.size} by broker)`);
+
     const preserved = {};
-    for(const doc of oldSnap.docs){
+    for(const doc of oldDocs){
       const d = doc.data();
       if(!d.symbol || !d.date || d.entry == null) continue;
       const key = `${d.symbol}_${String(d.date)}_${d.entry}`;
@@ -2750,11 +2759,11 @@ async function forceReimportCtrader(){
       };
     }
 
-    // STEP B — delete all existing cTrader trades in batches
-    showToast('Deleting old cTrader trades…', 'info');
-    for(let i=0; i<oldSnap.docs.length; i+=BATCH){
+    // STEP B — delete ALL found cTrader docs (both source and broker matches)
+    showToast(`Deleting ${oldDocs.length} old cTrader docs…`, 'info');
+    for(let i=0; i<oldDocs.length; i+=BATCH){
       const batch = window._fbWriteBatch(window._fbDb);
-      oldSnap.docs.slice(i, i+BATCH).forEach(d => batch.delete(d.ref));
+      oldDocs.slice(i, i+BATCH).forEach(d => batch.delete(d.ref));
       await batch.commit();
     }
     // Reset lastSyncTimestamp so history import starts from the account beginning
