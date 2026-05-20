@@ -1132,15 +1132,24 @@ async function callCtraderTool(bearerToken, sessionId, toolName, toolArgs = {}) 
 // Fallback lot sizes when cTrader MCP get_symbols doesn't return contract sizing.
 // Values are standard industry lots (units of base currency or contract units).
 const LOT_SIZE_DEFAULTS = {
+  // Normalised (no slashes/dots)
   EURUSD: 100000, GBPUSD: 100000, USDJPY: 100000, AUDUSD: 100000,
   USDCAD: 100000, USDCHF: 100000, NZDUSD: 100000, EURGBP: 100000,
   EURJPY: 100000, GBPJPY: 100000, EURCHF: 100000, EURAUD: 100000,
   GBPAUD: 100000, AUDCAD: 100000, CADJPY: 100000, CHFJPY: 100000,
   XAUUSD: 100,   XAGUSD: 5000,
   BTCUSD: 1,     ETHUSD: 1,     BTCUSDT: 1,   ETHUSDT: 1,
-  US30: 1,       US500: 1,      NAS100: 1,    UK100: 1,
+  US30: 1,       US500: 1,      SPX500: 1,    NAS100: 1,    UK100: 1,
   GER40: 1,      AUS200: 1,     JPN225: 1,
   XTIUSD: 1000,  XBRUSD: 1000,
+  // Slash-separated aliases (cTrader API often sends these)
+  'EUR/USD': 100000, 'GBP/USD': 100000, 'USD/JPY': 100000, 'AUD/USD': 100000,
+  'USD/CAD': 100000, 'USD/CHF': 100000, 'NZD/USD': 100000,
+  'EUR/GBP': 100000, 'EUR/JPY': 100000, 'GBP/JPY': 100000,
+  'XAU/USD': 100,    'XAG/USD': 5000,
+  'BTC/USD': 1,      'ETH/USD': 1,
+  // Common display-name aliases
+  GOLD: 100, SILVER: 5000, WTI: 1000, OIL: 1000, BRENT: 1000,
 };
 
 // Fallback pip sizes (smallest price increment that matters for P&L).
@@ -1248,12 +1257,17 @@ async function getVerifiedSymbolMap(bearerToken, sessionId, { forceRefresh = fal
     const apiPipSize  = extractNumber(s, ["pipSize", "pip_size", "pipPosition", "point"]);
     const apiPipValue = extractNumber(s, ["pipValue", "pip_value", "pipValuePerLot"]);
 
-    const lotSize  = apiLotSize  ?? LOT_SIZE_DEFAULTS[name] ?? 1;
-    const pipSize  = apiPipSize  ?? PIP_SIZE_DEFAULTS[name] ?? 0.0001;
+    const normName = name.replace(/\//g, "").replace(/\./g, "").toUpperCase().trim();
+    const defaultLotSize = LOT_SIZE_DEFAULTS[normName] ?? LOT_SIZE_DEFAULTS[name] ?? null;
+    const defaultPipSize = PIP_SIZE_DEFAULTS[normName] ?? PIP_SIZE_DEFAULTS[name] ?? null;
+    console.log(`[symbolMap] "${name}" norm="${normName}" apiLotSize=${apiLotSize} defaultLotSize=${defaultLotSize}`);
+
+    const lotSize  = apiLotSize  ?? defaultLotSize  ?? 1;
+    const pipSize  = apiPipSize  ?? defaultPipSize  ?? 0.0001;
     const pipValue = apiPipValue ?? null;
 
-    const lotSizeSrc  = apiLotSize  != null ? "api" : (LOT_SIZE_DEFAULTS[name]  != null ? "fallback" : "default");
-    const pipSizeSrc  = apiPipSize  != null ? "api" : (PIP_SIZE_DEFAULTS[name]  != null ? "fallback" : "default");
+    const lotSizeSrc  = apiLotSize  != null ? "api" : (defaultLotSize  != null ? "fallback" : "default");
+    const pipSizeSrc  = apiPipSize  != null ? "api" : (defaultPipSize  != null ? "fallback" : "default");
 
     const entry = {
       id,
@@ -2115,69 +2129,24 @@ async function syncCtraderForUser(uid) {
     );
   }
 
-  // ── 6. Batch write — merge by positionId, update only closing fields on existing docs ──
+  // ── 6. Batch write — always set+merge by positionId (preserves user-owned fields) ──
+  // merge:true means notes/screenshots/strategy/psychology written by the user are never
+  // overwritten; all broker-computed fields (including size, entry, exit, pnl) are always
+  // updated to the latest computed value, so stale data from earlier buggy imports is fixed.
   const BATCH_SIZE = 400;
   let written      = 0;
-  let updatedCount = 0;
 
-  // Load existing cTrader position docs (brokerTradeId + isOpen only)
-  const existingSnap = await tradesRef
-    .where("broker", "==", "ctrader")
-    .select("brokerTradeId", "isOpen")
-    .get();
-  const existingByPos = new Map();  // positionId → { ref, isOpen }
-  for (const doc of existingSnap.docs) {
-    const d = doc.data();
-    if (d.brokerTradeId) existingByPos.set(String(d.brokerTradeId), { ref: doc.ref, isOpen: d.isOpen });
-  }
-
-  const toWriteNew    = [];
-  const toWriteUpdate = [];
-
-  for (const trade of toProcess) {
-    const posId    = trade.brokerTradeId;
-    const docRef   = tradesRef.doc(`ctrader_${posId}`);
-    const existing = existingByPos.get(posId);
-
-    if (existing) {
-      if (!trade.isOpen && existing.isOpen !== false) {
-        // Position just closed — update only closing fields; never touch user-owned fields
-        toWriteUpdate.push({ ref: existing.ref, fields: {
-          exit:     trade.exit,
-          pnl:      trade.pnl,
-          exitTime: trade.exitTime,
-          isOpen:   false,
-          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }});
-      } else {
-        console.log(`cTrader uid=${uid} pos ${posId}: already in Firestore — no change`);
-      }
-    } else {
-      toWriteNew.push({ ref: docRef, trade });
-    }
-  }
-
-  for (let i = 0; i < toWriteNew.length; i += BATCH_SIZE) {
+  for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
     const batch = db.batch();
-    for (const { ref, trade } of toWriteNew.slice(i, i + BATCH_SIZE)) {
-      batch.set(ref, { ...trade, syncedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    for (const trade of toProcess.slice(i, i + BATCH_SIZE)) {
+      const docRef = tradesRef.doc(`ctrader_${trade.brokerTradeId}`);
+      batch.set(docRef, { ...trade, syncedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     }
     await batch.commit();
-    written += toWriteNew.slice(i, i + BATCH_SIZE).length;
+    written += toProcess.slice(i, i + BATCH_SIZE).length;
   }
 
-  for (let i = 0; i < toWriteUpdate.length; i += BATCH_SIZE) {
-    const batch = db.batch();
-    for (const { ref, fields } of toWriteUpdate.slice(i, i + BATCH_SIZE)) {
-      batch.set(ref, fields, { merge: true });
-    }
-    await batch.commit();
-    updatedCount += toWriteUpdate.slice(i, i + BATCH_SIZE).length;
-  }
-
-  console.log(
-    `cTrader uid=${uid}: new=${written} updated(closed)=${updatedCount} skipped=${skipped.length}`
-  );
+  console.log(`cTrader uid=${uid}: written/updated=${written} skipped=${skipped.length}`);
 
   // ── 7. Update broker metadata ─────────────────────────────────────────────────
   const durationMs      = Date.now() - syncStart;
@@ -2187,7 +2156,7 @@ async function syncCtraderForUser(uid) {
     {
       lastSyncTimestamp: admin.firestore.Timestamp.fromMillis(toTimestamp),
       lastSyncAt:        admin.firestore.FieldValue.serverTimestamp(),
-      lastSyncResult:    { saved: written + updatedCount, skipped: skipped.length, errors: 0, durationMs },
+      lastSyncResult:    { saved: written, skipped: skipped.length, errors: 0, durationMs },
       connectedSymbols,
     },
     { merge: true }
@@ -2197,14 +2166,14 @@ async function syncCtraderForUser(uid) {
   console.log(
     `cTrader uid=${uid} sync complete — ` +
     `fetched=${rawDeals.length} positions=${Object.keys(byPosition).length} ` +
-    `new=${written} updated=${updatedCount} skipped=${skipped.length} duration=${durationMs}ms`
+    `written=${written} skipped=${skipped.length} duration=${durationMs}ms`
   );
   console.log(`cTrader uid=${uid} symbol breakdown:`, JSON.stringify(symbolLog));
   if (skipped.length > 0) {
     console.log(`cTrader uid=${uid} skipped positions:`, JSON.stringify(skipped));
   }
 
-  return { saved: written + updatedCount, skipped: skipped.length, errors: [], durationMs, symbolLog };
+  return { saved: written, skipped: skipped.length, errors: [], durationMs, symbolLog };
 }
 
 // ─── Token input parser ───────────────────────────────────────────────────────
@@ -2579,22 +2548,6 @@ exports.syncCtraderHistory = functions
         symbolLog[symbolInfo.name] = (symbolLog[symbolInfo.name] ?? 0) + 1;
       }
 
-      // ── 8. Load existing position docs to skip/update correctly ─────────────
-      const existingSnap = await tradesRef
-        .where("broker", "==", "ctrader")
-        .select("brokerTradeId", "isOpen")
-        .get();
-      const existingByPos = new Map();
-      for (const doc of existingSnap.docs) {
-        const d = doc.data();
-        if (d.brokerTradeId) {
-          existingByPos.set(String(d.brokerTradeId), { ref: doc.ref, isOpen: d.isOpen });
-        }
-      }
-      console.log(
-        `syncCtraderHistory uid=${uid}: ${existingByPos.size} existing cTrader positions in Firestore`
-      );
-
       // Log sample trade document for diagnostics
       if (positionTrades.length > 0) {
         console.log(
@@ -2603,57 +2556,25 @@ exports.syncCtraderHistory = functions
         );
       }
 
-      // ── 9. Batch write — new positions full-set, closed transitions update-only ─
-      const BATCH_SIZE    = 400;
-      let written         = 0;
-      let updatedCount    = 0;
-      let skippedCount    = 0;
-      const toWriteNew    = [];
-      const toWriteUpdate = [];
+      // ── 8. Batch write — always set+merge by positionId ──────────────────────
+      // merge:true preserves user-owned fields (notes, screenshots, strategy, psychology)
+      // while always overwriting all broker-computed fields (including size, entry, exit,
+      // pnl) so stale data from earlier buggy imports is corrected on every sync.
+      const BATCH_SIZE = 400;
+      let written      = 0;
 
-      for (const trade of positionTrades) {
-        const posId    = trade.brokerTradeId;
-        const docRef   = tradesRef.doc(`ctrader_${posId}`);
-        const existing = existingByPos.get(posId);
-
-        if (existing) {
-          if (!trade.isOpen && existing.isOpen !== false) {
-            // Position closed since last import — update only closing fields
-            toWriteUpdate.push({ ref: existing.ref, fields: {
-              exit:        trade.exit,
-              pnl:         trade.pnl,
-              exitTime:    trade.exitTime,
-              isOpen:      false,
-              importedAt:  admin.firestore.FieldValue.serverTimestamp(),
-            }});
-          } else {
-            skippedCount++;
-          }
-        } else {
-          toWriteNew.push({ ref: docRef, trade });
-        }
-      }
-
-      for (let i = 0; i < toWriteNew.length; i += BATCH_SIZE) {
+      for (let i = 0; i < positionTrades.length; i += BATCH_SIZE) {
         const batch = db.batch();
-        for (const { ref, trade } of toWriteNew.slice(i, i + BATCH_SIZE)) {
-          batch.set(ref, { ...trade, importedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        for (const trade of positionTrades.slice(i, i + BATCH_SIZE)) {
+          const docRef = tradesRef.doc(`ctrader_${trade.brokerTradeId}`);
+          batch.set(docRef, { ...trade, importedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         }
         await batch.commit();
-        written += toWriteNew.slice(i, i + BATCH_SIZE).length;
+        written += positionTrades.slice(i, i + BATCH_SIZE).length;
         console.log(
           `syncCtraderHistory uid=${uid}: wrote batch ${Math.floor(i / BATCH_SIZE) + 1} ` +
-          `(${written} new so far)`
+          `(${written} positions so far)`
         );
-      }
-
-      for (let i = 0; i < toWriteUpdate.length; i += BATCH_SIZE) {
-        const batch = db.batch();
-        for (const { ref, fields } of toWriteUpdate.slice(i, i + BATCH_SIZE)) {
-          batch.set(ref, fields, { merge: true });
-        }
-        await batch.commit();
-        updatedCount += toWriteUpdate.slice(i, i + BATCH_SIZE).length;
       }
 
       if (Object.keys(symbolLog).length > 0) {
@@ -2664,7 +2585,7 @@ exports.syncCtraderHistory = functions
       await brokerRef.set(
         {
           lastHistoryImportAt:    admin.firestore.FieldValue.serverTimestamp(),
-          lastHistoryImportCount: written + updatedCount,
+          lastHistoryImportCount: written,
         },
         { merge: true }
       );
@@ -2673,23 +2594,20 @@ exports.syncCtraderHistory = functions
       console.log(
         `syncCtraderHistory uid=${uid}: COMPLETE — ` +
         `deals=${allDeals.length} positions=${Object.keys(byPosition).length} ` +
-        `new=${written} updated=${updatedCount} skipped=${skippedCount} ` +
-        `errors=${validationErrs.length} duration=${durationMs}ms`
+        `written=${written} errors=${validationErrs.length} duration=${durationMs}ms`
       );
 
       return res.status(200).json({
-        ok:           true,
-        total:        allDeals.length,
-        positions:    Object.keys(byPosition).length,
-        imported:     written,
-        updated:      updatedCount,
-        skipped:      skippedCount,
-        errors:       validationErrs.length,
+        ok:        true,
+        total:     allDeals.length,
+        positions: Object.keys(byPosition).length,
+        imported:  written,
+        errors:    validationErrs.length,
         symbolLog,
         durationMs,
-        note: written + updatedCount === 0
-          ? "No new positions to import — all already in Firestore or no deals found in the requested range."
-          : `${written} new position(s) imported, ${updatedCount} closed. ${skippedCount} already up-to-date.`,
+        note: written === 0
+          ? "No positions found in the requested range."
+          : `${written} position(s) written to Firestore.`,
       });
 
     } catch (err) {
