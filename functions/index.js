@@ -1567,7 +1567,8 @@ function sanitizeUserFields(fields) {
       ? fields.tags.filter((t) => typeof t === "string")
       : [],
     screenshots: Array.isArray(fields.screenshots)
-      ? fields.screenshots.filter((s) => typeof s === "string" && s.length < 900000)
+      ? fields.screenshots.filter((s) => s && typeof s === "object" && typeof s.src === "string" && s.src.length < 900000)
+          .map((s) => ({ src: s.src, name: s.name ?? "" }))
       : [],
     psychology: {
       preThought:    fields.psychology?.preThought    ?? null,

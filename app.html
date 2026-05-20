@@ -2712,17 +2712,15 @@ async function forceReimportZerodha(){
       }
     }
 
-    // STEP E — clear cache and force-reload fresh from server
-    trades = [];
+    // STEP E — clear localStorage cache then reload page for guaranteed clean state
     localStorage.removeItem(DataStore._tk());
-    await DataStore.loadFromFirestore({ forceServer: true });
-    await new Promise(r => setTimeout(r, 500));
-    refreshAll();
-    showToast(`Done! Imported ${data.saved} trade(s) from Zerodha`, 'success');
+    showToast(`Done! Imported ${data.saved} trade(s). Reloading…`, 'success');
+    await new Promise(r => setTimeout(r, 1500));
+    window.location.reload();
   } catch(e){
     showToast(`Zerodha re-import failed: ${e.message}`, 'error');
+    btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i> Force re-import';
   }
-  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i> Force re-import';
 }
 
 async function forceReimportCtrader(){
@@ -2786,17 +2784,15 @@ async function forceReimportCtrader(){
       }
     }
 
-    // STEP D — clear cache and force-reload fresh from server
-    trades = [];
+    // STEP D — clear localStorage cache then reload page for guaranteed clean state
     localStorage.removeItem(DataStore._tk());
-    await DataStore.loadFromFirestore({ forceServer: true });
-    await new Promise(r => setTimeout(r, 500));
-    refreshAll();
-    showToast(`Done! Deleted ${data.deleted} old, imported ${data.imported ?? 0} trade(s) from cTrader`, 'success');
+    showToast(`Done! Imported ${data.imported ?? 0} trade(s). Reloading…`, 'success');
+    await new Promise(r => setTimeout(r, 1500));
+    window.location.reload();
   } catch(e){
     showToast(`cTrader re-import failed: ${e.message}`, 'error');
+    btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i> Force re-import';
   }
-  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-arrow-rotate-left"></i> Force re-import';
 }
 
 async function checkCtraderStatus(){
