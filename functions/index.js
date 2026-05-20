@@ -1662,8 +1662,10 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
 
   // ── STEP 2: try multiple pnl field names ────────────────────────────────────
   const PNL_FIELDS = ["pnl", "grossPnl", "netPnl", "profit", "dealPnl", "realizedPnl", "grossProfit", "netProfit"];
+  // cTrader MCP returns all monetary values in account-currency cents (1/100 of USD).
+  // Divide by 100 here so every downstream calculation works in whole USD.
   const getDealPnl = (d) => {
-    for (const f of PNL_FIELDS) { if (d[f] != null) return Number(d[f]); }
+    for (const f of PNL_FIELDS) { if (d[f] != null) return Number(d[f]) / 100; }
     return null;
   };
 
@@ -1700,17 +1702,17 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
       ? parseFloat((weightedSum / totalExitVol).toFixed(8))
       : (getPrice(exitDeals[exitDeals.length - 1]) ?? null);
 
-    // Commission + swap from all deals in this position
-    const commission = deals.reduce((s, d) => s + (d.commission != null ? Number(d.commission) : 0), 0);
-    const swap       = deals.reduce((s, d) => s + (d.swap       != null ? Number(d.swap)       : 0), 0);
+    // Commission + swap — also in cents from the API, convert to USD
+    const commission = deals.reduce((s, d) => s + (d.commission != null ? Number(d.commission) / 100 : 0), 0);
+    const swap       = deals.reduce((s, d) => s + (d.swap       != null ? Number(d.swap)       / 100 : 0), 0);
 
     // Prefer API-provided pnl; compute from price diff as fallback
     const apiPnlVals = exitDeals.map((d) => getDealPnl(d)).filter((v) => v !== null);
     if (apiPnlVals.length > 0) {
-      pnl = parseFloat((apiPnlVals.reduce((s, v) => s + v, 0) + commission + swap).toFixed(8));
+      pnl = parseFloat((apiPnlVals.reduce((s, v) => s + v, 0) + commission + swap).toFixed(2));
     } else if (exit !== null) {
       const priceDiff = direction === "Long" ? exit - entry : entry - exit;
-      pnl = parseFloat(((priceDiff * entryVol) + commission + swap).toFixed(8));
+      pnl = parseFloat(((priceDiff * entryVol) + commission + swap).toFixed(2));
     }
 
     const latestExit = exitDeals[exitDeals.length - 1];
