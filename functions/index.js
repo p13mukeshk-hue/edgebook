@@ -1683,6 +1683,21 @@ function validateDeal(rawDeal) {
  * User-owned fields (strategy, emotion, notes, screenshots, psychology, tags)
  * are NOT included in the returned object — set(…, {merge:true}) preserves them.
  */
+function toISTTime(tsMs) {
+  if (!tsMs) return null;
+  const ms = Number(tsMs);
+  if (!Number.isFinite(ms)) return null;
+  const ist = new Date(ms + 5.5 * 60 * 60 * 1000);
+  return String(ist.getUTCHours()).padStart(2, "0") + ":" + String(ist.getUTCMinutes()).padStart(2, "0");
+}
+
+function toISTDate(tsMs) {
+  if (!tsMs) return null;
+  const ms = Number(tsMs);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
 function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const lotSize  = symbolInfo.lotSize  ?? null;
   const pipSize  = symbolInfo.pipSize  ?? null;
@@ -1717,8 +1732,8 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
   const direction      = tradeSideUpper === "BUY" ? "Long" : "Short";
 
   const entryTs   = Number(primaryEntry.executionTimestamp);
-  const date      = new Date(entryTs).toISOString().slice(0, 10);
-  const entryTime = new Date(entryTs).toISOString().slice(11, 16);
+  const date      = toISTDate(entryTs);
+  const entryTime = toISTTime(entryTs);
 
   // ── STEP 3: try multiple executionPrice field names ──────────────────────────
   const PRICE_FIELDS = ["executionPrice", "price", "dealPrice", "filledPrice", "closePrice"];
@@ -1784,7 +1799,7 @@ function buildPositionTrade(positionId, deals, symbolInfo, accountId) {
       : (getPrice(exitDeals[exitDeals.length - 1]) ?? null);
 
     const latestExit = exitDeals[exitDeals.length - 1];
-    exitTime = new Date(Number(latestExit.executionTimestamp)).toISOString().slice(11, 16);
+    exitTime = toISTTime(Number(latestExit.executionTimestamp));
 
     // Calculate P&L from price diff × size × lotSize (not the API pnl field).
     // This keeps P&L consistent with the displayed size regardless of how the
@@ -2072,7 +2087,7 @@ async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDet
 
     if (exitPrice == null) continue;
 
-    const exitTime = new Date(Number(lastExit.executionTimestamp)).toISOString().slice(11, 16);
+    const exitTime = toISTTime(Number(lastExit.executionTimestamp));
 
     // Reuse stored entry/size from Firestore — already correctly computed on import.
     const entry = openPosition.entry ?? 0;

@@ -3653,14 +3653,18 @@ function openTradeModal(id=null){
     ['t-entry','t-exit','t-size','t-sl','t-tp','t-time','t-strat','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('t-sym').value='';
     document.getElementById('t-asset').value=S.prefs.defaultAsset||'eq';
-    document.getElementById('t-date').value=todayIST();
-    document.getElementById('t-time').value=nowIST();
     if(activeAcctId!=='all') document.getElementById('t-account').value=activeAcctId;
     currentScreenshots=[];
     renderScreenshotPreviews();
     updateSymbolDropdown();
   }
   document.getElementById('trade-modal').classList.add('open');
+  // Auto-fill date/time AFTER modal is visible — browsers may silently
+  // ignore .value assignment on type="time" inputs inside display:none elements
+  if (!id) {
+    document.getElementById('t-date').value = todayIST();
+    document.getElementById('t-time').value = nowIST();
+  }
 }
 function openMoodModal(){ document.getElementById('mood-modal').classList.add('open'); }
 function closeModal(id){ document.getElementById(id).classList.remove('open'); }
