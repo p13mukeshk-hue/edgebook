@@ -2208,6 +2208,16 @@ function formatTime(t) {
   return h12 + ':' + String(m).padStart(2,'0') + ' ' + ampm;
 }
 
+function nowIST() {
+  const istMs = Date.now() + (5.5 * 60 * 60 * 1000);
+  const ist = new Date(istMs);
+  return String(ist.getUTCHours()).padStart(2,'0') + ':' + String(ist.getUTCMinutes()).padStart(2,'0');
+}
+
+function todayIST() {
+  return new Date(Date.now() + (5.5 * 60 * 60 * 1000)).toISOString().slice(0,10);
+}
+
 function fmtDate(d){ return formatDate(d); }
 
 /* ══════════════════════════════════════════════════════
@@ -3643,7 +3653,8 @@ function openTradeModal(id=null){
     ['t-entry','t-exit','t-size','t-sl','t-tp','t-time','t-strat','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('t-sym').value='';
     document.getElementById('t-asset').value=S.prefs.defaultAsset||'eq';
-    document.getElementById('t-date').value=TODAY;
+    document.getElementById('t-date').value=todayIST();
+    document.getElementById('t-time').value=nowIST();
     if(activeAcctId!=='all') document.getElementById('t-account').value=activeAcctId;
     currentScreenshots=[];
     renderScreenshotPreviews();
