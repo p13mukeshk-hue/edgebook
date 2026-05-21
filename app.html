@@ -1640,6 +1640,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                   <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
                     <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
                     <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
+                    <button class="btn-ghost" id="ctrader-refresh-btn" style="display:none" onclick="refreshOpenCtraderPositions()" title="Force 24h lookback to close open positions"><i class="fa-solid fa-rotate"></i> Refresh open</button>
                     <button class="btn-ghost" id="ctrader-history-btn" style="display:none" onclick="importCtraderHistory()" title="Import all historical deals from your cTrader account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
                     <button class="btn-ghost" id="ctrader-reimport-btn" style="display:none;color:var(--amber);border-color:rgba(245,166,35,0.3)" onclick="forceReimportCtrader()" title="Delete all cTrader trades and re-import fresh"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
                     <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
@@ -2172,6 +2173,19 @@ let activePageAcct={dashboard:'all',journal:'all',analytics:'all'};
 const cur  = ()=> S.prefs?.currency||'$';
 const rows = ()=> S.prefs?.rowsPerPage||25;
 
+// Screenshots can be stored as {src,name} objects or plain strings.
+function getThumbSrc(t){
+  const ss=t.screenshots;
+  if(!ss?.length) return null;
+  const first=ss[0];
+  if(first&&typeof first==='object') return first.src??null;
+  if(typeof first==='string') return first;
+  return null;
+}
+function getLightboxSrcs(t){
+  return (t.screenshots??[]).map(s=>typeof s==='object'?s.src:s).filter(Boolean);
+}
+
 function formatDate(d){
   if(!d) return '—';
   let s=d;
@@ -2578,6 +2592,26 @@ async function syncCtraderTrades(){
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sync now';
 }
 
+async function refreshOpenCtraderPositions(){
+  const token = await getIdToken(); if(!token) return;
+  const btn = document.getElementById('ctrader-refresh-btn');
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Refreshing…';
+  try{
+    const res = await fetch(`${CTRADER_FN}/syncCtraderTrades`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
+    await DataStore.loadFromFirestore();
+    showToast(`Open positions refreshed (${data.saved ?? 0} updated)`, 'success');
+    const ls = document.getElementById('ctrader-last-sync');
+    if(ls){ ls.textContent = `Last synced: ${new Date().toLocaleString('en-IN')}`; ls.style.display = 'block'; }
+  } catch(e){ showToast(`Refresh failed: ${e.message}`, 'error'); }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Refresh open';
+}
+
 async function disconnectCtrader(){
   if(!confirm('Disconnect cTrader? Auto-sync will stop.')) return;
   const token = await getIdToken(); if(!token) return;
@@ -2592,6 +2626,7 @@ function updateCtraderUI(connected){
   document.getElementById('ctrader-connect-btn').style.display     = connected ? 'none'        : 'inline-flex';
   document.getElementById('ctrader-disconnect-btn').style.display  = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-sync-btn').style.display        = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-refresh-btn').style.display     = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-history-btn').style.display     = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-reimport-btn').style.display    = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-status-badge').style.display    = connected ? 'inline-flex' : 'none';
@@ -4184,7 +4219,7 @@ function tradeRow(t){
     <td style="font-size:12px;color:var(--text3)">${t.strategy||'—'}</td>
     <td>${acctTagCell(t)}</td>
     <td>${sourceBadge(t)}</td>
-    <td>${t.screenshots&&t.screenshots.length?`<span class="ss-cell-thumb" onclick="openLightbox('${t.id}',0)" title="View ${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}"><img src="${t.screenshots[0].src}" alt="chart"></span>${t.screenshots.length>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${t.screenshots.length-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>'}</td>
+    <td>${(()=>{const src=getThumbSrc(t);return src?`<span class="ss-cell-thumb" onclick="openLightbox('${t.id}',0)" title="View ${t.screenshots.length} screenshot${t.screenshots.length>1?'s':''}"><img src="${src}" alt="chart"></span>${t.screenshots.length>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${t.screenshots.length-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>';})()}</td>
     <td>${pnlStr}</td>
     <td style="white-space:nowrap">
       <button class="action-btn" onclick="openTradeModal('${t.id}')" title="Edit"><i class="fa-solid fa-pen-to-square"></i></button>
@@ -4211,7 +4246,7 @@ function getBaseFilteredTrades(page, searchId, assetId, dirId, resultId){
   // Newest first: date DESC, then entryTime DESC within same day
   list.sort((a,b)=>{
     const dc=(b.date??'').localeCompare(a.date??'');
-    return dc!==0 ? dc : (b.entryTime??'').localeCompare(a.entryTime??'');
+    return dc!==0 ? dc : (b.entryTime??'99:99').localeCompare(a.entryTime??'99:99');
   });
   return list;
 }
@@ -5087,16 +5122,18 @@ function showLightboxImageDirect(){
 }
 function showLightboxImage(){
   const t = trades.find(x=>String(x.id)===String(lightboxTradeId)||String(x.brokerTradeId)===String(lightboxTradeId));
-  if(!t?.screenshots) return;
-  const ss = t.screenshots[lightboxIdx];
-  document.getElementById('lightbox-img').src = ss.src;
-  document.getElementById('lightbox-counter').textContent = `${lightboxIdx+1} / ${t.screenshots.length}`;
+  if(!t) return;
+  const srcs = getLightboxSrcs(t);
+  if(!srcs.length) return;
+  document.getElementById('lightbox-img').src = srcs[lightboxIdx] ?? srcs[0];
+  document.getElementById('lightbox-counter').textContent = `${lightboxIdx+1} / ${srcs.length}`;
 }
 function lightboxNav(dir){
   if(lightboxTradeId){
     const t=trades.find(x=>String(x.id)===String(lightboxTradeId)||String(x.brokerTradeId)===String(lightboxTradeId));
     if(!t) return;
-    lightboxIdx=(lightboxIdx+dir+t.screenshots.length)%t.screenshots.length;
+    const srcs=getLightboxSrcs(t);
+    lightboxIdx=(lightboxIdx+dir+srcs.length)%srcs.length;
     showLightboxImage();
   } else {
     lightboxIdx=(lightboxIdx+dir+currentScreenshots.length)%currentScreenshots.length;
@@ -5253,7 +5290,7 @@ function calSelectDay(d){
     ${ts.map(t=>{
       const ac=acctCur(t.accountId);
       const pnlStr=t.pnl===null?'<span style="color:var(--text3)">Open</span>':`<span style="color:${t.pnl>=0?'var(--green)':'var(--red)'};">${t.pnl>=0?'+':''}${ac}${t.pnl.toFixed(0)}</span>`;
-      const thumb=t.screenshots?.length?`<span class="ss-cell-thumb" onclick="openLightbox('${t.id}',0)" style="margin-right:6px"><img src="${t.screenshots[0].src}" alt="chart"></span>`:'';
+      const thumb=(()=>{const src=getThumbSrc(t);return src?`<span class="ss-cell-thumb" onclick="openLightbox('${t.id}',0)" style="margin-right:6px"><img src="${src}" alt="chart"></span>`:''})();
       return `<div class="cal-trade-row">
         <span>${thumb}<span style="font-weight:500">${t.symbol}</span><span style="font-size:10px;color:var(--text3);margin-left:6px">${t.instrument||ASSET_LABELS[t.asset]} · ${t.optionType||t.direction}</span></span>
         <span>${pnlStr}</span>

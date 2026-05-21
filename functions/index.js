@@ -1983,7 +1983,7 @@ async function refreshCtraderToken(uid, brokerRef, brokerData) {
   return newAccessToken;
 }
 
-async function syncCtraderForUser(uid) {
+async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   const syncStart = Date.now();
 
   // ── 1. Load broker state ────────────────────────────────────────────────────
@@ -2015,12 +2015,16 @@ async function syncCtraderForUser(uid) {
     }
   }
 
-  // Use lastSyncTimestamp for incremental sync; default to start of today (UTC)
+  // fromTimestamp: force=true → 24h ago; normal → lastSync minus 30min buffer to
+  // catch closing deals that fall just before the previous sync window.
   let fromTimestamp;
-  if (brokerData.lastSyncTimestamp) {
-    fromTimestamp = brokerData.lastSyncTimestamp.toMillis
+  if (forceRefresh) {
+    fromTimestamp = Date.now() - 24 * 60 * 60 * 1000;
+  } else if (brokerData.lastSyncTimestamp) {
+    const lastMs = brokerData.lastSyncTimestamp.toMillis
       ? brokerData.lastSyncTimestamp.toMillis()
       : Number(brokerData.lastSyncTimestamp);
+    fromTimestamp = lastMs - 30 * 60 * 1000; // 30-min overlap buffer
   } else {
     const todayUtc = new Date();
     todayUtc.setUTCHours(0, 0, 0, 0);
@@ -2548,7 +2552,8 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const result = await syncCtraderForUser(uid);
+    const forceRefresh = req.body?.force === true;
+    const result = await syncCtraderForUser(uid, { forceRefresh });
 
     const note = result.saved === 0
       ? "No new deals to save — all deals either already imported, outside trading hours, or no activity since last sync."
