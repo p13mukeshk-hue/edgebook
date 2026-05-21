@@ -856,6 +856,23 @@ exports.zerodhaPostback = functions.https.onRequest(async (req, res) => {
       return;
     }
 
+    // HMAC checksum verification
+    const apiSecret = process.env.ZERODHA_API_SECRET;
+    if (apiSecret && payload.checksum) {
+      const ts = payload.order_timestamp ?? '';
+      const expected = crypto.createHash('sha256')
+        .update(payload.order_id + ts + apiSecret)
+        .digest('hex');
+      if (payload.checksum !== expected) {
+        console.warn('zerodhaPostback: invalid checksum — possible forged request',
+          { user_id: payload.user_id, order_id: payload.order_id });
+        return;
+      }
+    }
+    if (!apiSecret) {
+      console.warn('zerodhaPostback: HMAC validation skipped — ZERODHA_API_SECRET not set');
+    }
+
     console.log(`zerodhaPostback: order ${payload.order_id} user ${payload.user_id} status ${payload.status}`);
 
     const snapshot = await db
@@ -2725,13 +2742,13 @@ exports.backfillCtraderTimes = functions
       const brokerRef = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
       const brokerSnap = await brokerRef.get();
       if (!brokerSnap.exists || !brokerSnap.data().connected) {
-        return res.json({ message: "cTrader not connected", updated: 0 });
+        return res.status(503).json({ message: "cTrader not connected", updated: 0 });
       }
 
       const brokerData = brokerSnap.data();
       let bearerToken;
       try { bearerToken = decrypt(brokerData.accessToken); } catch {
-        return res.json({ message: "Token unavailable", updated: 0 });
+        return res.status(503).json({ message: "Token unavailable", updated: 0 });
       }
 
       const sessionId = await initCtraderSession(bearerToken);
