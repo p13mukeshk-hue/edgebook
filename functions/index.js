@@ -2064,6 +2064,10 @@ async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDet
     return;
   }
   console.log(`cTrader reconcile uid=${uid}: ${allDeals.length} deal(s) in 7-day window`);
+  console.log(`cTrader reconcile uid=${uid}: open position brokerTradeIds:`,
+    openPositions.map(p => p.brokerTradeId));
+  console.log(`cTrader reconcile uid=${uid}: deal positionIds in window:`,
+    [...new Set(allDeals.map(d => d.positionId))]);
 
   // Reverse lookup: symbol name → symbolInfo (for P&L computation)
   const symbolDetailsByName = {};
@@ -2165,20 +2169,29 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
     }
   }
 
-  // fromTimestamp: force=true → 24h ago; normal → lastSync minus 30min buffer to
-  // catch closing deals that fall just before the previous sync window.
+  // fromTimestamp: force=true → 24h ago; normal → max(lastSync - 30min, 24h ago).
+  // Always using at least a 24h lookback prevents missed trades from sync gaps,
+  // brief lastSyncTimestamp corruption, or backfill operations shifting the anchor.
+  // Dedup (positionId matching) makes looking further back safe — no double-saves.
+  const oneDayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
   let fromTimestamp;
   if (forceRefresh) {
-    fromTimestamp = Date.now() - 24 * 60 * 60 * 1000;
+    fromTimestamp = oneDayAgoMs;
   } else if (brokerData.lastSyncTimestamp) {
     const lastMs = brokerData.lastSyncTimestamp.toMillis
       ? brokerData.lastSyncTimestamp.toMillis()
       : Number(brokerData.lastSyncTimestamp);
-    fromTimestamp = lastMs - 30 * 60 * 1000; // 30-min overlap buffer
+    const lastSyncWithBuffer = lastMs - 30 * 60 * 1000; // 30-min overlap buffer
+    // Use whichever is further in the past — never look back less than 24h
+    fromTimestamp = Math.min(lastSyncWithBuffer, oneDayAgoMs);
+    console.log(
+      `cTrader uid=${uid}: lastSyncTimestamp raw = ${new Date(lastMs).toISOString()}` +
+      ` | lastSyncWithBuffer = ${new Date(lastSyncWithBuffer).toISOString()}` +
+      ` | oneDayAgo = ${new Date(oneDayAgoMs).toISOString()}` +
+      ` | chosen fromTimestamp = ${new Date(fromTimestamp).toISOString()}`
+    );
   } else {
-    const todayUtc = new Date();
-    todayUtc.setUTCHours(0, 0, 0, 0);
-    fromTimestamp = todayUtc.getTime();
+    fromTimestamp = oneDayAgoMs;
   }
 
   const toTimestamp = Date.now();
