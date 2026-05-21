@@ -1933,7 +1933,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
 const ASSET_LABELS = {eq:'Equities',cx:'Crypto',fx:'Forex',cm:'Commodities',ix:'Index'};
 const ASSET_COLORS = {eq:'#4da6ff',cx:'#f5a623',fx:'#6c63ff',cm:'#e8954a',ix:'#22c987'};
 const ACCT_COLORS  = ['#6c63ff','#22c987','#ff5e6a','#f5a623','#4da6ff','#e879f9','#fb923c','#34d399'];
-const TODAY = new Date().toISOString().split('T')[0];
+const TODAY = new Date(Date.now() + 5.5*60*60*1000).toISOString().slice(0,10);
 
 /* ══════════════════════════════════════════════════════
    FX RATES — live rates via Frankfurter (api.frankfurter.dev)
@@ -2012,12 +2012,14 @@ const SettingsManager = {
   _key(){ return `tradedesk_settings_${this._uid}`; },
   _load(){ try{return JSON.parse(localStorage.getItem(this._key()));}catch{return null;} },
   _save(d){
-    try{localStorage.setItem(this._key(),JSON.stringify(d));return true;}catch{return false;}
-    // Sync to Firestore in background
-    if(window._firebaseReady&&this._uid!=='guest'){
-      window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),d)
-        .catch(e=>console.warn('Settings sync:',e));
+    try{ localStorage.setItem(this._key(), JSON.stringify(d)); } catch(e) {
+      console.warn('Settings localStorage write failed:', e);
     }
+    if(window._firebaseReady && this._uid !== 'guest'){
+      window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),d)
+        .catch(e=>console.warn('Settings Firestore sync:',e));
+    }
+    return true;
   },
   _clear(){ localStorage.removeItem(this._key()); },
   setUser(uid){ this._uid=uid||'guest'; },
@@ -2119,12 +2121,21 @@ function normaliseFsTrade(t){
     strategy:  t.strategy || '',
     emotion:   t.emotion || '',
     notes:     t.notes || '',
-    source:    t.source || 'zerodha',
+    source:    t.source || 'manual',
     sl:        t.sl ?? null,
     tp:        t.tp ?? null,
     accountId: t.accountId ?? null,
     instrument:t.instrument || '',
     screenshots: t.screenshots || [],
+    entryTime:   t.entryTime   || null,
+    exitTime:    t.exitTime    || null,
+    psychology:  t.psychology  || {},
+    brokerTradeId: t.brokerTradeId || null,
+    isOpen:    t.isOpen        ?? null,
+    optionType:t.optionType    || null,
+    strike:    t.strike        ?? null,
+    tags:      t.tags          || [],
+    custom:    t.custom        || {},
   };
 }
 
@@ -2148,7 +2159,7 @@ const DataStore = {
     if(this._uid==='guest'){ try{localStorage.setItem(this._tk(),JSON.stringify(t));}catch{} return; }
     this._syncTrades(t); // authenticated — persist to Firestore only
   },
-  _syncTrades(t){ if(!window._firebaseReady||this._uid==='guest') return; const batch=window._fbWriteBatch(window._fbDb); t.forEach(tr=>{ const ref=window._fbDoc(window._fbDb,'users',this._uid,'trades',String(tr.id)); batch.set(ref,tr); }); batch.commit().catch(e=>console.warn('Firestore sync:',e)); },
+  _syncTrades(t){ if(!window._firebaseReady||this._uid==='guest') return; const batch=window._fbWriteBatch(window._fbDb); t.forEach(tr=>{ const ref=window._fbDoc(window._fbDb,'users',this._uid,'trades',String(tr.id)); batch.set(ref,tr,{merge:true}); }); batch.commit().catch(e=>console.warn('Firestore sync:',e)); },
   clearTrades(){ if(this._uid==='guest'){ localStorage.removeItem(this._tk()); return; } if(window._firebaseReady){ window._fbGetDocs(window._fbCollection(window._fbDb,'users',this._uid,'trades')).then(snap=>{ const b=window._fbWriteBatch(window._fbDb); snap.docs.forEach(d=>b.delete(d.ref)); b.commit(); }); } },
   loadMoods(){ try{return JSON.parse(localStorage.getItem(this._mk()))||[];}catch{return[];} },
   saveMoods(m){ try{localStorage.setItem(this._mk(),JSON.stringify(m));}catch{} },
@@ -2309,6 +2320,25 @@ function bootApp(user){
     // Clean up any oversized trades cache left by older app versions
     localStorage.removeItem(DataStore._tk());
     S=SettingsManager.get(); trades=DataStore.loadTrades(); moods=DataStore.loadMoods();
+    // Load settings from Firestore and merge over localStorage copy
+    if(window._firebaseReady && DataStore._uid !== 'guest'){
+      try{
+        const settingsDoc = await window._fbGetDoc(
+          window._fbDoc(window._fbDb,'users',uid,'meta','settings'));
+        if(settingsDoc.exists()){
+          const remote = settingsDoc.data();
+          S = {...S, ...remote,
+            formFields:{...S.formFields,...(remote.formFields||{})},
+            widgets:{...S.widgets,...(remote.widgets||{})},
+            sidebarSections:{...S.sidebarSections,...(remote.sidebarSections||{})},
+            prefs:{...S.prefs,...(remote.prefs||{})},
+            customFields: remote.customFields||S.customFields,
+            accounts: remote.accounts||S.accounts,
+          };
+          localStorage.setItem(SettingsManager._key(), JSON.stringify(S));
+        }
+      }catch(e){ console.warn('Settings Firestore load failed:', e); }
+    }
     // Only seed sample data for guests or first-time users with no Firestore data yet
     const willLoadFromFirestore = window._firebaseReady && DataStore._uid !== 'guest';
     if(!trades.length && !afterReimport && !willLoadFromFirestore) seedSampleData();
@@ -3671,7 +3701,7 @@ function openTradeModal(id=null){
     document.getElementById('t-size').value=t.size;
     document.getElementById('t-sl').value=t.sl??'';
     document.getElementById('t-tp').value=t.tp??'';
-    document.getElementById('t-date').value=t.date||TODAY;
+    document.getElementById('t-date').value=t.date||todayIST();
     document.getElementById('t-time').value=t.entryTime||'';
     document.getElementById('t-strat').value=t.strategy||'';
     document.getElementById('t-emo').value=t.emotion||'😌 Calm';
@@ -4100,8 +4130,14 @@ function saveTrade(){
           tp:          trade.tp         ?? null,
           pnl:         trade.pnl        ?? null,
         }, { merge: true })
-          .catch(err => console.error('saveTrade Firestore write failed:', String(orig.id), err.message));
+          .catch(err => {
+            console.error('saveTrade Firestore write failed:', String(orig.id), err.message);
+            showToast('Trade saved locally but not synced — check connection','error');
+          });
       }
+    } else {
+      showToast('Trade not found — it may have been deleted','error');
+      return;
     }
   }
   else trades.unshift(trade);
@@ -4123,7 +4159,7 @@ function pickMoodEmoji(el,v){document.querySelectorAll('#mood-emoji-row .emoji-o
 function pickModalEmoji(el,v){document.querySelectorAll('#modal-emoji-row .emoji-opt').forEach(e=>e.classList.remove('selected'));el.classList.add('selected');modalEmoji=v;}
 function saveMoodEntry(){
   if(!moodEmoji){showToast('Select an emotion','error');return;}
-  moods.unshift({type:document.getElementById('mood-type-sel').value,emotion:moodEmoji,confidence:parseInt(document.getElementById('mood-conf').value)||null,notes:document.getElementById('mood-notes-inp').value,time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),date:TODAY});
+  moods.unshift({type:document.getElementById('mood-type-sel').value,emotion:moodEmoji,confidence:parseInt(document.getElementById('mood-conf').value)||null,notes:document.getElementById('mood-notes-inp').value,time:nowIST(),date:TODAY});
   DataStore.saveMoods(moods);
   document.getElementById('mood-conf').value=''; document.getElementById('mood-notes-inp').value='';
   moodEmoji=''; document.querySelectorAll('#mood-emoji-row .emoji-opt').forEach(e=>e.classList.remove('selected'));
@@ -4131,7 +4167,7 @@ function saveMoodEntry(){
 }
 function saveModalMood(){
   if(!modalEmoji){showToast('Select an emotion','error');return;}
-  moods.unshift({type:document.getElementById('mm-type').value,emotion:modalEmoji,confidence:parseInt(document.getElementById('mm-conf').value)||null,notes:document.getElementById('mm-notes').value,time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),date:TODAY});
+  moods.unshift({type:document.getElementById('mm-type').value,emotion:modalEmoji,confidence:parseInt(document.getElementById('mm-conf').value)||null,notes:document.getElementById('mm-notes').value,time:nowIST(),date:TODAY});
   DataStore.saveMoods(moods);
   modalEmoji=''; document.querySelectorAll('#modal-emoji-row .emoji-opt').forEach(e=>e.classList.remove('selected'));
   closeModal('mood-modal'); renderMoodHistory(); showToast('Mood saved','success');
@@ -4220,7 +4256,6 @@ function sourceBadge(t){
   return '<span class="badge badge-src-manual">Manual</span>';
 }
 function tradeRow(t){
-  console.log('[thumb]', t.symbol, t.source, 'screenshots:', t.screenshots?.length, 'thumbSrc:', getThumbSrc(t)?.slice(0,30));
   const c      = acctCur(t.accountId);
   const pnl    = (t.pnl !== undefined && t.pnl !== null) ? t.pnl : null;
   const sym    = (t.symbol  || '—').toUpperCase();
@@ -4290,7 +4325,7 @@ function getBaseFilteredTrades(page, searchId, assetId, dirId, resultId){
     if(df&&t.direction!==df) return false;
     if(rf==='win'&&!(t.pnl!==null&&t.pnl>0)) return false;
     if(rf==='loss'&&!(t.pnl!==null&&t.pnl<0)) return false;
-    if(rf==='open'&&t.pnl!==null) return false;
+    if(rf==='open'&&!(t.isOpen===true||(t.exit==null&&t.pnl===null))) return false;
     if(sq&&!((t.symbol||'').toLowerCase().includes(sq)||(t.notes||'').toLowerCase().includes(sq))) return false;
     return true;
   });
@@ -4306,8 +4341,8 @@ function applyQuickFilter(list, qf){
   return list.filter(t=>{
     if(qf==='Long')    return t.direction==='Long';
     if(qf==='Short')   return t.direction==='Short';
-    if(qf==='Open')    return t.isOpen===true||t.pnl===null;
-    if(qf==='Closed')  return t.isOpen===false||(t.exit!=null);
+    if(qf==='Open')    return t.isOpen===true||(t.exit==null&&t.pnl===null);
+    if(qf==='Closed')  return t.isOpen===false&&t.pnl!==null;
     if(qf==='Winners') return t.pnl!=null&&t.pnl>0;
     if(qf==='Losers')  return t.pnl!=null&&t.pnl<0;
     return true;
@@ -4329,8 +4364,8 @@ function renderQuickFilterPills(which, base, activeQf){
     '':base.length,
     'Long':   base.filter(t=>t.direction==='Long').length,
     'Short':  base.filter(t=>t.direction==='Short').length,
-    'Open':   base.filter(t=>t.isOpen===true||t.pnl===null).length,
-    'Closed': base.filter(t=>t.isOpen===false||(t.exit!=null)).length,
+    'Open':   base.filter(t=>t.isOpen===true||(t.exit==null&&t.pnl===null)).length,
+    'Closed': base.filter(t=>t.isOpen===false&&t.pnl!==null).length,
     'Winners':base.filter(t=>t.pnl!=null&&t.pnl>0).length,
     'Losers': base.filter(t=>t.pnl!=null&&t.pnl<0).length,
   };
