@@ -2126,10 +2126,18 @@ const DataStore = {
   async _fsSet(col,id,data){ try{ await window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,col,id),data); return true; }catch(e){ return false; } },
   async _fsDel(col,id){ try{ await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',this._uid,col,id)); return true; }catch(e){ return false; } },
   // Trades — try Firestore, fallback to localStorage
-  loadTrades(){ try{return JSON.parse(localStorage.getItem(this._tk()))||[];}catch{return[];} },
-  saveTrades(t){ try{localStorage.setItem(this._tk(),JSON.stringify(t));}catch{} this._syncTrades(t); },
+  // Authenticated users: Firestore is the sole persistent store — skip localStorage.
+  // Guests: localStorage only (no Firestore).
+  loadTrades(){
+    if(this._uid==='guest'){ try{return JSON.parse(localStorage.getItem(this._tk()))||[];}catch{return[];} }
+    return []; // authenticated — populated by loadFromFirestore()
+  },
+  saveTrades(t){
+    if(this._uid==='guest'){ try{localStorage.setItem(this._tk(),JSON.stringify(t));}catch{} return; }
+    this._syncTrades(t); // authenticated — persist to Firestore only
+  },
   _syncTrades(t){ if(!window._firebaseReady||this._uid==='guest') return; const batch=window._fbWriteBatch(window._fbDb); t.forEach(tr=>{ const ref=window._fbDoc(window._fbDb,'users',this._uid,'trades',String(tr.id)); batch.set(ref,tr); }); batch.commit().catch(e=>console.warn('Firestore sync:',e)); },
-  clearTrades(){ localStorage.removeItem(this._tk()); if(window._firebaseReady&&this._uid!=='guest'){ window._fbGetDocs(window._fbCollection(window._fbDb,'users',this._uid,'trades')).then(snap=>{ const b=window._fbWriteBatch(window._fbDb); snap.docs.forEach(d=>b.delete(d.ref)); b.commit(); }); } },
+  clearTrades(){ if(this._uid==='guest'){ localStorage.removeItem(this._tk()); return; } if(window._firebaseReady){ window._fbGetDocs(window._fbCollection(window._fbDb,'users',this._uid,'trades')).then(snap=>{ const b=window._fbWriteBatch(window._fbDb); snap.docs.forEach(d=>b.delete(d.ref)); b.commit(); }); } },
   loadMoods(){ try{return JSON.parse(localStorage.getItem(this._mk()))||[];}catch{return[];} },
   saveMoods(m){ try{localStorage.setItem(this._mk(),JSON.stringify(m));}catch{} },
   // Load trades from Firestore and merge with localStorage
@@ -2145,7 +2153,6 @@ const DataStore = {
       console.log('[loadFromFirestore] raw docs:', snap.size);
       const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null);
       console.log('[loadFromFirestore] after filter:', fsTrades.length, 'sample ids:', fsTrades.slice(0,3).map(t=>t.id));
-      localStorage.setItem(this._tk(),JSON.stringify(fsTrades));
       trades=fsTrades;
       refreshAll();
     }catch(e){
@@ -2266,8 +2273,12 @@ function bootApp(user){
     document.getElementById('app').classList.add('visible');
     const afterReimport = sessionStorage.getItem('post_reimport');
     if(afterReimport) sessionStorage.removeItem('post_reimport');
+    // Clean up any oversized trades cache left by older app versions
+    localStorage.removeItem(DataStore._tk());
     S=SettingsManager.get(); trades=DataStore.loadTrades(); moods=DataStore.loadMoods();
-    if(!trades.length && !afterReimport) seedSampleData();
+    // Only seed sample data for guests or first-time users with no Firestore data yet
+    const willLoadFromFirestore = window._firebaseReady && DataStore._uid !== 'guest';
+    if(!trades.length && !afterReimport && !willLoadFromFirestore) seedSampleData();
     FxRates.fetch();
     applyTheme(S.prefs.theme||'dark');
     applySidebarPin();
@@ -2571,8 +2582,7 @@ async function syncCtraderTrades(){
     if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
     const saveCount = data.saved ?? 0;
     if(saveCount > 0){
-      trades = DataStore.loadTrades();
-      refreshAll();
+      await DataStore.loadFromFirestore();
       showToast(`${saveCount} new trade(s) synced from cTrader`, 'success');
     } else {
       showToast(data.note || 'No new trades to sync', 'info');
@@ -2620,8 +2630,7 @@ async function importCtraderHistory(){
     const data = await res.json();
     if(!res.ok || data.error) throw new Error(data.error || 'Import failed');
     if(data.imported > 0){
-      trades = DataStore.loadTrades();
-      refreshAll();
+      await DataStore.loadFromFirestore();
       showToast(`Imported ${data.imported} trade(s) from cTrader history (${data.skipped} already existed)`, 'success');
     } else {
       showToast(data.note || 'No new trades found in history', 'info');
@@ -2907,8 +2916,7 @@ async function syncZerodhaTrades(){
     if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
     const tradeCount = data.synced?.trades ?? 0;
     if(tradeCount > 0){
-      trades=DataStore.loadTrades();
-      refreshAll();
+      await DataStore.loadFromFirestore();
       showToast(`${tradeCount} new trade(s) synced from Zerodha`,'success');
     } else {
       showToast(data.note || data.message || 'No new trades to sync','info');
