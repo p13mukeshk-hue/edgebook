@@ -2133,7 +2133,26 @@ const DataStore = {
   loadMoods(){ try{return JSON.parse(localStorage.getItem(this._mk()))||[];}catch{return[];} },
   saveMoods(m){ try{localStorage.setItem(this._mk(),JSON.stringify(m));}catch{} },
   // Load trades from Firestore and merge with localStorage
-  async loadFromFirestore(opts={}){ if(!window._firebaseReady||this._uid==='guest') return; try{ const col=window._fbCollection(window._fbDb,'users',this._uid,'trades'); const snap=opts.forceServer ? await window._fbGetDocsFromServer(col) : await window._fbGetDocs(col); const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null); localStorage.setItem(this._tk(),JSON.stringify(fsTrades)); trades=fsTrades; refreshAll(); }catch(e){ console.warn('Firestore load:',e); } },
+  async loadFromFirestore(opts={}){
+    if(!window._firebaseReady||this._uid==='guest'){
+      console.log('[loadFromFirestore] skipped — firebaseReady:', window._firebaseReady, 'uid:', this._uid);
+      return;
+    }
+    try{
+      console.log('[loadFromFirestore] uid:', this._uid, 'forceServer:', !!opts.forceServer);
+      const col=window._fbCollection(window._fbDb,'users',this._uid,'trades');
+      const snap=opts.forceServer ? await window._fbGetDocsFromServer(col) : await window._fbGetDocs(col);
+      console.log('[loadFromFirestore] raw docs:', snap.size);
+      const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null);
+      console.log('[loadFromFirestore] after filter:', fsTrades.length, 'sample ids:', fsTrades.slice(0,3).map(t=>t.id));
+      localStorage.setItem(this._tk(),JSON.stringify(fsTrades));
+      trades=fsTrades;
+      refreshAll();
+    }catch(e){
+      console.error('[loadFromFirestore] ERROR:', e.message, e);
+      showToast('Failed to load trades: '+e.message,'error');
+    }
+  },
 };
 
 /* ══════════════════════════════════════════════════════
@@ -2256,8 +2275,13 @@ function bootApp(user){
     const landing=S.prefs.landingPage||'dashboard';
     navigate(landing, document.getElementById('nav-'+landing)||document.getElementById('nav-dashboard'));
     refreshAll();
-    // After re-import, bypass Firestore cache to guarantee fresh data
-    DataStore.loadFromFirestore(afterReimport ? { forceServer: true } : {});
+    // After re-import: await the load so UI isn't empty when it resolves.
+    // Normal boot: fire-and-forget background update.
+    if(afterReimport){
+      await DataStore.loadFromFirestore({ forceServer: true });
+    } else {
+      DataStore.loadFromFirestore();
+    }
     // Handle Zerodha OAuth callback if returning from Zerodha login
     handleZerodhaCallback();
     // Check Zerodha connection status
