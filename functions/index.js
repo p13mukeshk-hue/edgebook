@@ -1983,6 +1983,124 @@ async function refreshCtraderToken(uid, brokerRef, brokerData) {
   return newAccessToken;
 }
 
+// ─── reconcileOpenPositions ───────────────────────────────────────────────────
+// Called at the end of every syncCtraderForUser run (both incremental and
+// force). Fetches the last 7 days of deals in a single API call and patches
+// any Firestore trade that is still marked isOpen=true but has a closing deal
+// in that window, using the same price/P&L logic as buildPositionTrade.
+async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails) {
+  const openSnap = await db
+    .collection("users").doc(uid)
+    .collection("trades")
+    .where("source", "==", "ctrader")
+    .where("isOpen", "==", true)
+    .get();
+
+  if (openSnap.empty) {
+    console.log(`cTrader reconcile uid=${uid}: no open positions — skipping`);
+    return;
+  }
+
+  const openPositions = openSnap.docs.map(d => ({
+    firestoreId: d.id,
+    ...d.data(),
+    positionId: d.data().brokerTradeId,
+  }));
+  console.log(`cTrader reconcile uid=${uid}: ${openPositions.length} open position(s) to check`);
+
+  // One 7-day deal fetch covers positions open over weekends or multi-day gaps.
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const nowIso = new Date().toISOString();
+
+  const dealsRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {
+    fromTimestamp: sevenDaysAgo,
+    toTimestamp: nowIso,
+  });
+
+  let allDeals;
+  if (Array.isArray(dealsRaw)) {
+    allDeals = dealsRaw;
+  } else if (dealsRaw && typeof dealsRaw === "object") {
+    const arrayKey = Object.keys(dealsRaw).find(k => Array.isArray(dealsRaw[k]));
+    allDeals = arrayKey ? dealsRaw[arrayKey] : [];
+  } else {
+    allDeals = [];
+  }
+
+  if (allDeals.length === 0) {
+    console.log(`cTrader reconcile uid=${uid}: no deals in 7-day window`);
+    return;
+  }
+  console.log(`cTrader reconcile uid=${uid}: ${allDeals.length} deal(s) in 7-day window`);
+
+  // Reverse lookup: symbol name → symbolInfo (for P&L computation)
+  const symbolDetailsByName = {};
+  for (const info of Object.values(symbolDetails)) {
+    if (info.name) symbolDetailsByName[info.name] = info;
+  }
+
+  const PRICE_FIELDS = ["executionPrice", "price", "dealPrice", "filledPrice", "closePrice"];
+  const getPrice = (d) => { for (const f of PRICE_FIELDS) { if (d[f] != null) return Number(d[f]); } return null; };
+
+  let closedCount = 0;
+
+  for (const openPosition of openPositions) {
+    const posId = String(openPosition.positionId);
+    const relatedDeals = allDeals
+      .filter(d => String(d.positionId) === posId)
+      .sort((a, b) => Number(a.executionTimestamp) - Number(b.executionTimestamp));
+
+    if (relatedDeals.length === 0) continue;
+
+    const entryDeal = relatedDeals[0];
+    const entryIsBuy = String(entryDeal.tradeSide ?? "BUY").toUpperCase() === "BUY";
+    const exitDeals = relatedDeals.filter(d => {
+      const side = String(d.tradeSide ?? "").toUpperCase();
+      return entryIsBuy ? side === "SELL" : side === "BUY";
+    });
+
+    if (exitDeals.length === 0) continue;
+
+    const lastExit = exitDeals[exitDeals.length - 1];
+
+    // Weighted-average exit price (same as buildPositionTrade)
+    const totalExitVol = exitDeals.reduce((s, d) => s + Number(d.filledVolume ?? d.volume ?? d.quantity ?? 0), 0);
+    const weightedSum = exitDeals.reduce((s, d) => s + (getPrice(d) ?? 0) * Number(d.filledVolume ?? d.volume ?? d.quantity ?? 0), 0);
+    const exitPrice = totalExitVol > 0
+      ? parseFloat((weightedSum / totalExitVol).toFixed(8))
+      : getPrice(lastExit);
+
+    if (exitPrice == null) continue;
+
+    const exitTime = new Date(Number(lastExit.executionTimestamp)).toISOString().slice(11, 16);
+
+    // Reuse stored entry/size from Firestore — already correctly computed on import.
+    const entry = openPosition.entry ?? 0;
+    const size = openPosition.size ?? 0;
+    const symbolInfo = symbolDetailsByName[openPosition.symbol] ?? {};
+    const lotSize = symbolInfo.lotSize ?? 1;
+
+    let pnl = null;
+    if (entry && size > 0) {
+      const priceDiff = openPosition.direction === "Long" ? exitPrice - entry : entry - exitPrice;
+      let rawPnl = priceDiff * size * lotSize;
+      if (getQuoteCurrency(openPosition.symbol) === "JPY" && exitPrice > 0) {
+        rawPnl = rawPnl / exitPrice;
+      }
+      pnl = parseFloat(rawPnl.toFixed(2));
+    }
+
+    const docRef = db.collection("users").doc(uid).collection("trades").doc(openPosition.firestoreId);
+    await docRef.set({ exit: exitPrice, pnl, isOpen: false, exitTime,
+      syncedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+    console.log(`cTrader reconcile uid=${uid}: closed position ${posId} exit=${exitPrice} pnl=${pnl}`);
+    closedCount++;
+  }
+
+  console.log(`cTrader reconcile uid=${uid}: auto-closed ${closedCount} of ${openPositions.length} open position(s)`);
+}
+
 async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   const syncStart = Date.now();
 
@@ -2111,6 +2229,7 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
       },
       { merge: true }
     );
+    await reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails);
     return { saved: 0, skipped: 0, errors: [], durationMs, symbolLog: {} };
   }
 
@@ -2260,6 +2379,8 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   if (skipped.length > 0) {
     console.log(`cTrader uid=${uid} skipped positions:`, JSON.stringify(skipped));
   }
+
+  await reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails);
 
   return { saved: written, skipped: skipped.length, errors: [], durationMs, symbolLog };
 }

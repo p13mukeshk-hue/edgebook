@@ -1640,7 +1640,6 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                   <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
                     <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
                     <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
-                    <button class="btn-ghost" id="ctrader-refresh-btn" style="display:none" onclick="refreshOpenCtraderPositions()" title="Force 24h lookback to close open positions"><i class="fa-solid fa-rotate"></i> Refresh open</button>
                     <button class="btn-ghost" id="ctrader-history-btn" style="display:none" onclick="importCtraderHistory()" title="Import all historical deals from your cTrader account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
                     <button class="btn-ghost" id="ctrader-reimport-btn" style="display:none;color:var(--amber);border-color:rgba(245,166,35,0.3)" onclick="forceReimportCtrader()" title="Delete all cTrader trades and re-import fresh"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
                     <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
@@ -2592,26 +2591,6 @@ async function syncCtraderTrades(){
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sync now';
 }
 
-async function refreshOpenCtraderPositions(){
-  const token = await getIdToken(); if(!token) return;
-  const btn = document.getElementById('ctrader-refresh-btn');
-  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Refreshing…';
-  try{
-    const res = await fetch(`${CTRADER_FN}/syncCtraderTrades`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force: true })
-    });
-    const data = await res.json();
-    if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
-    await DataStore.loadFromFirestore();
-    showToast(`Open positions refreshed (${data.saved ?? 0} updated)`, 'success');
-    const ls = document.getElementById('ctrader-last-sync');
-    if(ls){ ls.textContent = `Last synced: ${new Date().toLocaleString('en-IN')}`; ls.style.display = 'block'; }
-  } catch(e){ showToast(`Refresh failed: ${e.message}`, 'error'); }
-  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Refresh open';
-}
-
 async function disconnectCtrader(){
   if(!confirm('Disconnect cTrader? Auto-sync will stop.')) return;
   const token = await getIdToken(); if(!token) return;
@@ -2626,8 +2605,7 @@ function updateCtraderUI(connected){
   document.getElementById('ctrader-connect-btn').style.display     = connected ? 'none'        : 'inline-flex';
   document.getElementById('ctrader-disconnect-btn').style.display  = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-sync-btn').style.display        = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-refresh-btn').style.display     = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-history-btn').style.display     = connected ? 'inline-flex' : 'none';
+document.getElementById('ctrader-history-btn').style.display     = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-reimport-btn').style.display    = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-status-badge').style.display    = connected ? 'inline-flex' : 'none';
   document.getElementById('ctrader-last-sync').style.display       = connected ? 'block'       : 'none';
