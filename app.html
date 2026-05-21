@@ -1756,6 +1756,7 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
       </div>
       <div class="form-grid" style="margin-bottom:14px">
         <div class="field" id="tf-date"><label>Date</label><input id="t-date" type="date"></div>
+        <div class="field" id="tf-time"><label>Entry time</label><input id="t-time" type="time"></div>
         <div class="field" id="tf-strategy"><label>Strategy / Setup</label><input id="t-strat" placeholder="Breakout, Trend follow…"></div>
         <div id="custom-fields-trade" class="form-grid" style="display:contents"></div>
       </div>
@@ -2184,16 +2185,27 @@ function getLightboxSrcs(trade) {
   return (trade.screenshots ?? []).map(s => typeof s === 'object' ? s.src : s).filter(Boolean);
 }
 
-function formatDate(d){
-  if(!d) return '—';
-  let s=d;
-  if(d&&typeof d.toDate==='function') s=d.toDate().toISOString().slice(0,10);
-  if(d instanceof Date) s=d.toISOString().slice(0,10);
-  if(typeof s==='string'&&s.length>=10){
-    const yyyy=s.slice(0,4),mm=s.slice(5,7),dd=s.slice(8,10);
-    return dd+'/'+mm+'/'+yyyy.slice(2);
+function formatDate(d) {
+  if (!d) return '—';
+  let s = d;
+  if (d && typeof d.toDate === 'function') s = d.toDate().toISOString().slice(0,10);
+  if (d instanceof Date) s = d.toISOString().slice(0,10);
+  if (typeof s === 'string' && s.length >= 10) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const dd = parseInt(s.slice(8,10));
+    const mm = parseInt(s.slice(5,7)) - 1;
+    return dd + ' ' + months[mm];
   }
   return String(d);
+}
+
+function formatTime(t) {
+  if (!t) return '—';
+  const [h, m] = t.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return '—';
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return h12 + ':' + String(m).padStart(2,'0') + ' ' + ampm;
 }
 
 function fmtDate(d){ return formatDate(d); }
@@ -3608,6 +3620,7 @@ function openTradeModal(id=null){
     document.getElementById('t-sl').value=t.sl??'';
     document.getElementById('t-tp').value=t.tp??'';
     document.getElementById('t-date').value=t.date||TODAY;
+    document.getElementById('t-time').value=t.entryTime||'';
     document.getElementById('t-strat').value=t.strategy||'';
     document.getElementById('t-emo').value=t.emotion||'😌 Calm';
     document.getElementById('t-psych-prethought').value=t.psychology?.preThought||'';
@@ -3627,7 +3640,7 @@ function openTradeModal(id=null){
     currentScreenshots = t.screenshots ? [...t.screenshots] : [];
     renderScreenshotPreviews();
   } else {
-    ['t-entry','t-exit','t-size','t-sl','t-tp','t-strat','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
+    ['t-entry','t-exit','t-size','t-sl','t-tp','t-time','t-strat','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('t-sym').value='';
     document.getElementById('t-asset').value=S.prefs.defaultAsset||'eq';
     document.getElementById('t-date').value=TODAY;
@@ -3960,8 +3973,10 @@ function saveTrade(){
   const cfVals={};
   S.customFields.forEach(cf=>{ const el=document.getElementById('cf-v-'+cf.id); if(el) cfVals[cf.id]=cf.type==='checkbox'?el.checked:el.value; });
   const accountId=document.getElementById('t-account').value||null;
+  const entryTime = document.getElementById('t-time').value || null;
   const trade={
     id:editId||Date.now(), date,
+    entryTime,
     symbol:sym, asset,
     direction:dir, entry, exit, size,
     sl:parseFloat(document.getElementById('t-sl').value)||null,
@@ -4183,6 +4198,7 @@ function tradeRow(t){
 
   return `<tr>
     <td class="td-mono" style="color:var(--text3)">${fmtDate(date)}</td>
+    <td class="td-mono" style="color:var(--text3)">${formatTime(t.entryTime)}</td>
     <td style="font-weight:600">${symCell}</td>
     <td><span class="badge badge-${asset}">${ASSET_LABELS[asset]||asset}</span></td>
     <td>
@@ -4312,7 +4328,7 @@ function setJournalPage(p){
   renderFullJournal();
 }
 
-const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
+const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Time</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
 
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
