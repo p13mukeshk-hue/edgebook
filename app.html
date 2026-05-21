@@ -1621,12 +1621,18 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                     <span id="zerodha-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
                     <button class="btn-ghost" id="zerodha-sync-btn" style="display:none" onclick="syncZerodhaTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
                     <button class="btn-ghost" id="zerodha-history-btn" style="display:none" onclick="importZerodhaHistory()" title="Import historical trades from your Zerodha account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
-                    <button class="btn-ghost" id="zerodha-reimport-btn" style="display:none;color:var(--amber);border-color:rgba(245,166,35,0.3)" onclick="forceReimportZerodha()" title="Delete all Zerodha trades and re-import fresh"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
                     <button class="btn-accent" id="zerodha-connect-btn" onclick="connectZerodha()"><i class="fa-solid fa-link"></i> Connect</button>
                     <button class="btn-ghost" id="zerodha-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectZerodha()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
                   </div>
                 </div>
                 <div id="zerodha-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
+                <div id="zerodha-advanced-section" style="display:none;padding:4px 20px 12px">
+                  <button onclick="toggleAdvanced('zerodha-adv-body',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
+                  <div id="zerodha-adv-body" style="display:none;margin-top:8px;padding:12px;background:rgba(255,94,106,0.04);border:1px solid rgba(255,94,106,0.15);border-radius:8px">
+                    <button class="btn-danger" id="zerodha-reimport-btn" onclick="forceReimportZerodha()"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
+                    <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.5">⚠ Deletes all Zerodha trades and re-imports from scratch. Your notes and screenshots will be preserved but this cannot be undone.</div>
+                  </div>
+                </div>
 
                 <!-- cTrader row -->
                 <div class="s-row" id="ctrader-connect-row" style="margin-top:8px">
@@ -1641,12 +1647,18 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                     <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
                     <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
                     <button class="btn-ghost" id="ctrader-history-btn" style="display:none" onclick="importCtraderHistory()" title="Import all historical deals from your cTrader account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
-                    <button class="btn-ghost" id="ctrader-reimport-btn" style="display:none;color:var(--amber);border-color:rgba(245,166,35,0.3)" onclick="forceReimportCtrader()" title="Delete all cTrader trades and re-import fresh"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
                     <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
                     <button class="btn-ghost" id="ctrader-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectCtrader()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
                   </div>
                 </div>
                 <div id="ctrader-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
+                <div id="ctrader-advanced-section" style="display:none;padding:4px 20px 12px">
+                  <button onclick="toggleAdvanced('ctrader-adv-body',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
+                  <div id="ctrader-adv-body" style="display:none;margin-top:8px;padding:12px;background:rgba(255,94,106,0.04);border:1px solid rgba(255,94,106,0.15);border-radius:8px">
+                    <button class="btn-danger" id="ctrader-reimport-btn" onclick="forceReimportCtrader()"><i class="fa-solid fa-arrow-rotate-left"></i> Force re-import</button>
+                    <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.5">⚠ Deletes all cTrader trades and re-imports from scratch. Your notes and screenshots will be preserved but this cannot be undone.</div>
+                  </div>
+                </div>
               </div>
 
               <!-- cTrader token modal -->
@@ -2320,6 +2332,11 @@ function bootApp(user){
     setTimeout(checkZerodhaStatus, 1000);
     // Check cTrader connection status
     setTimeout(checkCtraderStatus, 1200);
+    // Auto-fix cTrader IST times once, silently in background
+    if (!localStorage.getItem('istTimesFixed_v1')) {
+      localStorage.setItem('istTimesFixed_v1', '1');
+      setTimeout(silentlyFixCtraderTimes, 3000);
+    }
     // Watch pendingDuplicates collection for banner + resolution UI
     listenPendingDuplicates(uid);
   },420);
@@ -2612,6 +2629,30 @@ async function syncCtraderTrades(){
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Sync now';
 }
 
+function toggleAdvanced(bodyId, btn) {
+  const body = document.getElementById(bodyId);
+  const open = body.style.display === 'block';
+  body.style.display = open ? 'none' : 'block';
+  const icon = btn.querySelector('i');
+  if (icon) { icon.className = open ? 'fa-solid fa-chevron-down' : 'fa-solid fa-chevron-up'; }
+}
+
+async function silentlyFixCtraderTimes() {
+  try {
+    const token = await getIdToken(); if (!token) return;
+    const res = await fetch(`${CTRADER_FN}/backfillCtraderTimes`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    console.log('IST backfill:', data.message);
+    if (data.updated > 0) {
+      await DataStore.loadFromFirestore({ forceServer: true });
+      refreshAll();
+    }
+  } catch(e) { console.warn('IST backfill failed silently:', e.message); }
+}
+
 async function disconnectCtrader(){
   if(!confirm('Disconnect cTrader? Auto-sync will stop.')) return;
   const token = await getIdToken(); if(!token) return;
@@ -2625,13 +2666,13 @@ async function disconnectCtrader(){
 function updateCtraderUI(connected){
   document.getElementById('ctrader-connect-btn').style.display     = connected ? 'none'        : 'inline-flex';
   document.getElementById('ctrader-disconnect-btn').style.display  = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-sync-btn').style.display        = connected ? 'inline-flex' : 'none';
-document.getElementById('ctrader-history-btn').style.display     = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-reimport-btn').style.display    = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-status-badge').style.display    = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-last-sync').style.display       = connected ? 'block'       : 'none';
+  document.getElementById('ctrader-sync-btn').style.display          = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-history-btn').style.display        = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-status-badge').style.display       = connected ? 'inline-flex' : 'none';
+  document.getElementById('ctrader-last-sync').style.display          = connected ? 'block'       : 'none';
+  document.getElementById('ctrader-advanced-section').style.display   = connected ? 'block'       : 'none';
   document.getElementById('ctrader-status-desc').textContent = connected
-    ? 'Trades sync automatically every 5 mins, 24/7'
+    ? 'Trades sync automatically every 5 mins, 24/7. Click Sync now for an immediate update.'
     : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
 }
 
@@ -2686,7 +2727,7 @@ async function importZerodhaHistory(){
 }
 
 async function forceReimportZerodha(){
-  if(!confirm('This will delete all Zerodha trades and re-import them fresh from your broker.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nContinue?')) return;
+  if(!confirm('⚠ Force re-import Zerodha?\n\nThis will DELETE all Zerodha trades and re-import everything from scratch.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nUse "Sync now" for regular updates. Only proceed if your data is corrupted.')) return;
   const idToken = await getIdToken(); if(!idToken) return;
   const uid = DataStore._uid;
   const btn = document.getElementById('zerodha-reimport-btn');
@@ -2780,7 +2821,7 @@ async function forceReimportZerodha(){
 }
 
 async function forceReimportCtrader(){
-  if(!confirm('This will delete all cTrader trades and re-import them fresh from your broker.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nContinue?')) return;
+  if(!confirm('⚠ Force re-import cTrader?\n\nThis will DELETE all cTrader trades and re-import everything from scratch.\n\nYour notes, screenshots and psychology entries will be preserved.\n\nUse "Sync now" for regular updates. Only proceed if your data is corrupted.')) return;
   const idToken = await getIdToken(); if(!idToken) return;
   const uid = DataStore._uid;
   const btn = document.getElementById('ctrader-reimport-btn');
@@ -2960,13 +3001,13 @@ async function disconnectZerodha(){
 function updateZerodhaUI(connected){
   document.getElementById('zerodha-connect-btn').style.display = connected?'none':'inline-flex';
   document.getElementById('zerodha-disconnect-btn').style.display = connected?'inline-flex':'none';
-  document.getElementById('zerodha-sync-btn').style.display = connected?'inline-flex':'none';
-  document.getElementById('zerodha-history-btn').style.display = connected?'inline-flex':'none';
-  document.getElementById('zerodha-reimport-btn').style.display = connected?'inline-flex':'none';
-  document.getElementById('zerodha-status-badge').style.display = connected?'inline-flex':'none';
-  document.getElementById('zerodha-last-sync').style.display = connected?'block':'none';
+  document.getElementById('zerodha-sync-btn').style.display          = connected?'inline-flex':'none';
+  document.getElementById('zerodha-history-btn').style.display        = connected?'inline-flex':'none';
+  document.getElementById('zerodha-status-badge').style.display       = connected?'inline-flex':'none';
+  document.getElementById('zerodha-last-sync').style.display          = connected?'block':'none';
+  document.getElementById('zerodha-advanced-section').style.display   = connected?'block':'none';
   document.getElementById('zerodha-status-desc').textContent = connected
-    ? 'Trades sync automatically every day at 6 PM IST'
+    ? 'Trades sync automatically during market hours (9:15am–3:30pm IST). Click Sync now for an immediate update.'
     : 'Connect your Zerodha account to auto-sync trades daily';
 }
 

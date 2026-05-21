@@ -2704,7 +2704,101 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
   }
 });
 
-// ─── 8b. forceReimportCtrader ────────────────────────────────────────────────
+// ─── 8b. backfillCtraderTimes ────────────────────────────────────────────────
+//
+// POST /backfillCtraderTimes
+// Runs once automatically after login (gated by localStorage flag).
+// Fetches 90 days of deals, finds matching Firestore trade docs, and
+// updates date/entryTime/exitTime to IST. Sets istFixed:true when done.
+
+exports.backfillCtraderTimes = functions
+  .runWith({ timeoutSeconds: 300, memory: "256MB" })
+  .https.onRequest(async (req, res) => {
+    setCors(req, res);
+    if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+    try {
+      const decoded = await verifyAuth(req);
+      const uid = decoded.uid;
+
+      const brokerRef = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+      const brokerSnap = await brokerRef.get();
+      if (!brokerSnap.exists || !brokerSnap.data().connected) {
+        return res.json({ message: "cTrader not connected", updated: 0 });
+      }
+
+      const brokerData = brokerSnap.data();
+      let bearerToken;
+      try { bearerToken = decrypt(brokerData.accessToken); } catch {
+        return res.json({ message: "Token unavailable", updated: 0 });
+      }
+
+      const sessionId = await initCtraderSession(bearerToken);
+      await getVerifiedSymbolMap(bearerToken, sessionId); // warm cache
+
+      const fromTs = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+      const toTs   = new Date().toISOString();
+      const dealsRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {
+        fromTimestamp: fromTs, toTimestamp: toTs,
+      });
+
+      let allDeals = [];
+      if (Array.isArray(dealsRaw)) { allDeals = dealsRaw; }
+      else if (dealsRaw && typeof dealsRaw === "object") {
+        const key = Object.keys(dealsRaw).find(k => Array.isArray(dealsRaw[k]));
+        if (key) allDeals = dealsRaw[key];
+      }
+
+      // Group by positionId
+      const byPosition = {};
+      for (const deal of allDeals) {
+        const pid = String(deal.positionId);
+        if (!byPosition[pid]) byPosition[pid] = [];
+        byPosition[pid].push(deal);
+      }
+
+      const tradesRef = db.collection("users").doc(uid).collection("trades");
+      let updated = 0;
+
+      for (const [positionId, deals] of Object.entries(byPosition)) {
+        const docRef = tradesRef.doc(`ctrader_${positionId}`);
+        const snap = await docRef.get();
+        if (!snap.exists) continue;
+
+        deals.sort((a, b) => Number(a.executionTimestamp) - Number(b.executionTimestamp));
+        const entryDeal  = deals[0];
+        const entryTs    = Number(entryDeal.executionTimestamp);
+        const entryIsBuy = String(entryDeal.tradeSide ?? "BUY").toUpperCase() === "BUY";
+
+        const exitDeals = deals.filter(d => {
+          const side = String(d.tradeSide ?? "").toUpperCase();
+          return entryIsBuy ? side === "SELL" : side === "BUY";
+        });
+
+        const patch = {
+          date:      toISTDate(entryTs),
+          entryTime: toISTTime(entryTs),
+          istFixed:  true,
+        };
+        if (exitDeals.length > 0) {
+          patch.exitTime = toISTTime(Number(exitDeals[exitDeals.length - 1].executionTimestamp));
+        }
+
+        await docRef.set(patch, { merge: true });
+        updated++;
+      }
+
+      console.log(`cTrader IST backfill uid=${uid}: ${updated} trade(s) updated`);
+      return res.json({ message: `IST backfill complete — ${updated} trade(s) updated`, updated });
+
+    } catch (err) {
+      console.error("backfillCtraderTimes error:", err);
+      return res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+// ─── 8c. forceReimportCtrader ────────────────────────────────────────────────
 //
 // POST /forceReimportCtrader
 // Server-side full reset + reimport in one call:
