@@ -2245,8 +2245,10 @@ function bootApp(user){
   setTimeout(async ()=>{
     ls.style.display='none';
     document.getElementById('app').classList.add('visible');
+    const afterReimport = sessionStorage.getItem('post_reimport');
+    if(afterReimport) sessionStorage.removeItem('post_reimport');
     S=SettingsManager.get(); trades=DataStore.loadTrades(); moods=DataStore.loadMoods();
-    if(!trades.length) seedSampleData();
+    if(!trades.length && !afterReimport) seedSampleData();
     FxRates.fetch();
     applyTheme(S.prefs.theme||'dark');
     applySidebarPin();
@@ -2254,8 +2256,8 @@ function bootApp(user){
     const landing=S.prefs.landingPage||'dashboard';
     navigate(landing, document.getElementById('nav-'+landing)||document.getElementById('nav-dashboard'));
     refreshAll();
-    // Load from Firestore in background — will update UI if cloud has more data
-    DataStore.loadFromFirestore();
+    // After re-import, bypass Firestore cache to guarantee fresh data
+    DataStore.loadFromFirestore(afterReimport ? { forceServer: true } : {});
     // Handle Zerodha OAuth callback if returning from Zerodha login
     handleZerodhaCallback();
     // Check Zerodha connection status
@@ -2712,7 +2714,9 @@ async function forceReimportZerodha(){
       }
     }
 
-    // STEP E — clear localStorage cache then reload page for guaranteed clean state
+    // STEP E — clear localStorage cache then reload page for guaranteed clean state.
+    // Set flag so bootApp skips seedSampleData and forces a server fetch from Firestore.
+    sessionStorage.setItem('post_reimport', '1');
     localStorage.removeItem(DataStore._tk());
     showToast(`Done! Imported ${data.saved} trade(s). Reloading…`, 'success');
     await new Promise(r => setTimeout(r, 1500));
@@ -2784,7 +2788,9 @@ async function forceReimportCtrader(){
       }
     }
 
-    // STEP D — clear localStorage cache then reload page for guaranteed clean state
+    // STEP D — clear localStorage cache then reload page for guaranteed clean state.
+    // Set flag so bootApp skips seedSampleData and forces a server fetch from Firestore.
+    sessionStorage.setItem('post_reimport', '1');
     localStorage.removeItem(DataStore._tk());
     showToast(`Done! Imported ${data.imported ?? 0} trade(s). Reloading…`, 'success');
     await new Promise(r => setTimeout(r, 1500));
