@@ -2635,6 +2635,7 @@ function toggleAdvanced(bodyId, btn) {
   body.style.display = open ? 'none' : 'block';
   const icon = btn.querySelector('i');
   if (icon) { icon.className = open ? 'fa-solid fa-chevron-down' : 'fa-solid fa-chevron-up'; }
+  if (!open) { setTimeout(() => body.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50); }
 }
 
 async function silentlyFixCtraderTimes() {
@@ -3996,7 +3997,7 @@ function validateTrade(sym, entry, exit, size, date, dir){
   else {
     const d=new Date(date);
     if(isNaN(d.getTime()))   errors.push('Date is invalid');
-    else if(d>new Date())    errors.push('Date cannot be in the future');
+    else if(date > todayIST()) errors.push('Date cannot be in the future');
   }
   if(exit!==null && entry>0 && exit>0){
     // warn if exit === entry (breakeven is fine, just flag suspicious same price)
