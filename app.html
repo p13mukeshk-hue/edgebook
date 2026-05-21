@@ -2083,7 +2083,6 @@ const SettingsManager = {
 // `tradingsymbol` / `average_price` / `fill_timestamp` instead of the app fields.
 function normaliseFsTrade(t){
   if(t.symbol && t.entry != null){
-    if(t.source==='ctrader') console.log('[cTrader]', t.symbol, 'entry:', t.entry, 'exit:', t.exit, 'pnl:', t.pnl, 'isOpen:', t.isOpen);
     return t; // already normalised
   }
   const sym  = t.tradingsymbol || t.symbol || '';
@@ -2142,21 +2141,15 @@ const DataStore = {
   saveMoods(m){ try{localStorage.setItem(this._mk(),JSON.stringify(m));}catch{} },
   // Load trades from Firestore and merge with localStorage
   async loadFromFirestore(opts={}){
-    if(!window._firebaseReady||this._uid==='guest'){
-      console.log('[loadFromFirestore] skipped — firebaseReady:', window._firebaseReady, 'uid:', this._uid);
-      return;
-    }
+    if(!window._firebaseReady||this._uid==='guest') return;
     try{
-      console.log('[loadFromFirestore] uid:', this._uid, 'forceServer:', !!opts.forceServer);
       const col=window._fbCollection(window._fbDb,'users',this._uid,'trades');
       const snap=opts.forceServer ? await window._fbGetDocsFromServer(col) : await window._fbGetDocs(col);
-      console.log('[loadFromFirestore] raw docs:', snap.size);
       const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null);
-      console.log('[loadFromFirestore] after filter:', fsTrades.length, 'sample ids:', fsTrades.slice(0,3).map(t=>t.id));
       trades=fsTrades;
       refreshAll();
     }catch(e){
-      console.error('[loadFromFirestore] ERROR:', e.message, e);
+      console.error('Firestore load error:', e.message);
       showToast('Failed to load trades: '+e.message,'error');
     }
   },
@@ -2202,14 +2195,10 @@ document.getElementById('topbar-sub').textContent =
 const GOOGLE_BTN_HTML = `<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg> Continue with Google`;
 
 async function doGoogleLogin(){
-  console.log('[Auth] doGoogleLogin called');
   const btn=document.getElementById('google-login-btn');
   const errEl=document.getElementById('login-error');
 
-  // Guard: button is only enabled after firebase-ready fires, so this shouldn't
-  // happen — but log it clearly if it somehow does
   if(!window._firebaseReady || !window._fbSignInWithPopup){
-    console.error('[Auth] Firebase not ready when button clicked — this should not happen');
     errEl.textContent='Firebase not ready. Please refresh and try again.';
     errEl.style.display='block';
     return;
@@ -2219,13 +2208,11 @@ async function doGoogleLogin(){
   btn.innerHTML=`<svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 01-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 009 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 013.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 000 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 00.957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/></svg> Signing in…`;
   errEl.style.display='none';
 
-  console.log('[Auth] Calling signInWithPopup — auth:', !!window._fbAuth, 'provider:', !!window._fbProvider);
   try{
     const result=await window._fbSignInWithPopup(window._fbAuth, window._fbProvider);
-    console.log('[Auth] Sign-in successful:', result.user.email);
     bootApp(result.user);
   }catch(e){
-    console.error('[Auth] Sign-in error — code:', e.code, 'message:', e.message);
+    console.error('Sign-in error:', e.code, e.message);
     btn.disabled=false;
     btn.innerHTML=GOOGLE_BTN_HTML;
 
@@ -2306,13 +2293,11 @@ function bootApp(user){
 
 // Enable login button and auto sign-in once Firebase modules have loaded
 document.addEventListener('firebase-ready',()=>{
-  console.log('[Auth] Firebase ready — enabling Google sign-in button');
   const btn = document.getElementById('google-login-btn');
   if(btn){ btn.disabled=false; btn.style.opacity=''; btn.style.cursor=''; }
 
   window._fbOnAuthStateChanged(window._fbAuth, user=>{
     if(user && document.getElementById('login-screen').style.display!=='none'){
-      console.log('[Auth] Existing session detected, booting app for', user.email);
       bootApp(user);
     }
   });
@@ -2781,7 +2766,6 @@ async function forceReimportCtrader(){
       }
       if(hasData) preserved[t.id] = saved;
     }
-    console.log('[forceReimportCtrader] preserved user fields for', Object.keys(preserved).length, 'trade(s)');
 
     // STEP B — single server-side call: deletes all ctrader_ docs then re-imports full history
     // (server also does its own preservation as a safety net)
@@ -3584,7 +3568,6 @@ function showSPanel(id,el){
    MODALS
 ══════════════════════════════════════════════════════ */
 function openTradeModal(id=null){
-  console.log('[openTradeModal] called with id:', id);
   editId=id;
   document.getElementById('trade-modal-title').textContent=id?'Edit trade':'Log a trade';
   document.getElementById('t-edit-id').value=id||'';
@@ -3592,11 +3575,10 @@ function openTradeModal(id=null){
   if(id){
     const t=trades.find(x=>String(x.id)===String(id)||String(x.brokerTradeId)===String(id));
     if(!t){
-      console.error('[openTradeModal] not found:', id, 'total trades:', trades.length, 'sample ids:', trades.slice(0,3).map(x=>x.id));
+      console.error('openTradeModal: trade not found — id:', id, 'total trades:', trades.length);
       showToast('Please refresh the page and try again','error');
       return;
     }
-    console.log('[edit] opening trade:', t.symbol, t.source, t.id);
     document.getElementById('t-asset').value=t.asset;
     // Build dropdown for this asset class first
     updateSymbolDropdown();
@@ -4034,8 +4016,7 @@ function saveTrade(){
           tp:          trade.tp         ?? null,
           pnl:         trade.pnl        ?? null,
         }, { merge: true })
-          .then(()  => console.log('[saveTrade] Firestore updated:', String(orig.id), 'notes:', trade.notes))
-          .catch(err => console.error('[saveTrade] Firestore write failed:', String(orig.id), err.message));
+          .catch(err => console.error('saveTrade Firestore write failed:', String(orig.id), err.message));
       }
     }
   }
@@ -4164,7 +4145,6 @@ function tradeRow(t){
   const exit   = t.exit     != null ? Number(t.exit)   : null;
   const size   = t.size     != null ? t.size : '—';
   const date   = t.date     || '—';
-  console.log('[date]', t.date, '→', formatDate(t.date));
 
   const bd       = pnlBreakdown(t);
   const futSpec  = FUTURES_SPECS[sym];
@@ -4329,8 +4309,6 @@ function renderTradeTable(){
   const filtered=applyQuickFilter(base,dashQuickFilter);
   const wrap=document.getElementById('trade-table-wrap');
   renderQuickFilterPills('dash',base,dashQuickFilter);
-  console.log('[renderTradeTable] total:',trades.length,'| filtered:',filtered.length,
-    '| cTrader in view:',filtered.filter(t=>t.source==='ctrader').length,'| page:',dashPage);
   if(!filtered.length){
     wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-table-list"></i><p>No trades match.</p></div>';
     document.getElementById('dash-pagination').innerHTML='';
@@ -5090,9 +5068,8 @@ function handleDrop(e){
 
 function openLightbox(tradeId, startIdx){
   const t = trades.find(x=>String(x.id)===String(tradeId)||String(x.brokerTradeId)===String(tradeId));
-  console.log('[lightbox] id:', tradeId, 'trade found:', !!t, 'screenshots:', t?.screenshots?.length);
   if(!t || !t.screenshots?.length){
-    console.error('[lightbox] no screenshots for:', tradeId);
+    console.error('openLightbox: no screenshots for trade:', tradeId);
     showToast('No screenshots found','error');
     return;
   }
