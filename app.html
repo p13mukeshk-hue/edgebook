@@ -2173,16 +2173,15 @@ const cur  = ()=> S.prefs?.currency||'$';
 const rows = ()=> S.prefs?.rowsPerPage||25;
 
 // Screenshots can be stored as {src,name} objects or plain strings.
-function getThumbSrc(t){
-  const ss=t.screenshots;
-  if(!ss?.length) return null;
-  const first=ss[0];
-  if(first&&typeof first==='object') return first.src??null;
-  if(typeof first==='string') return first;
+function getThumbSrc(trade) {
+  if (!trade.screenshots?.length) return null;
+  const first = trade.screenshots[0];
+  if (first && typeof first === 'object' && first.src) return first.src;
+  if (typeof first === 'string') return first;
   return null;
 }
-function getLightboxSrcs(t){
-  return (t.screenshots??[]).map(s=>typeof s==='object'?s.src:s).filter(Boolean);
+function getLightboxSrcs(trade) {
+  return (trade.screenshots ?? []).map(s => typeof s === 'object' ? s.src : s).filter(Boolean);
 }
 
 function formatDate(d){
@@ -4149,6 +4148,7 @@ function sourceBadge(t){
   return '<span class="badge badge-src-manual">Manual</span>';
 }
 function tradeRow(t){
+  console.log('[thumb]', t.symbol, t.source, 'screenshots:', t.screenshots?.length, 'thumbSrc:', getThumbSrc(t)?.slice(0,30));
   const c      = acctCur(t.accountId);
   const pnl    = (t.pnl !== undefined && t.pnl !== null) ? t.pnl : null;
   const sym    = (t.symbol  || '—').toUpperCase();
@@ -5081,11 +5081,9 @@ function handleDrop(e){
 
 function openLightbox(tradeId, startIdx){
   const t = trades.find(x=>String(x.id)===String(tradeId)||String(x.brokerTradeId)===String(tradeId));
-  if(!t || !t.screenshots?.length){
-    console.error('openLightbox: no screenshots for trade:', tradeId);
-    showToast('No screenshots found','error');
-    return;
-  }
+  if(!t){ showToast('No screenshots found','info'); return; }
+  const srcs = getLightboxSrcs(t);
+  if(!srcs.length){ showToast('No screenshots found','info'); return; }
   lightboxTradeId = tradeId;
   lightboxIdx = startIdx||0;
   showLightboxImage();
@@ -5543,9 +5541,9 @@ function renderHmInsert(t, container){
   const ssCount = t.screenshots?.length||0;
 
   const ssGrid = ssCount
-    ? t.screenshots.map((ss,i)=>`
+    ? getLightboxSrcs(t).map((src,i)=>`
         <div class="hm-ins-ss-thumb" onclick="openLightbox('${t.id}',${i})">
-          <img src="${ss.src}" alt="chart ${i+1}">
+          <img src="${src}" alt="chart ${i+1}">
           <div class="hm-ins-ss-ov"><i class="fa-solid fa-maximize"></i></div>
         </div>`).join('')
     : '';
