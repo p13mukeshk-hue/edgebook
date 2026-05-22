@@ -3,35 +3,35 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ── Deny everything by default ──────────────────────────────────────────
+    // Deny everything by default
     // No rule below? Access denied. Unauthenticated callers are rejected at
     // every match because every leaf rule requires request.auth != null.
 
-    // ── User root document ───────────────────────────────────────────────────
+    // User root document
     // users/{userId}  — profile, settings, preferences
     match /users/{userId} {
       allow read, write: if isOwner(userId);
 
-      // ── Broker credentials ─────────────────────────────────────────────────
+      // Broker credentials
       // users/{userId}/brokers/{broker}
       // Contains encrypted access tokens — strictly owner-only.
       match /brokers/{broker} {
         allow read, write: if isOwner(userId);
       }
 
-      // ── Trades ────────────────────────────────────────────────────────────
+      // Trades
       // users/{userId}/trades/{tradeId}
       match /trades/{tradeId} {
         allow read, write: if isOwner(userId);
       }
 
-      // ── Orders ────────────────────────────────────────────────────────────
+      // Orders
       // users/{userId}/orders/{orderId}
       match /orders/{orderId} {
         allow read, write: if isOwner(userId);
       }
 
-      // ── Pending duplicates ────────────────────────────────────────────────
+      // Pending duplicates
       // users/{userId}/pendingDuplicates/{docId}
       // Written by Cloud Function; client reads and deletes after resolution.
       match /pendingDuplicates/{docId} {
@@ -39,7 +39,7 @@ service cloud.firestore {
         allow write: if false; // Cloud Function (Admin SDK) only
       }
 
-      // ── Order updates (real-time postbacks) ───────────────────────────────
+      // Order updates (real-time postbacks)
       // users/{userId}/orderUpdates/{updateId}
       // Written by the Cloud Function (Admin SDK bypasses rules).
       // Client may read but never write directly.
@@ -47,22 +47,30 @@ service cloud.firestore {
         allow read:  if isOwner(userId);
         allow write: if false; // Cloud Function (Admin SDK) only
       }
+
+      // Notifications
+      // users/{userId}/notifications/{notifId}
+      // Written by client (frontend-triggered) and Cloud Functions (sync events).
+      // Client may read, create, and update (e.g. marking read).
+      match /notifications/{notifId} {
+        allow read, write: if isOwner(userId);
+      }
     }
 
-    // ── Pending auth state (Zerodha OAuth flow) ───────────────────────────
+    // Pending auth state (Zerodha OAuth flow)
     // pendingAuth/{stateToken} — written by Cloud Function, never by clients
     match /pendingAuth/{stateToken} {
       allow read, write: if false; // Cloud Function (Admin SDK) only
     }
 
-    // ── System / shared cache ─────────────────────────────────────────────
+    // System / shared cache
     // system/{doc} — e.g. system/ctrader symbol cache, written by Cloud Functions
     match /system/{doc} {
       allow read: if request.auth != null;
       allow write: if false; // Cloud Function (Admin SDK) only
     }
 
-    // ── Helper function ───────────────────────────────────────────────────
+    // Helper function
     // Authenticated AND the document path belongs to the calling user.
     function isOwner(userId) {
       return request.auth != null && request.auth.uid == userId;
