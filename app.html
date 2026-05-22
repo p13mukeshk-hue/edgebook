@@ -13,7 +13,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, getDocsFromServer, deleteDoc, writeBatch, query, where, onSnapshot, addDoc, orderBy, limit } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-storage.js';
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-storage.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
@@ -56,6 +56,7 @@ window._fbStorage = storage;
 window._fbStorageRef = storageRef;
 window._fbUploadBytes = uploadBytes;
 window._fbGetDownloadURL = getDownloadURL;
+window._fbDeleteObject = deleteObject;
 window._firebaseReady = true;
 document.dispatchEvent(new Event('firebase-ready'));
 </script>
@@ -4618,11 +4619,30 @@ async function restoreAllTrades(){
   });
 }
 
+async function deleteTradeScreenshots(trade){
+  if(!trade?.screenshots?.length) return;
+  if(!window._fbStorage||!window._fbStorageRef||!window._fbDeleteObject) return;
+  for(const ss of trade.screenshots){
+    // Only delete Storage objects (https:// URLs) — skip base64 strings
+    if(typeof ss?.src === 'string' && ss.src.startsWith('https://')){
+      try{
+        const fileRef = window._fbStorageRef(window._fbStorage, ss.src);
+        await window._fbDeleteObject(fileRef);
+      }catch(e){
+        console.warn('Storage delete skipped:', e.message); // already deleted or not found
+      }
+    }
+  }
+}
+
 async function permanentDeleteTrade(id){
   const uid=window._fbAuth?.currentUser?.uid;
   if(!uid)return;
   showConfirm('Permanently delete trade?','This cannot be undone. The trade will be gone forever.',async()=>{
     try{
+      const trade=_deletedTrades.find(t=>String(t.id)===String(id));
+      // Delete Storage screenshots first, then the Firestore doc
+      await deleteTradeScreenshots(trade);
       const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(id));
       await window._fbDeleteDoc(ref);
       _deletedTrades=_deletedTrades.filter(t=>String(t.id)!==String(id));
