@@ -7,6 +7,7 @@ const crypto = require("crypto");
 
 admin.initializeApp();
 const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true }); // safety net: never throw on undefined fields
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -2433,7 +2434,7 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
       const preservedAccountId = existingAccountIdMap.get(docId);
       batch.set(docRef, {
         ...trade,
-        accountId: preservedAccountId ?? trade.accountId,
+        accountId: preservedAccountId ?? trade.accountId ?? null,
         syncedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     }
