@@ -13,6 +13,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, getDocsFromServer, deleteDoc, writeBatch, query, where, onSnapshot, addDoc, orderBy, limit } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-storage.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
@@ -50,6 +51,11 @@ window._fbOnSnapshot = onSnapshot;
 window._fbAddDoc = addDoc;
 window._fbOrderBy = orderBy;
 window._fbLimit = limit;
+const storage = getStorage(app);
+window._fbStorage = storage;
+window._fbStorageRef = storageRef;
+window._fbUploadBytes = uploadBytes;
+window._fbGetDownloadURL = getDownloadURL;
 window._firebaseReady = true;
 document.dispatchEvent(new Event('firebase-ready'));
 </script>
@@ -5637,6 +5643,58 @@ function _setUploadingCount(n){
   }
 }
 
+// Compress image to JPEG via canvas (max 1200px wide, quality 0.82)
+function compressImage(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = e => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = ()=>{
+        const maxW = 1200;
+        const scale = Math.min(maxW / img.width, 1);
+        const canvas = document.createElement('canvas');
+        canvas.width  = Math.round(img.width  * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(blob=>{
+          if(blob) resolve(blob);
+          else reject(new Error('Canvas compression failed'));
+        }, 'image/jpeg', 0.82);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Upload compressed blob to Firebase Storage; returns {src, name} or null
+async function uploadScreenshotFile(file){
+  const blob = await compressImage(file);
+  const uid = window._fbAuth?.currentUser?.uid;
+
+  if(uid && window._fbStorage && window._fbStorageRef && window._fbUploadBytes && window._fbGetDownloadURL){
+    try{
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+      const path = `users/${uid}/screenshots/${Date.now()}_${safeName}`;
+      const sRef = window._fbStorageRef(window._fbStorage, path);
+      const snap = await window._fbUploadBytes(sRef, blob);
+      const url  = await window._fbGetDownloadURL(snap.ref);
+      return {src: url, name: file.name};
+    } catch(err){
+      console.warn('Storage upload failed, falling back to base64:', err.message);
+    }
+  }
+
+  // Fallback — base64 of the compressed blob (stays within Firestore 1 MB limit for small images)
+  return new Promise(resolve=>{
+    const r = new FileReader();
+    r.onload = e => resolve({src: e.target.result, name: file.name});
+    r.readAsDataURL(blob);
+  });
+}
+
 function handleFileSelect(files){
   const remaining = 5 - currentScreenshots.length;
   const toAdd = Array.from(files).slice(0, remaining);
@@ -5646,7 +5704,6 @@ function handleFileSelect(files){
   }
   if(toAdd.length < files.length) showToast(`Max 5 screenshots — ${files.length-toAdd.length} skipped`,'error');
 
-  // Show a spinner placeholder per file being processed
   const preview = document.getElementById('ss-preview');
   const area = document.getElementById('upload-area');
   preview.style.display = 'grid';
@@ -5657,26 +5714,28 @@ function handleFileSelect(files){
     const el = document.createElement('div');
     el.className = 'screenshot-uploading';
     el.id = id;
-    el.innerHTML = '<div class="upload-spinner"></div><span>Processing…</span>';
+    el.innerHTML = '<div class="upload-spinner"></div><span>Uploading…</span>';
     preview.appendChild(el);
     return id;
   });
 
   _setUploadingCount(_uploadingCount + toAdd.length);
-
   let loaded = 0;
-  toAdd.forEach((file, idx) => {
-    const reader = new FileReader();
-    reader.onload = e => {
-      currentScreenshots.push({src: e.target.result, name: file.name});
-      loaded++;
-      _setUploadingCount(_uploadingCount - 1);
-      // Replace spinner with real thumbnail
-      const spinner = document.getElementById(spinnerIds[idx]);
-      if(spinner) spinner.remove();
-      if(loaded === toAdd.length) renderScreenshotPreviews();
-    };
-    reader.readAsDataURL(file);
+
+  toAdd.forEach(async (file, idx)=>{
+    let screenshot = null;
+    try{
+      screenshot = await uploadScreenshotFile(file);
+    } catch(err){
+      console.error('Screenshot upload failed:', err.message);
+      showToast('Screenshot upload failed: '+err.message, 'error');
+    }
+    if(screenshot) currentScreenshots.push(screenshot);
+    loaded++;
+    _setUploadingCount(_uploadingCount - 1);
+    const spinner = document.getElementById(spinnerIds[idx]);
+    if(spinner) spinner.remove();
+    if(loaded === toAdd.length) renderScreenshotPreviews();
   });
 
   document.getElementById('ss-file-input').value='';
