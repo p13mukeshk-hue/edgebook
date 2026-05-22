@@ -2080,8 +2080,9 @@ const SettingsManager = {
       console.warn('Settings localStorage write failed:', e);
     }
     if(window._firebaseReady && this._uid !== 'guest'){
+      console.log('Settings saved to Firestore:', Object.keys(d));
       window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),d)
-        .catch(e=>console.warn('Settings Firestore sync:',e));
+        .catch(e=>console.warn('Settings Firestore sync failed:',e));
     }
     return true;
   },
@@ -2391,16 +2392,18 @@ function bootApp(user){
         const settingsDoc = await window._fbGetDoc(
           window._fbDoc(window._fbDb,'users',uid,'meta','settings'));
         if(settingsDoc.exists()){
-          const remote = settingsDoc.data();
-          S = {...S, ...remote,
-            formFields:{...S.formFields,...(remote.formFields||{})},
-            widgets:{...S.widgets,...(remote.widgets||{})},
-            sidebarSections:{...S.sidebarSections,...(remote.sidebarSections||{})},
-            prefs:{...S.prefs,...(remote.prefs||{})},
-            customFields: remote.customFields||S.customFields,
-            accounts: remote.accounts||S.accounts,
-          };
-          localStorage.setItem(SettingsManager._key(), JSON.stringify(S));
+          const fs = settingsDoc.data();
+          // Merge field-by-field — never replace S entirely with Firestore data.
+          // Each field is only applied if it is present and valid in the remote doc
+          // to avoid an empty/stale Firestore doc wiping out good local settings.
+          if(fs.accounts?.length > 0)    S.accounts = fs.accounts;
+          if(fs.brokerAccountMap)        S.brokerAccountMap = fs.brokerAccountMap;
+          if(fs.prefs   && Object.keys(fs.prefs).length   > 0) S.prefs    = {...S.prefs,   ...fs.prefs};
+          if(fs.formFields && Object.keys(fs.formFields).length > 0) S.formFields = {...S.formFields, ...fs.formFields};
+          if(fs.widgets    && Object.keys(fs.widgets).length    > 0) S.widgets    = {...S.widgets,    ...fs.widgets};
+          if(fs.sidebarSections && Object.keys(fs.sidebarSections).length > 0) S.sidebarSections = {...S.sidebarSections, ...fs.sidebarSections};
+          if(fs.customFields?.length > 0) S.customFields = fs.customFields;
+          SettingsManager.set(S);
         }
       }catch(e){ console.warn('Settings Firestore load failed:', e); }
     }
