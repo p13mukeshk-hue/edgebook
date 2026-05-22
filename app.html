@@ -2107,18 +2107,26 @@ const DEFAULT_SYMBOLS = {
 
 /* ══════════════════════════════════════════════════════
    SETTINGS MANAGER (swap-ready)
-   Key: tradedesk_s_{userId}
+   Key: tradedesk_settings_{userId}
 ══════════════════════════════════════════════════════ */
 const SettingsManager = {
   _uid:'guest',
-  _key(){ return `tradedesk_s_${this._uid}`; },
+  _key(){ return `tradedesk_settings_${this._uid}`; },
   _load(){
     try{
-      // Primary key; fall back to old key name for migration
-      let raw = localStorage.getItem(this._key());
-      if(!raw) raw = localStorage.getItem(`tradedesk_settings_${this._uid}`);
-      const parsed = JSON.parse(raw);
-      if(Array.isArray(parsed)){ console.warn('Settings: discarding corrupted array in localStorage'); return null; }
+      const raw = localStorage.getItem(this._key());
+      const parsed = raw ? JSON.parse(raw) : null;
+      // Discard arrays (corrupt state from bad prior write)
+      if(Array.isArray(parsed)){ console.warn('Settings: discarding array in localStorage'); return null; }
+      // Discard non-objects
+      if(!parsed || typeof parsed !== 'object'){ return null; }
+      // Must look like a settings object — reject trade data that slipped in
+      const looksLikeSettings = parsed.version !== undefined
+        || parsed.accounts !== undefined
+        || parsed.brokerAccountMap !== undefined
+        || parsed.formFields !== undefined
+        || parsed.prefs !== undefined;
+      if(!looksLikeSettings){ console.warn('Settings: discarding object with no settings keys'); return null; }
       return parsed;
     }catch{ return null; }
   },
@@ -2483,6 +2491,7 @@ function bootApp(user){
     // Clean up any oversized trades cache left by older app versions
     localStorage.removeItem(DataStore._tk());
     S=SettingsManager.get(); trades=DataStore.loadTrades(); moods=DataStore.loadMoods();
+    console.log('[boot] S type:', typeof S, 'isArray:', Array.isArray(S), 'hasAccounts:', !!S.accounts, 'brokerMap:', S.brokerAccountMap);
     // Load settings from Firestore and merge over localStorage copy
     if(window._firebaseReady && DataStore._uid !== 'guest'){
       try{
