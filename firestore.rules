@@ -55,6 +55,13 @@ service cloud.firestore {
       match /notifications/{notifId} {
         allow read, write: if isOwner(userId);
       }
+
+      // User settings (cross-device sync)
+      // users/{userId}/meta/settings
+      // Written by client on every settings change; read on login for cross-device sync.
+      match /meta/{doc} {
+        allow read, write: if isOwner(userId);
+      }
     }
 
     // Pending auth state (Zerodha OAuth flow)
