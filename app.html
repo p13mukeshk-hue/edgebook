@@ -617,6 +617,9 @@ body.light .heat-sn{background:rgba(217,59,71,0.26);border-color:rgba(217,59,71,
 .ss-add{border:1.5px dashed var(--border2);border-radius:8px;aspect-ratio:16/10;display:flex;align-items:center;justify-content:center;cursor:pointer;background:var(--bg3);font-size:18px;color:var(--text3);transition:.15s;position:relative}
 .ss-add:hover{border-color:var(--accent);color:var(--accent)}
 .ss-add input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.screenshot-uploading{border:1.5px dashed var(--border2);border-radius:8px;aspect-ratio:16/10;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;background:var(--bg3);font-size:10px;color:var(--text3)}
+.upload-spinner{width:18px;height:18px;border:2px solid var(--border2);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 /* lightbox */
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:9000;display:none;align-items:center;justify-content:center;flex-direction:column}
 .lightbox.open{display:flex}
@@ -4418,67 +4421,67 @@ function saveTrade(){
       ? (trades.find(t=>String(t.id)===String(editId))?.source || 'manual')
       : 'manual',
   };
-  // For new trades, check for local duplicates before saving
-  if(!editId){
-    const localDup = findLocalDuplicate(sym, date, entry);
-    if(localDup){
-      showManualDupModal(trade, localDup);
-      return;
-    }
-  }
-
   if(editId){
     const i=trades.findIndex(t=>String(t.id)===String(editId));
-    if(i>-1){
-      // Preserve broker-owned fields that the modal doesn't touch
-      const orig=trades[i];
-      trades[i]={
-        ...orig,
-        ...trade,
-        // Always keep identity + broker provenance fields from original
-        id:          orig.id,
-        source:      orig.source      || trade.source,
-        broker:      orig.broker      || null,
-        brokerTradeId: orig.brokerTradeId || null,
-        isOpen:      orig.isOpen      ?? trade.isOpen,
-        syncedAt:    orig.syncedAt    || null,
-      };
-      // Write the edited trade directly to Firestore — don't rely on _syncTrades batch
-      // which can fail silently if any trade has large screenshots.
-      if(window._firebaseReady && DataStore._uid !== 'guest'){
-        const docRef = window._fbDoc(window._fbDb, 'users', DataStore._uid, 'trades', String(orig.id));
-        window._fbSetDoc(docRef, {
-          notes:       trade.notes       ?? null,
-          strategy:    trade.strategy    ?? null,
-          emotion:     trade.emotion     ?? null,
-          psychology:  trade.psychology  ?? {},
-          tags:        trade.tags        ?? [],
-          screenshots: trade.screenshots ?? [],
-          entry:       trade.entry,
-          exit:        trade.exit       ?? null,
-          size:        trade.size,
-          direction:   trade.direction,
-          date:        trade.date,
-          sl:          trade.sl         ?? null,
-          tp:          trade.tp         ?? null,
-          pnl:         trade.pnl        ?? null,
-          accountId:   trade.accountId  ?? orig.accountId ?? null,
-        }, { merge: true })
-          .catch(err => {
-            console.error('saveTrade Firestore write failed:', String(orig.id), err.message);
-            showToast('Trade saved locally but not synced — check connection','error');
-          });
-      }
-    } else {
-      showToast('Trade not found — it may have been deleted','error');
-      return;
+    if(i===-1){ showToast('Trade not found — it may have been deleted','error'); return; }
+    const orig=trades[i];
+    trades[i]={
+      ...orig, ...trade,
+      id:            orig.id,
+      source:        orig.source        || trade.source,
+      broker:        orig.broker        || null,
+      brokerTradeId: orig.brokerTradeId || null,
+      isOpen:        orig.isOpen        ?? trade.isOpen,
+      syncedAt:      orig.syncedAt      || null,
+    };
+    // Close immediately after local update — never wait for Firestore
+    closeModal('trade-modal');
+    editId=null;
+    refreshAll();
+    showToast('Trade updated','success');
+    // Persist in background
+    if(DataStore._uid==='guest'){
+      DataStore.saveTrades(trades);
+    } else if(window._firebaseReady){
+      const docRef=window._fbDoc(window._fbDb,'users',DataStore._uid,'trades',String(orig.id));
+      window._fbSetDoc(docRef,{
+        notes:       trade.notes       ?? null,
+        strategy:    trade.strategy    ?? null,
+        emotion:     trade.emotion     ?? null,
+        psychology:  trade.psychology  ?? {},
+        tags:        trade.tags        ?? [],
+        screenshots: trade.screenshots ?? [],
+        entry:       trade.entry,
+        exit:        trade.exit        ?? null,
+        size:        trade.size,
+        direction:   trade.direction,
+        date:        trade.date,
+        entryTime:   trade.entryTime   ?? null,
+        sl:          trade.sl          ?? null,
+        tp:          trade.tp          ?? null,
+        pnl:         trade.pnl         ?? null,
+        accountId:   trade.accountId   ?? orig.accountId ?? null,
+        instrument:  trade.instrument  ?? null,
+        optionType:  trade.optionType  ?? null,
+        strike:      trade.strike      ?? null,
+        custom:      trade.custom      ?? {},
+      },{merge:true}).catch(err=>{
+        console.error('saveTrade Firestore write failed:',String(orig.id),err.message);
+        showToast('Trade saved locally but Firestore sync failed — check connection','error');
+      });
     }
+    return;
   }
-  else trades.unshift(trade);
-  DataStore.saveTrades(trades);
+
+  // New trade — check for local duplicates first
+  const localDup = findLocalDuplicate(sym, date, entry);
+  if(localDup){ showManualDupModal(trade, localDup); return; }
+  trades.unshift(trade);
   closeModal('trade-modal');
-  const wasEdit=editId; editId=null; refreshAll();
-  showToast(wasEdit?'Trade updated':'Trade logged','success');
+  editId=null;
+  refreshAll();
+  showToast('Trade logged','success');
+  DataStore.saveTrades(trades);
 }
 function deleteTrade(id){
   showConfirm('Archive trade?','This trade will be hidden from your journal. You can restore it from Settings → Danger zone.',async()=>{
@@ -5619,20 +5622,63 @@ function renderScreenshotPreviews(){
   + (currentScreenshots.length < 5 ? `<div class="ss-add" title="Add more"><input type="file" accept="image/*" multiple onchange="handleFileSelect(this.files)"><i class="fa-solid fa-plus"></i></div>` : '');
 }
 
+let _uploadingCount = 0;
+
+function _setUploadingCount(n){
+  _uploadingCount = Math.max(0, n);
+  const btn = document.querySelector('#trade-modal .btn-primary');
+  if(!btn) return;
+  if(_uploadingCount > 0){
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+  } else {
+    btn.disabled = false;
+    btn.style.opacity = '';
+  }
+}
+
 function handleFileSelect(files){
   const remaining = 5 - currentScreenshots.length;
   const toAdd = Array.from(files).slice(0, remaining);
+  if(!toAdd.length){
+    if(files.length) showToast('Max 5 screenshots reached','error');
+    return;
+  }
+  if(toAdd.length < files.length) showToast(`Max 5 screenshots — ${files.length-toAdd.length} skipped`,'error');
+
+  // Show a spinner placeholder per file being processed
+  const preview = document.getElementById('ss-preview');
+  const area = document.getElementById('upload-area');
+  preview.style.display = 'grid';
+  area.style.display = 'none';
+
+  const spinnerIds = toAdd.map((_,i)=>{
+    const id = 'ss-spinner-'+Date.now()+'-'+i;
+    const el = document.createElement('div');
+    el.className = 'screenshot-uploading';
+    el.id = id;
+    el.innerHTML = '<div class="upload-spinner"></div><span>Processing…</span>';
+    preview.appendChild(el);
+    return id;
+  });
+
+  _setUploadingCount(_uploadingCount + toAdd.length);
+
   let loaded = 0;
-  toAdd.forEach(file=>{
+  toAdd.forEach((file, idx) => {
     const reader = new FileReader();
     reader.onload = e => {
       currentScreenshots.push({src: e.target.result, name: file.name});
       loaded++;
-      if(loaded===toAdd.length) renderScreenshotPreviews();
+      _setUploadingCount(_uploadingCount - 1);
+      // Replace spinner with real thumbnail
+      const spinner = document.getElementById(spinnerIds[idx]);
+      if(spinner) spinner.remove();
+      if(loaded === toAdd.length) renderScreenshotPreviews();
     };
     reader.readAsDataURL(file);
   });
-  if(toAdd.length < files.length) showToast(`Max 5 screenshots — ${files.length-toAdd.length} skipped`,'error');
+
   document.getElementById('ss-file-input').value='';
 }
 
