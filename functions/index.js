@@ -392,6 +392,13 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha") {
 }
 
 async function syncTradesForUser(uid) {
+  // Read brokerAccountMap from settings to assign accountId to new trades
+  let brokerAccountMap = {};
+  try {
+    const settingsSnap = await db.collection("users").doc(uid).collection("meta").doc("settings").get();
+    brokerAccountMap = settingsSnap.data()?.brokerAccountMap ?? {};
+  } catch(e) { /* settings read is non-critical */ }
+
   const kite = await getKiteForUser(uid);
 
   // ── 1. Token validation ──────────────────────────────────────────────────────
@@ -517,11 +524,11 @@ async function syncTradesForUser(uid) {
   // ── 6. Load existing Zerodha trade docs (id + isOpen) for dedup/update ────────
   const existingSnap = await tradesRef
     .where("broker", "==", "zerodha")
-    .select("id", "isOpen")
+    .select("id", "isOpen", "accountId")
     .get();
   const existingByDocId = new Map();
   for (const doc of existingSnap.docs) {
-    existingByDocId.set(doc.id, { ref: doc.ref, isOpen: doc.data().isOpen });
+    existingByDocId.set(doc.id, { ref: doc.ref, isOpen: doc.data().isOpen, accountId: doc.data().accountId ?? null });
   }
 
   // ── 7. Batch write — new trades full-set, open→closed transitions update-only ─
@@ -549,7 +556,9 @@ async function syncTradesForUser(uid) {
         console.log(`syncZerodhaTrades [${uid}]: ${trade.id} already up-to-date — no change`);
       }
     } else {
-      toWriteNew.push({ ref: docRef, trade });
+      // New trade — assign accountId from brokerAccountMap if available
+      const mappedAccountId = brokerAccountMap?.zerodha ?? null;
+      toWriteNew.push({ ref: docRef, trade: { ...trade, accountId: mappedAccountId ?? trade.accountId ?? null } });
     }
   }
 
@@ -589,6 +598,21 @@ async function syncTradesForUser(uid) {
   console.log(
     `syncZerodhaTrades [${uid}]: new=${written} updated(closed)=${updatedCount} orders=${orders.length}`
   );
+
+  if (written + updatedCount > 0) {
+    try {
+      await db.collection("users").doc(uid).collection("notifications").add({
+        type: "success",
+        title: `Sync complete — ${written + updatedCount} trade(s)`,
+        message: `Zerodha synced. ${written} new trade(s) added, ${updatedCount} updated.`,
+        category: "sync",
+        actionLabel: null,
+        actionTarget: null,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch(e) { console.warn("Failed to write Zerodha sync notification:", e.message); }
+  }
 
   await db.collection("users").doc(uid).collection("brokers").doc("zerodha")
     .update({ lastSync: admin.firestore.FieldValue.serverTimestamp() });
@@ -1592,6 +1616,7 @@ function sanitizeUserFields(fields) {
       executionNote: fields.psychology?.executionNote ?? null,
       review:        fields.psychology?.review        ?? null,
     },
+    accountId: f.accountId ?? null,
   };
 }
 
@@ -2385,20 +2410,53 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   // merge:true means notes/screenshots/strategy/psychology written by the user are never
   // overwritten; all broker-computed fields (including size, entry, exit, pnl) are always
   // updated to the latest computed value, so stale data from earlier buggy imports is fixed.
+
+  // Read existing accountIds so user-assigned account mappings are never overwritten by sync
+  const existingAccountIdMap = new Map();
+  try {
+    const existingAcctSnap = await tradesRef.where("source", "==", "ctrader").select("accountId").get();
+    for (const d of existingAcctSnap.docs) {
+      const aid = d.data().accountId;
+      if (aid != null) existingAccountIdMap.set(d.id, aid);
+    }
+  } catch(e) { console.warn(`cTrader uid=${uid}: failed to read existing accountIds:`, e.message); }
+
   const BATCH_SIZE = 400;
   let written      = 0;
 
   for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
     const batch = db.batch();
     for (const trade of toProcess.slice(i, i + BATCH_SIZE)) {
-      const docRef = tradesRef.doc(`ctrader_${trade.brokerTradeId}`);
-      batch.set(docRef, { ...trade, syncedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      const docId  = `ctrader_${trade.brokerTradeId}`;
+      const docRef = tradesRef.doc(docId);
+      // Preserve user-assigned accountId; only use broker-derived one for new docs
+      const preservedAccountId = existingAccountIdMap.get(docId);
+      batch.set(docRef, {
+        ...trade,
+        accountId: preservedAccountId ?? trade.accountId,
+        syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
     }
     await batch.commit();
     written += toProcess.slice(i, i + BATCH_SIZE).length;
   }
 
   console.log(`cTrader uid=${uid}: written/updated=${written} skipped=${skipped.length}`);
+
+  if (written > 0) {
+    try {
+      await db.collection("users").doc(uid).collection("notifications").add({
+        type: "success",
+        title: `Sync complete — ${written} new trade(s)`,
+        message: `cTrader synced successfully. ${written} trade(s) added or updated.`,
+        category: "sync",
+        actionLabel: null,
+        actionTarget: null,
+        read: false,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    } catch(e) { console.warn("Failed to write cTrader sync notification:", e.message); }
+  }
 
   // ── 7. Update broker metadata ─────────────────────────────────────────────────
   const durationMs      = Date.now() - syncStart;
@@ -2853,7 +2911,7 @@ exports.forceReimportCtrader = functions
       const ctraderDocs = allSnap.docs.filter((d) => d.id.startsWith("ctrader_"));
       console.log(`forceReimportCtrader uid=${uid}: found ${ctraderDocs.length} cTrader docs`);
 
-      const USER_FIELDS = ["notes", "screenshots", "psychology", "strategy", "emotion", "tags"];
+      const USER_FIELDS = ["notes", "screenshots", "psychology", "strategy", "emotion", "tags", "accountId"];
       const userFieldsMap = {};
       for (const doc of ctraderDocs) {
         const data = doc.data();
@@ -2901,7 +2959,7 @@ exports.forceReimportCtrader = functions
               fields.psychology.preThought ||
               fields.psychology.executionNote ||
               fields.psychology.review
-            ));
+            )) || fields.accountId;
           if (!hasUserData) continue;
 
           try {
