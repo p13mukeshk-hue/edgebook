@@ -12,7 +12,7 @@
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, collection, getDocs, getDocsFromServer, deleteDoc, writeBatch, query, where, onSnapshot, addDoc } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
+import { getFirestore, doc, getDoc, setDoc, collection, getDocs, getDocsFromServer, deleteDoc, writeBatch, query, where, onSnapshot, addDoc, orderBy, limit } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
@@ -48,6 +48,8 @@ window._fbQuery = query;
 window._fbWhere = where;
 window._fbOnSnapshot = onSnapshot;
 window._fbAddDoc = addDoc;
+window._fbOrderBy = orderBy;
+window._fbLimit = limit;
 window._firebaseReady = true;
 document.dispatchEvent(new Event('firebase-ready'));
 </script>
@@ -896,6 +898,43 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
 .dup-banner.visible{display:flex}
 .dup-banner-text{flex:1;font-weight:500}
 .dup-banner-btn{padding:5px 14px;border-radius:8px;background:var(--amber);color:#000;font-size:12px;font-weight:600;border:none;cursor:pointer;flex-shrink:0}
+
+/* ── Notification bell & panel ───────────────────────────────────────── */
+.notif-bell-btn{position:relative}
+.notif-badge{position:absolute;top:-5px;right:-5px;min-width:16px;height:16px;border-radius:8px;background:#e24b4a;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;padding:0 4px;pointer-events:none;line-height:1}
+#notif-panel{position:fixed;top:0;right:0;bottom:0;width:360px;background:var(--bg2);border-left:1px solid var(--border2);z-index:300;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .25s cubic-bezier(.16,1,.3,1);box-shadow:-8px 0 32px rgba(0,0,0,0.4)}
+#notif-panel.open{transform:translateX(0)}
+#notif-overlay{display:none;position:fixed;inset:0;z-index:299;background:rgba(0,0,0,0.25)}
+#notif-overlay.open{display:block}
+.notif-panel-head{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 16px;border-bottom:1px solid var(--border2);flex-shrink:0}
+.notif-panel-title{font-size:14px;font-weight:700;color:var(--text)}
+.notif-mark-all-btn{font-size:11px;color:var(--text3);background:none;border:none;cursor:pointer;font-family:var(--font-body);padding:0;transition:.15s}
+.notif-mark-all-btn:hover{color:var(--text2)}
+.notif-list{flex:1;overflow-y:auto;padding:4px 0}
+.notif-empty{padding:48px 20px;text-align:center;color:var(--text3);font-size:13px}
+.notif-item{display:flex;gap:12px;padding:13px 20px;border-bottom:1px solid var(--border);cursor:pointer;transition:.12s;align-items:flex-start}
+.notif-item:last-child{border-bottom:none}
+.notif-item:hover{background:var(--bg3)}
+.notif-item.notif-unread{background:rgba(108,99,255,0.04)}
+body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
+.notif-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}
+.notif-dot.warning{background:#EF9F27}
+.notif-dot.info{background:#378ADD}
+.notif-dot.success{background:#1D9E75}
+.notif-item-body{flex:1;min-width:0}
+.notif-item-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.notif-item.notif-unread .notif-item-title{font-weight:700}
+.notif-item-msg{font-size:12px;color:var(--text2);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:5px}
+.notif-item-footer{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.notif-time{font-size:11px;color:var(--text3)}
+.notif-action-link{font-size:11px;color:var(--accent);cursor:pointer;font-weight:500;transition:.12s;white-space:nowrap}
+.notif-action-link:hover{color:var(--accent2)}
+/* ── Broker account mapping row ──────────────────────────────────────── */
+.broker-mapping-row{display:none;padding:6px 20px 12px;align-items:center;gap:10px;flex-wrap:wrap}
+.broker-mapping-row.visible{display:flex}
+.broker-mapping-label{font-size:12px;color:var(--text2);white-space:nowrap}
+.broker-mapping-select{padding:5px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-family:var(--font-body);font-size:12px;cursor:pointer;outline:none;transition:.15s}
+.broker-mapping-select:focus{border-color:var(--accent)}
 /* ── Duplicate resolution modal ───────────────────────────────────────── */
 .dup-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .dup-card{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:16px}
@@ -988,11 +1027,24 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
           <span class="theme-icon">🌙</span>
           <span id="theme-label">Dark</span>
         </button>
+        <button class="topbar-btn notif-bell-btn" id="notif-btn" onclick="toggleNotifPanel()" title="Notifications">
+          <i class="fa-solid fa-bell"></i>
+          <span class="notif-badge" id="notif-badge" style="display:none">0</span>
+        </button>
         <button class="topbar-btn" onclick="openMoodModal()"><i class="fa-regular fa-face-smile"></i> Mood</button>
         <button class="topbar-btn" onclick="doSignOut()" title="Sign out"><i class="fa-solid fa-arrow-right-from-bracket"></i></button>
         <button class="topbar-btn accent" onclick="openTradeModal()"><i class="fa-solid fa-plus"></i> Log trade</button>
       </div>
     </div>
+    <!-- Notification slide-out panel -->
+    <div id="notif-panel">
+      <div class="notif-panel-head">
+        <span class="notif-panel-title">Notifications</span>
+        <button class="notif-mark-all-btn" onclick="markAllRead()">Mark all read</button>
+      </div>
+      <div class="notif-list" id="notif-list"><div class="notif-empty">No notifications</div></div>
+    </div>
+    <div id="notif-overlay" onclick="closeNotifPanel()"></div>
     <!-- Duplicate resolution warning banner -->
     <div class="dup-banner" id="dup-banner">
       <span style="font-size:15px">⚠</span>
@@ -1626,6 +1678,12 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                   </div>
                 </div>
                 <div id="zerodha-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
+                <div class="broker-mapping-row" id="zerodha-mapping-row">
+                  <span class="broker-mapping-label">Maps to account →</span>
+                  <select class="broker-mapping-select" id="zerodha-account-map" onchange="saveBrokerMapping('zerodha',this.value)">
+                    <option value="">Not mapped</option>
+                  </select>
+                </div>
                 <div id="zerodha-advanced-section" style="display:none;padding:4px 20px 12px">
                   <button onclick="toggleAdvanced('zerodha-adv-body',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
                   <div id="zerodha-adv-body" style="display:none;margin-top:8px;padding:12px;background:rgba(255,94,106,0.04);border:1px solid rgba(255,94,106,0.15);border-radius:8px">
@@ -1652,6 +1710,12 @@ body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
                   </div>
                 </div>
                 <div id="ctrader-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
+                <div class="broker-mapping-row" id="ctrader-mapping-row">
+                  <span class="broker-mapping-label">Maps to account →</span>
+                  <select class="broker-mapping-select" id="ctrader-account-map" onchange="saveBrokerMapping('ctrader',this.value)">
+                    <option value="">Not mapped</option>
+                  </select>
+                </div>
                 <div id="ctrader-advanced-section" style="display:none;padding:4px 20px 12px">
                   <button onclick="toggleAdvanced('ctrader-adv-body',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
                   <div id="ctrader-adv-body" style="display:none;margin-top:8px;padding:12px;background:rgba(255,94,106,0.04);border:1px solid rgba(255,94,106,0.15);border-radius:8px">
@@ -2068,7 +2132,8 @@ const SettingsManager = {
       prefs:{
         currency:'$',dateFormat:'YYYY-MM-DD',defaultAsset:'eq',
         landingPage:'dashboard',rowsPerPage:25,compactTable:false,theme:'dark',
-      }
+      },
+      brokerAccountMap:{},
     };
   },
   get(){
@@ -2369,6 +2434,9 @@ function bootApp(user){
     }
     // Watch pendingDuplicates collection for banner + resolution UI
     listenPendingDuplicates(uid);
+    // Load notification feed and check for unassigned trades
+    loadNotifications(uid);
+    setTimeout(checkUnassignedTrades, 6000);
   },420);
 }
 
@@ -2428,6 +2496,165 @@ function openDupModal(){
   _dupIdx = 0;
   renderDupModal();
   document.getElementById('dup-modal').classList.add('open');
+}
+
+/* ══════════════════════════════════════════════════════
+   NOTIFICATION CENTER
+   ══════════════════════════════════════════════════════ */
+let _notifUnsubscribe = null;
+
+function toggleNotifPanel(){
+  const panel = document.getElementById('notif-panel');
+  const overlay = document.getElementById('notif-overlay');
+  const isOpen = panel.classList.contains('open');
+  if(isOpen){ closeNotifPanel(); } else { panel.classList.add('open'); overlay.classList.add('open'); }
+}
+function closeNotifPanel(){
+  document.getElementById('notif-panel').classList.remove('open');
+  document.getElementById('notif-overlay').classList.remove('open');
+}
+
+function relativeTime(ts){
+  if(!ts) return '';
+  const ms = ts.toMillis ? ts.toMillis() : (ts.seconds ? ts.seconds * 1000 : Number(ts));
+  const diff = Date.now() - ms;
+  if(diff < 60000) return 'just now';
+  if(diff < 3600000) return `${Math.floor(diff/60000)} min ago`;
+  if(diff < 86400000) return `${Math.floor(diff/3600000)} hr ago`;
+  if(diff < 172800000) return 'yesterday';
+  return `${Math.floor(diff/86400000)} days ago`;
+}
+
+function renderNotifications(notifs){
+  const list = document.getElementById('notif-list');
+  if(!list) return;
+  if(!notifs.length){ list.innerHTML = '<div class="notif-empty">No notifications</div>'; return; }
+  list.innerHTML = notifs.map(n => {
+    const dotClass = n.type === 'warning' ? 'warning' : n.type === 'info' ? 'info' : 'success';
+    const unreadClass = n.read ? '' : ' notif-unread';
+    const action = n.actionLabel
+      ? `<span class="notif-action-link" onclick="handleNotifAction('${n.id}','${n.actionTarget||''}')">${n.actionLabel}</span>`
+      : '';
+    return `<div class="notif-item${unreadClass}" onclick="markNotifRead('${n.id}')">
+      <div class="notif-dot ${dotClass}"></div>
+      <div class="notif-item-body">
+        <div class="notif-item-title">${n.title||''}</div>
+        <div class="notif-item-msg">${n.message||''}</div>
+        <div class="notif-item-footer">
+          <span class="notif-time">${relativeTime(n.createdAt)}</span>
+          ${action}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function updateNotifBadge(count){
+  const badge = document.getElementById('notif-badge');
+  if(!badge) return;
+  if(count > 0){ badge.textContent = count > 99 ? '99+' : count; badge.style.display = 'flex'; }
+  else { badge.style.display = 'none'; }
+}
+
+function loadNotifications(uid){
+  if(!window._firebaseReady || !uid || uid === 'guest') return;
+  if(_notifUnsubscribe) _notifUnsubscribe();
+  const q = window._fbQuery(
+    window._fbCollection(window._fbDb,'users',uid,'notifications'),
+    window._fbOrderBy('createdAt','desc'),
+    window._fbLimit(50)
+  );
+  _notifUnsubscribe = window._fbOnSnapshot(q, snap => {
+    const notifs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderNotifications(notifs);
+    updateNotifBadge(notifs.filter(n => !n.read).length);
+  }, err => { console.warn('[NotifListener]', err.message); });
+}
+
+async function createNotification(type, title, message, category, actionLabel, actionTarget){
+  if(!window._firebaseReady || DataStore._uid === 'guest') return;
+  try{
+    await window._fbAddDoc(
+      window._fbCollection(window._fbDb,'users',DataStore._uid,'notifications'),
+      { type, title, message, category, actionLabel: actionLabel||null, actionTarget: actionTarget||null, read: false,
+        createdAt: { seconds: Math.floor(Date.now()/1000), nanoseconds: 0 } }
+    );
+  } catch(e){ console.warn('createNotification failed:', e.message); }
+}
+
+async function markNotifRead(notifId){
+  if(!window._firebaseReady || DataStore._uid === 'guest') return;
+  try{
+    await window._fbSetDoc(
+      window._fbDoc(window._fbDb,'users',DataStore._uid,'notifications',notifId),
+      { read: true }, { merge: true }
+    );
+  } catch(e){}
+}
+
+async function markAllRead(){
+  if(!window._firebaseReady || DataStore._uid === 'guest') return;
+  try{
+    const snap = await window._fbGetDocs(window._fbQuery(
+      window._fbCollection(window._fbDb,'users',DataStore._uid,'notifications'),
+      window._fbWhere('read','==',false)
+    ));
+    if(snap.empty) return;
+    const batch = window._fbWriteBatch(window._fbDb);
+    snap.docs.forEach(d => batch.set(d.ref, { read: true }, { merge: true }));
+    await batch.commit();
+  } catch(e){ console.warn('markAllRead failed:', e.message); }
+}
+
+function handleNotifAction(notifId, target){
+  markNotifRead(notifId);
+  closeNotifPanel();
+  if(!target) return;
+  if(target === 'settings/brokers'){
+    navigate('settings', document.getElementById('nav-settings'));
+    setTimeout(()=>showSPanel('data', document.getElementById('sn-data')), 350);
+  } else if(target === 'settings/accounts'){
+    navigate('settings', document.getElementById('nav-settings'));
+    setTimeout(()=>showSPanel('accounts', document.getElementById('sn-accounts')), 350);
+  } else if(target === 'duplicates'){
+    openDupModal();
+  }
+}
+
+async function checkUnassignedTrades(){
+  if(!window._firebaseReady || DataStore._uid === 'guest') return;
+  const unassigned = trades.filter(t => (t.accountId == null) && t.source && t.source !== 'manual');
+  if(!unassigned.length) return;
+  try{
+    const existing = await window._fbGetDocs(window._fbQuery(
+      window._fbCollection(window._fbDb,'users',DataStore._uid,'notifications'),
+      window._fbWhere('category','==','account'),
+      window._fbWhere('read','==',false)
+    ));
+    if(!existing.empty) return;
+    await createNotification('warning',
+      `${unassigned.length} trade(s) not assigned to an account`,
+      'These trades are excluded from account P&L. Assign them via Settings → Brokers.',
+      'account','Assign now','settings/brokers');
+  } catch(e){}
+}
+
+/* ══════════════════════════════════════════════════════
+   BROKER ACCOUNT MAPPING
+   ══════════════════════════════════════════════════════ */
+function populateBrokerMappingDropdown(broker){
+  const sel = document.getElementById(`${broker}-account-map`);
+  if(!sel) return;
+  const current = (S.brokerAccountMap || {})[broker] || '';
+  sel.innerHTML = '<option value="">Not mapped</option>' +
+    (S.accounts || []).map(a => `<option value="${a.id}"${a.id===current?' selected':''}>${a.name}</option>`).join('');
+}
+
+function saveBrokerMapping(broker, accountId){
+  S.brokerAccountMap = S.brokerAccountMap || {};
+  S.brokerAccountMap[broker] = accountId || null;
+  SettingsManager.set(S);
+  showToast('Account mapping saved','success');
 }
 
 function renderDupModal(){
@@ -2705,6 +2932,8 @@ function updateCtraderUI(connected){
   document.getElementById('ctrader-status-desc').textContent = connected
     ? 'Trades sync automatically every 5 mins, 24/7. Click Sync now for an immediate update.'
     : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
+  const mappingRow = document.getElementById('ctrader-mapping-row');
+  if(mappingRow){ if(connected){ mappingRow.classList.add('visible'); populateBrokerMappingDropdown('ctrader'); } else mappingRow.classList.remove('visible'); }
 }
 
 async function importCtraderHistory(){
@@ -2960,6 +3189,17 @@ async function checkCtraderStatus(){
           badge.style.borderColor = 'rgba(186,117,23,0.3)';
           badge.style.display = 'inline-flex';
           showToast(`cTrader token expires in ${daysLeft} days — consider reconnecting`, 'info');
+          // Write a notification if no unread token warning exists yet
+          try{
+            const existing = await window._fbGetDocs(window._fbQuery(
+              window._fbCollection(window._fbDb,'users',DataStore._uid,'notifications'),
+              window._fbWhere('category','==','token'), window._fbWhere('read','==',false)
+            ));
+            if(existing.empty){
+              await createNotification('info',`cTrader token expires in ${daysLeft} day(s)`,
+                'Reconnect to avoid sync interruption.','token','Reconnect','settings/brokers');
+            }
+          } catch(e){}
         }
       }
       if(d.tokenRefreshFailed){
@@ -3035,6 +3275,8 @@ function updateZerodhaUI(connected){
   document.getElementById('zerodha-sync-btn').style.display          = connected?'inline-flex':'none';
   document.getElementById('zerodha-history-btn').style.display        = connected?'inline-flex':'none';
   document.getElementById('zerodha-status-badge').style.display       = connected?'inline-flex':'none';
+  const mappingRow = document.getElementById('zerodha-mapping-row');
+  if(mappingRow){ if(connected){ mappingRow.classList.add('visible'); populateBrokerMappingDropdown('zerodha'); } else mappingRow.classList.remove('visible'); }
   document.getElementById('zerodha-last-sync').style.display          = connected?'block':'none';
   document.getElementById('zerodha-advanced-section').style.display   = connected?'block':'none';
   document.getElementById('zerodha-status-desc').textContent = connected
@@ -4129,6 +4371,7 @@ function saveTrade(){
           sl:          trade.sl         ?? null,
           tp:          trade.tp         ?? null,
           pnl:         trade.pnl        ?? null,
+          accountId:   trade.accountId  ?? orig.accountId ?? null,
         }, { merge: true })
           .catch(err => {
             console.error('saveTrade Firestore write failed:', String(orig.id), err.message);
