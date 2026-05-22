@@ -2381,8 +2381,54 @@ async function doGoogleLogin(){
 
 
 async function doSignOut(){
+  if(_tradesUnsubscribe){ _tradesUnsubscribe(); _tradesUnsubscribe=null; }
+  trades=[];
   await window._fbSignOut(window._fbAuth);
   location.reload();
+}
+
+/* ══════════════════════════════════════════════════════
+   REAL-TIME TRADES LISTENER
+══════════════════════════════════════════════════════ */
+let _tradesUnsubscribe = null;
+
+function startTradesListener(uid){
+  if(_tradesUnsubscribe){ _tradesUnsubscribe(); _tradesUnsubscribe=null; }
+  const tradesRef=window._fbCollection(window._fbDb,'users',uid,'trades');
+  _tradesUnsubscribe=window._fbOnSnapshot(
+    tradesRef,
+    (snapshot)=>{
+      snapshot.docChanges().forEach(change=>{
+        const data={id:change.doc.id,...change.doc.data()};
+        const t=normaliseFsTrade(data);
+        // Soft-deleted — remove from active array
+        if(t.deleted){
+          const i=trades.findIndex(x=>x.id===t.id);
+          if(i>-1) trades.splice(i,1);
+          return;
+        }
+        // Invalid — skip
+        if(!t.symbol||t.entry==null) return;
+        if(change.type==='added'){
+          if(!trades.find(x=>x.id===t.id)) trades.push(t);
+        } else if(change.type==='modified'){
+          const i=trades.findIndex(x=>x.id===t.id);
+          if(i>-1) trades[i]=t; else trades.push(t);
+        } else if(change.type==='removed'){
+          const i=trades.findIndex(x=>x.id===t.id);
+          if(i>-1) trades.splice(i,1);
+        }
+      });
+      // Don't disrupt the user if a modal is open
+      if(!document.querySelector('.modal-overlay.open')){
+        refreshAll();
+      }
+    },
+    (error)=>{
+      console.error('Trades listener error:',error.message);
+      DataStore.loadFromFirestore();
+    }
+  );
 }
 
 function bootApp(user){
@@ -2445,13 +2491,27 @@ function bootApp(user){
     const landing=S.prefs.landingPage||'dashboard';
     navigate(landing, document.getElementById('nav-'+landing)||document.getElementById('nav-dashboard'));
     refreshAll();
-    // After re-import: await the load so UI isn't empty when it resolves.
-    // Normal boot: fire-and-forget background update.
+    // After re-import: do a one-time server fetch first so UI isn't empty,
+    // then start the real-time listener. Normal boot: listener handles initial load.
     if(afterReimport){
       await DataStore.loadFromFirestore({ forceServer: true });
-    } else {
-      DataStore.loadFromFirestore();
     }
+    startTradesListener(uid);
+
+    // Refresh UI when user returns to tab after ≥30 s away
+    let _lastVisible=Date.now();
+    document.addEventListener('visibilitychange',()=>{
+      if(document.visibilityState==='visible'){
+        const awayMs=Date.now()-_lastVisible;
+        if(awayMs>30000){
+          console.log('Tab focused after',Math.round(awayMs/1000),'s away — refreshing UI');
+          refreshAll();
+        }
+      } else {
+        _lastVisible=Date.now();
+      }
+    });
+
     // Handle Zerodha OAuth callback if returning from Zerodha login
     handleZerodhaCallback();
     // Check Zerodha connection status
