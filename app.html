@@ -2130,6 +2130,15 @@ const SettingsManager = {
       return parsed;
     }catch{ return null; }
   },
+  _cleanForFirestore(obj){
+    if(Array.isArray(obj)) return obj.map(item=>this._cleanForFirestore(item)).filter(item=>item!==undefined);
+    if(obj && typeof obj==='object'){
+      const clean={};
+      Object.entries(obj).forEach(([k,v])=>{ if(v!==undefined) clean[k]=this._cleanForFirestore(v); });
+      return clean;
+    }
+    return obj;
+  },
   _save(d){
     if(Array.isArray(d)){ console.error('Settings: received array instead of object, aborting save'); return false; }
     if(typeof d !== 'object' || d === null){ console.error('Settings: invalid data type:', typeof d); return false; }
@@ -2138,7 +2147,8 @@ const SettingsManager = {
       console.log('Settings saved to localStorage:', this._key());
     } catch(e){ console.warn('Settings localStorage write failed:', e); }
     if(window._firebaseReady && this._uid !== 'guest'){
-      window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),d)
+      const cleanD = this._cleanForFirestore(d);
+      window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),cleanD)
         .then(()=>console.log('Settings synced to Firestore'))
         .catch(e=>console.error('Settings Firestore sync failed:',e.message));
     }
@@ -2503,7 +2513,11 @@ function bootApp(user){
           // Each field is only applied if it is present and valid in the remote doc
           // to avoid an empty/stale Firestore doc wiping out good local settings.
           if(fs.accounts?.length > 0)    S.accounts = fs.accounts;
-          if(fs.brokerAccountMap && Object.keys(fs.brokerAccountMap).length > 0) S.brokerAccountMap = fs.brokerAccountMap;
+          if(fs.brokerAccountMap && Object.keys(fs.brokerAccountMap).length > 0){
+            // Merge both maps — local wins on conflict so a failed Firestore sync
+            // (which left the remote doc with an older map) can't erase local changes
+            S.brokerAccountMap = {...fs.brokerAccountMap, ...(S.brokerAccountMap||{})};
+          }
           if(fs.prefs   && Object.keys(fs.prefs).length   > 0) S.prefs    = {...S.prefs,   ...fs.prefs};
           if(fs.formFields && Object.keys(fs.formFields).length > 0) S.formFields = {...S.formFields, ...fs.formFields};
           if(fs.widgets    && Object.keys(fs.widgets).length    > 0) S.widgets    = {...S.widgets,    ...fs.widgets};
