@@ -2107,20 +2107,32 @@ const DEFAULT_SYMBOLS = {
 
 /* ══════════════════════════════════════════════════════
    SETTINGS MANAGER (swap-ready)
-   Key: tradedesk_settings_{userId}
+   Key: tradedesk_s_{userId}
 ══════════════════════════════════════════════════════ */
 const SettingsManager = {
   _uid:'guest',
-  _key(){ return `tradedesk_settings_${this._uid}`; },
-  _load(){ try{return JSON.parse(localStorage.getItem(this._key()));}catch{return null;} },
+  _key(){ return `tradedesk_s_${this._uid}`; },
+  _load(){
+    try{
+      // Primary key; fall back to old key name for migration
+      let raw = localStorage.getItem(this._key());
+      if(!raw) raw = localStorage.getItem(`tradedesk_settings_${this._uid}`);
+      const parsed = JSON.parse(raw);
+      if(Array.isArray(parsed)){ console.warn('Settings: discarding corrupted array in localStorage'); return null; }
+      return parsed;
+    }catch{ return null; }
+  },
   _save(d){
-    try{ localStorage.setItem(this._key(), JSON.stringify(d)); } catch(e) {
-      console.warn('Settings localStorage write failed:', e);
-    }
+    if(Array.isArray(d)){ console.error('Settings: received array instead of object, aborting save'); return false; }
+    if(typeof d !== 'object' || d === null){ console.error('Settings: invalid data type:', typeof d); return false; }
+    try{
+      localStorage.setItem(this._key(), JSON.stringify(d));
+      console.log('Settings saved to localStorage:', this._key());
+    } catch(e){ console.warn('Settings localStorage write failed:', e); }
     if(window._firebaseReady && this._uid !== 'guest'){
-      console.log('Settings saved to Firestore:', Object.keys(d));
       window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),d)
-        .catch(e=>console.warn('Settings Firestore sync failed:',e));
+        .then(()=>console.log('Settings synced to Firestore'))
+        .catch(e=>console.error('Settings Firestore sync failed:',e.message));
     }
     return true;
   },
