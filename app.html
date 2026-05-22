@@ -4422,7 +4422,9 @@ function saveTrade(){
 }
 function deleteTrade(id){
   showConfirm('Archive trade?','This trade will be hidden from your journal. You can restore it from Settings → Danger zone.',async()=>{
-    const uid=firebase.auth().currentUser?.uid;
+    console.log('[deleteTrade] confirmed for:', id);
+    if(!window._fbSetDoc||!window._fbDoc||!window._fbDb){showToast('Firebase not ready, try again','error');return;}
+    const uid=window._fbAuth?.currentUser?.uid;
     if(!uid){showToast('Not signed in','error');return;}
     try{
       const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(id));
@@ -4442,7 +4444,7 @@ function deleteTrade(id){
 let _deletedTrades=[];
 
 async function loadDeletedTrades(){
-  const uid=firebase.auth().currentUser?.uid;
+  const uid=window._fbAuth?.currentUser?.uid;
   if(!uid){showToast('Not signed in','error');return;}
   const wrap=document.getElementById('archived-trades-wrap');
   wrap.innerHTML='<div style="color:var(--muted);font-size:13px;text-align:center;padding:24px 0">Loading…</div>';
@@ -4509,7 +4511,7 @@ function renderDeletedTrades(){
 }
 
 async function restoreTrade(id){
-  const uid=firebase.auth().currentUser?.uid;
+  const uid=window._fbAuth?.currentUser?.uid;
   if(!uid)return;
   try{
     const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(id));
@@ -4524,7 +4526,7 @@ async function restoreTrade(id){
 }
 
 async function restoreAllTrades(){
-  const uid=firebase.auth().currentUser?.uid;
+  const uid=window._fbAuth?.currentUser?.uid;
   if(!uid)return;
   showConfirm('Restore all archived trades?',`${_deletedTrades.length} trade(s) will be returned to your journal.`,async()=>{
     try{
@@ -4548,7 +4550,7 @@ async function restoreAllTrades(){
 }
 
 async function permanentDeleteTrade(id){
-  const uid=firebase.auth().currentUser?.uid;
+  const uid=window._fbAuth?.currentUser?.uid;
   if(!uid)return;
   showConfirm('Permanently delete trade?','This cannot be undone. The trade will be gone forever.',async()=>{
     try{
