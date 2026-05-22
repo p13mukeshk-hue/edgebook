@@ -2187,6 +2187,7 @@ const SettingsManager = {
       sidebarSections:{...d.sidebarSections,...(saved.sidebarSections||{})},
       prefs:{...d.prefs,...(saved.prefs||{})},
       customFields:saved.customFields||[],
+      brokerAccountMap:saved.brokerAccountMap||{},
     };
   },
   set(s){ return this._save(s); },
@@ -2481,7 +2482,7 @@ function bootApp(user){
           // Each field is only applied if it is present and valid in the remote doc
           // to avoid an empty/stale Firestore doc wiping out good local settings.
           if(fs.accounts?.length > 0)    S.accounts = fs.accounts;
-          if(fs.brokerAccountMap)        S.brokerAccountMap = fs.brokerAccountMap;
+          if(fs.brokerAccountMap && Object.keys(fs.brokerAccountMap).length > 0) S.brokerAccountMap = fs.brokerAccountMap;
           if(fs.prefs   && Object.keys(fs.prefs).length   > 0) S.prefs    = {...S.prefs,   ...fs.prefs};
           if(fs.formFields && Object.keys(fs.formFields).length > 0) S.formFields = {...S.formFields, ...fs.formFields};
           if(fs.widgets    && Object.keys(fs.widgets).length    > 0) S.widgets    = {...S.widgets,    ...fs.widgets};
@@ -2753,7 +2754,9 @@ function populateBrokerMappingDropdown(broker){
 
 function saveBrokerMapping(broker, accountId){
   S.brokerAccountMap = S.brokerAccountMap || {};
-  S.brokerAccountMap[broker] = accountId || null;
+  if(accountId) S.brokerAccountMap[broker] = accountId;
+  else delete S.brokerAccountMap[broker];
+  console.log('[saveBrokerMapping]', broker, '->', accountId||'(cleared)', JSON.stringify(S.brokerAccountMap));
   SettingsManager.set(S);
   showToast('Account mapping saved','success');
 }
