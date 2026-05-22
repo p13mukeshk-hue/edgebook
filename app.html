@@ -1771,6 +1771,34 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
             <!-- DANGER ZONE -->
             <div id="sp-danger" class="settings-panel">
               <div class="s-panel-head"><div class="s-panel-head-left"><div class="s-panel-title" style="color:var(--red)">Danger zone</div><div class="s-panel-sub">These actions are permanent and cannot be undone.</div></div><div class="help-wrap"><div class="help-icon help-lg" onclick="toggleHelp('ht-danger',event)" style="border-color:rgba(255,94,106,0.3);color:var(--red)">?</div><div class="help-tooltip ht-below" id="ht-danger"><div class="ht-title"><i class="fa-solid fa-triangle-exclamation" style="font-size:11px;color:var(--red)"></i> Danger zone</div><div class="ht-body">These actions permanently delete data from your device and cannot be reversed. A confirmation dialog will appear before anything is deleted.</div><div class="ht-tip"><i class="fa-solid fa-lightbulb"></i> Export your trades as CSV and settings as JSON before clearing — so you can restore them if needed.</div></div></div></div>
+              <!-- Archived trades -->
+              <div class="s-section" style="margin-bottom:24px">
+                <div class="s-section-title" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                  <span>Archived trades <span id="archived-count-badge" style="font-size:11px;color:var(--muted);font-weight:400"></span></span>
+                  <div style="display:flex;gap:8px">
+                    <button class="btn-ghost" onclick="loadDeletedTrades()" style="font-size:12px"><i class="fa-solid fa-rotate"></i> Refresh</button>
+                    <button class="btn-ghost" id="restore-all-btn" onclick="restoreAllTrades()" style="font-size:12px;display:none"><i class="fa-solid fa-rotate-left"></i> Restore all</button>
+                  </div>
+                </div>
+                <!-- Filter bar -->
+                <div id="archived-filter-bar" style="display:none;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                  <input id="archived-search" placeholder="Search symbol…" oninput="renderDeletedTrades()" style="width:130px;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:12px">
+                  <select id="archived-account" onchange="renderDeletedTrades()" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:12px">
+                    <option value="">All accounts</option>
+                  </select>
+                  <select id="archived-source" onchange="renderDeletedTrades()" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:12px">
+                    <option value="">All sources</option>
+                    <option value="manual">Manual</option>
+                    <option value="zerodha">Zerodha</option>
+                    <option value="ctrader">cTrader</option>
+                  </select>
+                  <span id="archived-results-label" style="font-size:11px;color:var(--muted)"></span>
+                </div>
+                <div id="archived-trades-wrap">
+                  <div style="color:var(--muted);font-size:13px;text-align:center;padding:24px 0">Click Refresh to load archived trades.</div>
+                </div>
+              </div>
+
               <div class="s-section">
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Clear all trades</div><div class="s-row-desc">Permanently delete all <span id="trade-count-label">0</span> trades from this device</div></div><div class="s-row-right"><button class="btn-danger" onclick="confirmClearTrades()"><i class="fa-solid fa-trash"></i> Clear trades</button></div></div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Reset settings</div><div class="s-row-desc">Restore all settings to defaults</div></div><div class="s-row-right"><button class="btn-danger" onclick="confirmResetSettings()"><i class="fa-solid fa-rotate-left"></i> Reset</button></div></div>
@@ -2235,7 +2263,7 @@ const DataStore = {
     try{
       const col=window._fbCollection(window._fbDb,'users',this._uid,'trades');
       const snap=opts.forceServer ? await window._fbGetDocsFromServer(col) : await window._fbGetDocs(col);
-      const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null);
+      const fsTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).filter(t=>t.symbol&&t.entry!=null&&!t.deleted);
       trades=fsTrades;
       refreshAll();
     }catch(e){
@@ -4393,8 +4421,145 @@ function saveTrade(){
   showToast(wasEdit?'Trade updated':'Trade logged','success');
 }
 function deleteTrade(id){
-  showConfirm('Delete trade?','This trade will be permanently removed.',()=>{
-    trades=trades.filter(t=>String(t.id)!==String(id)); DataStore.saveTrades(trades); refreshAll(); showToast('Trade deleted','success');
+  showConfirm('Archive trade?','This trade will be hidden from your journal. You can restore it from Settings → Danger zone.',async()=>{
+    const uid=firebase.auth().currentUser?.uid;
+    if(!uid){showToast('Not signed in','error');return;}
+    try{
+      const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(id));
+      await window._fbSetDoc(ref,{deleted:true,deletedAt:todayIST()},{merge:true});
+      trades=trades.filter(t=>String(t.id)!==String(id));
+      refreshAll();
+      showToast('Trade archived','success');
+    }catch(e){
+      showToast('Failed to archive trade: '+e.message,'error');
+    }
+  });
+}
+
+/* ══════════════════════════════════════════════════════
+   ARCHIVED TRADES
+══════════════════════════════════════════════════════ */
+let _deletedTrades=[];
+
+async function loadDeletedTrades(){
+  const uid=firebase.auth().currentUser?.uid;
+  if(!uid){showToast('Not signed in','error');return;}
+  const wrap=document.getElementById('archived-trades-wrap');
+  wrap.innerHTML='<div style="color:var(--muted);font-size:13px;text-align:center;padding:24px 0">Loading…</div>';
+  try{
+    const col=window._fbCollection(window._fbDb,'users',uid,'trades');
+    const q=window._fbQuery(col,window._fbWhere('deleted','==',true));
+    const snap=await window._fbGetDocsFromServer(q);
+    _deletedTrades=snap.docs.map(d=>normaliseFsTrade(d.data())).sort((a,b)=>b.deletedAt?.localeCompare(a.deletedAt||'')||0);
+    // populate account filter
+    const acctSel=document.getElementById('archived-account');
+    const existingIds=new Set([...acctSel.options].map(o=>o.value));
+    S.accounts.forEach(a=>{if(!existingIds.has(a.id)){const o=document.createElement('option');o.value=a.id;o.textContent=a.name;acctSel.appendChild(o);}});
+    document.getElementById('archived-filter-bar').style.display='flex';
+    document.getElementById('restore-all-btn').style.display=_deletedTrades.length?'':'none';
+    renderDeletedTrades();
+  }catch(e){
+    wrap.innerHTML=`<div style="color:var(--red);font-size:13px;text-align:center;padding:24px 0">Failed to load: ${e.message}</div>`;
+  }
+}
+
+function renderDeletedTrades(){
+  const search=(document.getElementById('archived-search')?.value||'').toLowerCase();
+  const acct=document.getElementById('archived-account')?.value||'';
+  const source=document.getElementById('archived-source')?.value||'';
+  const filtered=_deletedTrades.filter(t=>{
+    if(search&&!t.symbol?.toLowerCase().includes(search))return false;
+    if(acct&&t.accountId!==acct)return false;
+    if(source&&t.source!==source)return false;
+    return true;
+  });
+  const badge=document.getElementById('archived-count-badge');
+  if(badge)badge.textContent=_deletedTrades.length?`(${_deletedTrades.length})`:'';
+  const label=document.getElementById('archived-results-label');
+  if(label)label.textContent=filtered.length!==_deletedTrades.length?`${filtered.length} of ${_deletedTrades.length} shown`:'';
+  const wrap=document.getElementById('archived-trades-wrap');
+  if(!filtered.length){
+    wrap.innerHTML='<div style="color:var(--muted);font-size:13px;text-align:center;padding:24px 0">No archived trades.</div>';
+    return;
+  }
+  const pnlColor=p=>p==null?'var(--muted)':p>=0?'var(--green)':'var(--red)';
+  wrap.innerHTML=`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr style="color:var(--muted);text-align:left;border-bottom:1px solid var(--border)">
+      <th style="padding:6px 8px">Date</th><th style="padding:6px 8px">Symbol</th><th style="padding:6px 8px">Dir</th>
+      <th style="padding:6px 8px">Entry</th><th style="padding:6px 8px">Exit</th><th style="padding:6px 8px">P&L</th>
+      <th style="padding:6px 8px">Account</th><th style="padding:6px 8px">Source</th><th style="padding:6px 8px">Archived</th>
+      <th style="padding:6px 8px">Actions</th>
+    </tr></thead>
+    <tbody>${filtered.map(t=>`<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:6px 8px">${t.date||'—'}</td>
+      <td style="padding:6px 8px;font-weight:500">${t.symbol||'—'}</td>
+      <td style="padding:6px 8px">${t.direction||'—'}</td>
+      <td style="padding:6px 8px">${t.entry??'—'}</td>
+      <td style="padding:6px 8px">${t.exit??'Open'}</td>
+      <td style="padding:6px 8px;color:${pnlColor(t.pnl)}">${t.pnl!=null?t.pnl.toFixed(2):'—'}</td>
+      <td style="padding:6px 8px">${acctName(t.accountId||'')||'—'}</td>
+      <td style="padding:6px 8px">${t.source||'manual'}</td>
+      <td style="padding:6px 8px">${t.deletedAt||'—'}</td>
+      <td style="padding:6px 8px;white-space:nowrap">
+        <button class="btn-ghost" style="font-size:11px;padding:3px 8px;margin-right:4px" onclick="restoreTrade('${t.id}')">↩ Restore</button>
+        <button class="btn-danger" style="font-size:11px;padding:3px 8px" onclick="permanentDeleteTrade('${t.id}')">🗑 Delete</button>
+      </td>
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+async function restoreTrade(id){
+  const uid=firebase.auth().currentUser?.uid;
+  if(!uid)return;
+  try{
+    const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(id));
+    await window._fbSetDoc(ref,{deleted:false,deletedAt:null},{merge:true});
+    _deletedTrades=_deletedTrades.filter(t=>String(t.id)!==String(id));
+    renderDeletedTrades();
+    await DataStore.loadFromFirestore({forceServer:true});
+    showToast('Trade restored','success');
+  }catch(e){
+    showToast('Failed to restore: '+e.message,'error');
+  }
+}
+
+async function restoreAllTrades(){
+  const uid=firebase.auth().currentUser?.uid;
+  if(!uid)return;
+  showConfirm('Restore all archived trades?',`${_deletedTrades.length} trade(s) will be returned to your journal.`,async()=>{
+    try{
+      const BATCH=400;
+      for(let i=0;i<_deletedTrades.length;i+=BATCH){
+        const batch=window._fbWriteBatch(window._fbDb);
+        _deletedTrades.slice(i,i+BATCH).forEach(t=>{
+          const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(t.id));
+          batch.set(ref,{deleted:false,deletedAt:null},{merge:true});
+        });
+        await batch.commit();
+      }
+      _deletedTrades=[];
+      renderDeletedTrades();
+      await DataStore.loadFromFirestore({forceServer:true});
+      showToast('All trades restored','success');
+    }catch(e){
+      showToast('Failed to restore all: '+e.message,'error');
+    }
+  });
+}
+
+async function permanentDeleteTrade(id){
+  const uid=firebase.auth().currentUser?.uid;
+  if(!uid)return;
+  showConfirm('Permanently delete trade?','This cannot be undone. The trade will be gone forever.',async()=>{
+    try{
+      const ref=window._fbDoc(window._fbDb,'users',uid,'trades',String(id));
+      await window._fbDeleteDoc(ref);
+      _deletedTrades=_deletedTrades.filter(t=>String(t.id)!==String(id));
+      renderDeletedTrades();
+      showToast('Trade permanently deleted','success');
+    }catch(e){
+      showToast('Failed to delete: '+e.message,'error');
+    }
   });
 }
 
@@ -4982,7 +5147,7 @@ function handleTradesJSONImport(input){
 }
 
 function exportCSV(){
-  const src=tradesForContext('journal');
+  const src=tradesForContext('journal').filter(t=>!t.deleted);
   const h=['Date','Symbol','Asset','Dir','Entry','Exit','Size','SL','TP','PnL','Strategy','Emotion','Account','Notes'];
   const body=src.map(t=>[t.date,t.symbol,ASSET_LABELS[t.asset],t.direction,t.entry,t.exit??'',t.size,t.sl??'',t.tp??'',t.pnl!=null?t.pnl.toFixed(2):'Open',t.strategy||'',t.emotion||'',acctName(t.accountId||''),`"${(t.notes||'').replace(/"/g,'""')}"`].join(','));
   const a=document.createElement('a');

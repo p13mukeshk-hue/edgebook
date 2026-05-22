@@ -525,11 +525,18 @@ async function syncTradesForUser(uid) {
   // ── 6. Load existing Zerodha trade docs (id + isOpen) for dedup/update ────────
   const existingSnap = await tradesRef
     .where("broker", "==", "zerodha")
-    .select("id", "isOpen", "accountId")
+    .select("id", "isOpen", "accountId", "deleted", "deletedAt")
     .get();
   const existingByDocId = new Map();
   for (const doc of existingSnap.docs) {
-    existingByDocId.set(doc.id, { ref: doc.ref, isOpen: doc.data().isOpen, accountId: doc.data().accountId ?? null });
+    const d = doc.data();
+    existingByDocId.set(doc.id, {
+      ref: doc.ref,
+      isOpen: d.isOpen,
+      accountId: d.accountId ?? null,
+      deleted:   d.deleted   ?? null,
+      deletedAt: d.deletedAt ?? null,
+    });
   }
 
   // ── 7. Batch write — new trades full-set, open→closed transitions update-only ─
@@ -559,7 +566,12 @@ async function syncTradesForUser(uid) {
     } else {
       // New trade — assign accountId from brokerAccountMap if available
       const mappedAccountId = brokerAccountMap?.zerodha ?? null;
-      toWriteNew.push({ ref: docRef, trade: { ...trade, accountId: mappedAccountId ?? trade.accountId ?? null } });
+      toWriteNew.push({ ref: docRef, trade: {
+        ...trade,
+        accountId: mappedAccountId ?? trade.accountId ?? null,
+        deleted:   false,
+        deletedAt: null,
+      }});
     }
   }
 
@@ -1617,7 +1629,9 @@ function sanitizeUserFields(fields) {
       executionNote: fields.psychology?.executionNote ?? null,
       review:        fields.psychology?.review        ?? null,
     },
-    accountId: f.accountId ?? null,
+    accountId:  fields.accountId  ?? null,
+    deleted:    fields.deleted    ?? false,
+    deletedAt:  fields.deletedAt  ?? null,
   };
 }
 
@@ -2412,15 +2426,19 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   // overwritten; all broker-computed fields (including size, entry, exit, pnl) are always
   // updated to the latest computed value, so stale data from earlier buggy imports is fixed.
 
-  // Read existing accountIds so user-assigned account mappings are never overwritten by sync
-  const existingAccountIdMap = new Map();
+  // Read existing accountIds and soft-delete state so they are never overwritten by sync
+  const existingPreservedMap = new Map(); // docId → { accountId, deleted, deletedAt }
   try {
-    const existingAcctSnap = await tradesRef.where("source", "==", "ctrader").select("accountId").get();
+    const existingAcctSnap = await tradesRef.where("source", "==", "ctrader").select("accountId", "deleted", "deletedAt").get();
     for (const d of existingAcctSnap.docs) {
-      const aid = d.data().accountId;
-      if (aid != null) existingAccountIdMap.set(d.id, aid);
+      const data = d.data();
+      existingPreservedMap.set(d.id, {
+        accountId: data.accountId ?? null,
+        deleted:   data.deleted   ?? null,
+        deletedAt: data.deletedAt ?? null,
+      });
     }
-  } catch(e) { console.warn(`cTrader uid=${uid}: failed to read existing accountIds:`, e.message); }
+  } catch(e) { console.warn(`cTrader uid=${uid}: failed to read existing preserved fields:`, e.message); }
 
   const BATCH_SIZE = 400;
   let written      = 0;
@@ -2428,13 +2446,15 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
     const batch = db.batch();
     for (const trade of toProcess.slice(i, i + BATCH_SIZE)) {
-      const docId  = `ctrader_${trade.brokerTradeId}`;
-      const docRef = tradesRef.doc(docId);
-      // Preserve user-assigned accountId; only use broker-derived one for new docs
-      const preservedAccountId = existingAccountIdMap.get(docId);
+      const docId     = `ctrader_${trade.brokerTradeId}`;
+      const docRef    = tradesRef.doc(docId);
+      const preserved = existingPreservedMap.get(docId);
       batch.set(docRef, {
         ...trade,
-        accountId: preservedAccountId ?? trade.accountId ?? null,
+        // Preserve user-assigned accountId; only use broker-derived one for new docs
+        accountId: preserved?.accountId ?? trade.accountId ?? null,
+        // Preserve soft-delete state — never un-delete a trade on sync
+        ...(preserved?.deleted != null ? { deleted: preserved.deleted, deletedAt: preserved.deletedAt } : {}),
         syncedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     }
@@ -2912,7 +2932,7 @@ exports.forceReimportCtrader = functions
       const ctraderDocs = allSnap.docs.filter((d) => d.id.startsWith("ctrader_"));
       console.log(`forceReimportCtrader uid=${uid}: found ${ctraderDocs.length} cTrader docs`);
 
-      const USER_FIELDS = ["notes", "screenshots", "psychology", "strategy", "emotion", "tags", "accountId"];
+      const USER_FIELDS = ["notes", "screenshots", "psychology", "strategy", "emotion", "tags", "accountId", "deleted", "deletedAt"];
       const userFieldsMap = {};
       for (const doc of ctraderDocs) {
         const data = doc.data();
@@ -2955,7 +2975,7 @@ exports.forceReimportCtrader = functions
         for (const [docId, fields] of preservedEntries) {
           if (!newDocIds.has(docId)) continue;
 
-          const hasUserData = fields.notes || fields.strategy || fields.emotion ||
+          const hasUserData = fields.notes || fields.strategy || fields.emotion || fields.deleted ||
             (fields.psychology && (
               fields.psychology.preThought ||
               fields.psychology.executionNote ||
