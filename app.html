@@ -2131,10 +2131,22 @@ const SettingsManager = {
     }catch{ return null; }
   },
   _cleanForFirestore(obj){
-    if(Array.isArray(obj)) return obj.map(item=>this._cleanForFirestore(item)).filter(item=>item!==undefined);
-    if(obj && typeof obj==='object'){
+    if(obj===null||obj===undefined) return null;
+    if(Array.isArray(obj)){
+      return obj.map(i=>this._cleanForFirestore(i)).filter(i=>i!==undefined&&i!==null);
+    }
+    if(typeof obj==='object'){
+      const keys=Object.keys(obj);
+      // Firestore rejects objects whose keys are all numeric — convert to proper array
+      const isArrayLike=keys.length>0&&keys.every(k=>!isNaN(parseInt(k,10)));
+      if(isArrayLike){
+        console.warn('Settings: converting array-like object with numeric keys to array:', keys.slice(0,5));
+        return Object.values(obj).map(i=>this._cleanForFirestore(i)).filter(i=>i!==undefined&&i!==null);
+      }
       const clean={};
-      Object.entries(obj).forEach(([k,v])=>{ if(v!==undefined) clean[k]=this._cleanForFirestore(v); });
+      for(const [k,v] of Object.entries(obj)){
+        if(v!==undefined){ clean[k]=this._cleanForFirestore(v); }
+      }
       return clean;
     }
     return obj;
