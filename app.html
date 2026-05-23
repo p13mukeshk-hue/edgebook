@@ -2127,8 +2127,17 @@ const SettingsManager = {
         || parsed.formFields !== undefined
         || parsed.prefs !== undefined;
       if(!looksLikeSettings){ console.warn('Settings: discarding object with no settings keys'); return null; }
-      return parsed;
+      return this._normalizeArrayFields(parsed);
     }catch{ return null; }
+  },
+  _normalizeArrayFields(s){
+    // accounts and customFields must always be proper JS arrays.
+    // They can arrive from localStorage or Firestore as numeric-keyed objects
+    // {"0":{...},"1":{...}} when JSON round-trips or spreads go wrong.
+    if(!s||typeof s!=='object') return s;
+    if(s.accounts!=null&&!Array.isArray(s.accounts))   s.accounts=Object.values(s.accounts);
+    if(s.customFields!=null&&!Array.isArray(s.customFields)) s.customFields=Object.values(s.customFields);
+    return s;
   },
   _cleanForFirestore(obj){
     if(obj===null||obj===undefined) return null;
@@ -2154,12 +2163,13 @@ const SettingsManager = {
   _save(d){
     if(Array.isArray(d)){ console.error('Settings: received array instead of object, aborting save'); return false; }
     if(typeof d !== 'object' || d === null){ console.error('Settings: invalid data type:', typeof d); return false; }
+    const normalized = this._normalizeArrayFields({...d});
     try{
-      localStorage.setItem(this._key(), JSON.stringify(d));
+      localStorage.setItem(this._key(), JSON.stringify(normalized));
       console.log('Settings saved to localStorage:', this._key());
     } catch(e){ console.warn('Settings localStorage write failed:', e); }
     if(window._firebaseReady && this._uid !== 'guest'){
-      const cleanD = this._cleanForFirestore(d);
+      const cleanD = this._cleanForFirestore(normalized);
       window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),cleanD)
         .then(()=>console.log('Settings synced to Firestore'))
         .catch(e=>console.error('Settings Firestore sync failed:',e.message));
@@ -2224,11 +2234,11 @@ const SettingsManager = {
       ...d,...saved,
       formFields:{...d.formFields,...(saved.formFields||{})},
       symbols:{...d.symbols,...(saved.symbols||{})},
-      accounts: saved.accounts||[],
+      accounts: Array.isArray(saved.accounts)?saved.accounts:saved.accounts?Object.values(saved.accounts):[],
       widgets:{...d.widgets,...(saved.widgets||{})},
       sidebarSections:{...d.sidebarSections,...(saved.sidebarSections||{})},
       prefs:{...d.prefs,...(saved.prefs||{})},
-      customFields:saved.customFields||[],
+      customFields:Array.isArray(saved.customFields)?saved.customFields:saved.customFields?Object.values(saved.customFields):[],
       brokerAccountMap:saved.brokerAccountMap||{},
     };
   },
@@ -2535,6 +2545,7 @@ function bootApp(user){
           if(fs.widgets    && Object.keys(fs.widgets).length    > 0) S.widgets    = {...S.widgets,    ...fs.widgets};
           if(fs.sidebarSections && Object.keys(fs.sidebarSections).length > 0) S.sidebarSections = {...S.sidebarSections, ...fs.sidebarSections};
           if(fs.customFields?.length > 0) S.customFields = fs.customFields;
+          SettingsManager._normalizeArrayFields(S);
           SettingsManager.set(S);
         }
       }catch(e){ console.warn('Settings Firestore load failed:', e); }
