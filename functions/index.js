@@ -253,7 +253,7 @@ function zerodhaTradeDocId(symbol, date, entryPrice) {
  * @param {string} label       Log prefix (e.g. "syncZerodhaTrades")
  * @returns {Array} pairedTrades — Edgebook trade objects ready to batch-write
  */
-function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha") {
+function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existingOpenLongs = new Map()) {
   // Group fills by tradingsymbol, sort by fill time ascending
   const bySymbol = {};
   for (const fill of fills) {
@@ -323,31 +323,27 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha") {
             syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
           });
         } else {
-          // SELL with no preceding BUY — Short entry
-          pairedTrades.push({
-            id:            zerodhaTradeDocId(sym, date, price),
-            brokerTradeId: fill.order_id || fill.trade_id,
-            source:        "zerodha",
-            broker:        "zerodha",
-            symbol:        sym,
-            asset,
-            instrument:    instrument ?? null,
-            optionType:    optionType ?? null,
-            strike:        fill.strike  ? Number(fill.strike) : null,
-            expiry:        fill.expiry  || null,
-            exchange:      fill.exchange || null,
-            product:       fill.product  || null,
-            direction:     "Short",
-            entry:         price,
-            exit:          null,
-            size:          qty,
-            pnl:           null,
-            isOpen:        true,
-            date,
-            entryTime:     time,
-            exitTime:      null,
-            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
-          });
+          // SELL with no same-day BUY — could be closing a multi-day Long position.
+          // Check existingOpenLongs before creating anything to avoid phantom Short trades.
+          const existingLong = existingOpenLongs.get(sym);
+          if (existingLong) {
+            // Close the existing open Long from a prior day
+            const pnl = parseFloat(((price - existingLong.entry) * existingLong.size).toFixed(2));
+            pairedTrades.push({
+              id:       existingLong.docId,   // same doc id — dedup will update it to isOpen:false
+              symbol:   sym,
+              direction: "Long",
+              exit:     price,
+              exitTime: time,
+              pnl,
+              isOpen:   false,
+              syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            console.log(`${label} [${uid}]: SELL closes existing open Long ${sym} (doc ${existingLong.docId}) exit=${price} pnl=${pnl}`);
+          } else {
+            // No open Long in Firestore either — skip to prevent phantom Short creation
+            console.log(`${label} [${uid}]: SELL with no matching BUY for ${sym} — skipping (phantom Short suppressed)`);
+          }
         }
         continue;
       }
@@ -390,6 +386,82 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha") {
   }
 
   return pairedTrades;
+}
+
+/**
+ * Soft-delete phantom open Zerodha trades — trades marked isOpen:true in Firestore
+ * but whose symbol no longer has an open position in Kite.
+ * These are created when a SELL arrives without a same-day BUY (now suppressed going
+ * forward, but existing phantom docs need cleanup).
+ */
+async function reconcileOpenZerodhaPositions(uid, kite) {
+  // Fetch all open Zerodha trades from Firestore
+  const openSnap = await db.collection("users").doc(uid).collection("trades")
+    .where("source", "==", "zerodha")
+    .where("isOpen",  "==", true)
+    .get();
+
+  if (openSnap.empty) {
+    console.log(`reconcileZerodha [${uid}]: no open Zerodha trades — nothing to reconcile`);
+    return;
+  }
+
+  // Fetch live positions so we know what is genuinely still open
+  let stillOpenSymbols = new Set();
+  try {
+    const positions = await kite.getPositions();
+    stillOpenSymbols = new Set(
+      ((positions && positions.net) || [])
+        .filter(p => p.quantity !== 0)
+        .map(p => (p.tradingsymbol || "").toUpperCase())
+    );
+  } catch (e) {
+    console.warn(`reconcileZerodha [${uid}]: getPositions failed (${e.message}) — skipping reconcile`);
+    return;
+  }
+
+  console.log(
+    `reconcileZerodha [${uid}]: Firestore open=${openSnap.size} ` +
+    `Kite still-open=${[...stillOpenSymbols].join(",") || "(none)"}`
+  );
+
+  const batch = db.batch();
+  let fixed = 0;
+  const today = new Date().toISOString().slice(0, 10);
+
+  for (const doc of openSnap.docs) {
+    const trade = doc.data();
+    const sym   = (trade.symbol || "").toUpperCase();
+
+    // Still genuinely open in Kite → leave it
+    if (stillOpenSymbols.has(sym)) continue;
+
+    // Not open in Kite + no exit price = phantom trade — soft-delete it
+    if (!trade.exit) {
+      batch.set(doc.ref, {
+        deleted:   true,
+        deletedAt: today,
+        syncedAt:  admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      console.log(`reconcileZerodha [${uid}]: soft-deleting phantom trade ${sym} (${doc.id})`);
+      fixed++;
+    } else {
+      // Has exit but isOpen still true — data inconsistency, fix the flag
+      batch.set(doc.ref, {
+        isOpen:   false,
+        syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      console.log(`reconcileZerodha [${uid}]: fixing isOpen flag for ${sym} (${doc.id}) — has exit but was marked open`);
+      fixed++;
+    }
+  }
+
+  if (fixed > 0) {
+    await batch.commit();
+    console.log(`reconcileZerodha [${uid}]: reconciled ${fixed} phantom/stale trade(s)`);
+  } else {
+    console.log(`reconcileZerodha [${uid}]: all open trades confirmed genuine — no changes`);
+  }
 }
 
 async function syncTradesForUser(uid) {
@@ -469,8 +541,34 @@ async function syncTradesForUser(uid) {
   // ── 3. Resolve prop accountId from user settings ──────────────────────────────
   const accountId = await resolvePropAccountId(uid);
 
-  // ── 4. FIFO pair BUY + SELL fills per symbol → round-trip trades ─────────────
-  const pairedTrades = pairFillsIntoTrades(fills, openSymbols, uid, "syncZerodhaTrades");
+  // ── 4. Load existing Zerodha docs — needed for dedup AND multi-day close matching ─
+  const existingSnap = await tradesRef
+    .where("broker", "==", "zerodha")
+    .select("id", "isOpen", "accountId", "deleted", "deletedAt", "symbol", "direction", "entry", "size", "source")
+    .get();
+  const existingByDocId  = new Map();
+  const existingOpenLongs = new Map();  // symbol → { docId, entry, size }
+  for (const doc of existingSnap.docs) {
+    const d = doc.data();
+    existingByDocId.set(doc.id, {
+      ref:       doc.ref,
+      isOpen:    d.isOpen,
+      accountId: d.accountId ?? null,
+      deleted:   d.deleted   ?? null,
+      deletedAt: d.deletedAt ?? null,
+    });
+    // Index open Long trades by symbol so SELL-without-BUY can close them
+    if (d.isOpen === true && !d.deleted && d.direction === "Long" && d.source === "zerodha") {
+      existingOpenLongs.set((d.symbol || "").toUpperCase(), {
+        docId: doc.id,
+        entry: Number(d.entry || 0),
+        size:  Number(d.size  || 1),
+      });
+    }
+  }
+
+  // ── 5. FIFO pair BUY + SELL fills per symbol → round-trip trades ─────────────
+  const pairedTrades = pairFillsIntoTrades(fills, openSymbols, uid, "syncZerodhaTrades", existingOpenLongs);
 
   // Create open Long trades from positions that have no fills today
   // (e.g. position opened on a previous day, still running)
@@ -522,24 +620,7 @@ async function syncTradesForUser(uid) {
     `${pairedTrades.filter((t) => t.isOpen).length} open)`
   );
 
-  // ── 6. Load existing Zerodha trade docs (id + isOpen) for dedup/update ────────
-  const existingSnap = await tradesRef
-    .where("broker", "==", "zerodha")
-    .select("id", "isOpen", "accountId", "deleted", "deletedAt")
-    .get();
-  const existingByDocId = new Map();
-  for (const doc of existingSnap.docs) {
-    const d = doc.data();
-    existingByDocId.set(doc.id, {
-      ref: doc.ref,
-      isOpen: d.isOpen,
-      accountId: d.accountId ?? null,
-      deleted:   d.deleted   ?? null,
-      deletedAt: d.deletedAt ?? null,
-    });
-  }
-
-  // ── 7. Batch write — new trades full-set, open→closed transitions update-only ─
+  // ── 6. Batch write — new trades full-set, open→closed transitions update-only ─
   const BATCH_SIZE    = 400;
   let   written       = 0;
   let   updatedCount  = 0;
@@ -629,6 +710,11 @@ async function syncTradesForUser(uid) {
 
   await db.collection("users").doc(uid).collection("brokers").doc("zerodha")
     .update({ lastSync: admin.firestore.FieldValue.serverTimestamp() });
+
+  // ── Clean up any phantom open trades left from before this fix ───────────────
+  await reconcileOpenZerodhaPositions(uid, kite).catch(e =>
+    console.warn(`reconcileZerodha [${uid}]: reconcile error — ${e.message}`)
+  );
 
   const dayOfWeek = new Date().toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "long" });
   const isWeekend = ["Saturday", "Sunday"].includes(dayOfWeek);
@@ -811,7 +897,7 @@ exports.syncZerodhaHistory = functions.https.onRequest(async (req, res) => {
     // ── 2. Pair fills into trades using shared FIFO helper ──────────────────────
     // Pass an empty openSymbols Set — for historical data we don't have live
     // position state, so unmatched BUYs are skipped (they will appear via daily sync).
-    const pairedTrades = pairFillsIntoTrades(fills, new Set(), uid, "syncZerodhaHistory");
+    const pairedTrades = pairFillsIntoTrades(fills, new Set(), uid, "syncZerodhaHistory", new Map());
     console.log(
       `syncZerodhaHistory [${uid}]: ${fills.length} fill(s) → ` +
       `${pairedTrades.length} paired trade(s)`
