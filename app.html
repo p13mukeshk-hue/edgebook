@@ -1567,6 +1567,18 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Rows per page</div></div><div class="s-row-right"><select class="s-select" id="pref-rows" onchange="savePref('rowsPerPage',parseInt(this.value))"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></div></div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Compact table rows</div></div><div class="s-row-right"><label class="toggle"><input type="checkbox" id="pref-compact" onchange="savePref('compactTable',this.checked);applyCompact()"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div></div>
               </div>
+              <div class="s-section">
+                <div class="s-section-label">Trade Import Preferences</div>
+                <div class="s-row">
+                  <div class="s-row-left"><div class="s-row-label">Zerodha trade grouping</div><div class="s-row-desc">How broker fills are grouped into journal trades</div></div>
+                  <div class="s-row-right">
+                    <div class="theme-pill">
+                      <button class="theme-pill-opt" id="grouping-fifo-btn" onclick="setTradeGrouping('fifo')">Per round trip</button>
+                      <button class="theme-pill-opt" id="grouping-combined-btn" onclick="setTradeGrouping('combined')">Combined</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- ACCOUNTS -->
@@ -2223,6 +2235,7 @@ const SettingsManager = {
       prefs:{
         currency:'$',dateFormat:'YYYY-MM-DD',defaultAsset:'eq',
         landingPage:'dashboard',rowsPerPage:25,compactTable:false,theme:'dark',
+        tradeGrouping:'fifo',
       },
       brokerAccountMap:{},
     };
@@ -2486,6 +2499,17 @@ function startTradesListener(uid){
       if(!document.querySelector('.modal-overlay.open')){
         refreshAll();
       }
+      // Warn about trades that need manual review (e.g. unresolved orphan SELLs)
+      const reviewTrades = trades.filter(t=>t.needsReview && !t.deleted);
+      if(reviewTrades.length > 0){
+        const msg = `${reviewTrades.length} Zerodha trade(s) could not be automatically categorised — please review them in the journal.`;
+        console.warn('[tradesListener] needsReview trades:', reviewTrades.map(t=>t.symbol));
+        // Only create the notification once per session (avoid repeat on every snapshot)
+        if(!window._needsReviewNotified){
+          window._needsReviewNotified = true;
+          createNotification('warning', `${reviewTrades.length} trade(s) need review`, msg, 'sync', 'Review now', 'journal');
+        }
+      }
     },
     (error)=>{
       console.error('Trades listener error:',error.message);
@@ -2549,6 +2573,22 @@ function bootApp(user){
           SettingsManager.set(S);
         }
       }catch(e){ console.warn('Settings Firestore load failed:', e); }
+    }
+    // ── One-time restore of wrongly-deleted Zerodha trades ─────────────────────
+    if(window._firebaseReady && DataStore._uid !== 'guest' && !localStorage.getItem('zerodhaRestoreV1')){
+      (async()=>{
+        try{
+          const token = await getIdToken();
+          if(!token) return;
+          const res = await fetch(`${ZERODHA_FN}/restoreWronglyDeletedZerodha`,{
+            method:'POST', headers:{ Authorization:`Bearer ${token}` }
+          });
+          const data = await res.json();
+          console.log('[boot] Zerodha restore:', data.message);
+          localStorage.setItem('zerodhaRestoreV1','1');
+          if(data.restored > 0) showToast(`Restored ${data.restored} Zerodha trade(s)`,'success');
+        }catch(e){ console.warn('[boot] Zerodha restore failed:', e.message); }
+      })();
     }
     // Only seed sample data for guests or first-time users with no Firestore data yet
     const willLoadFromFirestore = window._firebaseReady && DataStore._uid !== 'guest';
@@ -3895,6 +3935,10 @@ function syncPrefUI(){
   const isDark=(p.theme||'dark')==='dark';
   document.getElementById('theme-dark-btn')?.classList.toggle('active', isDark);
   document.getElementById('theme-light-btn')?.classList.toggle('active', !isDark);
+  // sync trade grouping toggle
+  const isFifo=(p.tradeGrouping||'fifo')==='fifo';
+  document.getElementById('grouping-fifo-btn')?.classList.toggle('active', isFifo);
+  document.getElementById('grouping-combined-btn')?.classList.toggle('active', !isFifo);
 }
 
 /* ══════════════════════════════════════════════════════
@@ -3977,6 +4021,17 @@ function toggleFormField(k,v){ S.formFields[k].enabled=v; SettingsManager.set(S)
 function toggleWidget(k,v){ S.widgets[k].enabled=v; SettingsManager.set(S); document.getElementById('widget-'+k)?.classList.toggle('widget-hidden',!v); showToast('Widget updated','success'); }
 function toggleSidebar(k,v){ S.sidebarSections[k].enabled=v; SettingsManager.set(S); document.getElementById('nav-'+k)?.classList.toggle('hidden-nav',!v); showToast('Sidebar updated','success'); }
 function savePref(k,v){ S.prefs[k]=v; SettingsManager.set(S); applySettings(); updateMetrics(); renderTradeTable(); showToast('Saved','success'); }
+function setTradeGrouping(mode){
+  if((S.prefs.tradeGrouping||'fifo')===mode) return;
+  showConfirm(
+    'Change trade grouping?',
+    'This affects future Zerodha imports only. To regroup existing trades use Force re-import in Settings → Brokers.',
+    ()=>{
+      S.prefs.tradeGrouping=mode; SettingsManager.set(S); syncPrefUI();
+      showToast('Trade grouping set to '+(mode==='fifo'?'per round trip':'combined'),'success');
+    }
+  );
+}
 function addCustomField(){
   const name=document.getElementById('cf-name').value.trim();
   const type=document.getElementById('cf-type').value;

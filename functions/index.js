@@ -341,8 +341,35 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
             });
             console.log(`${label} [${uid}]: SELL closes existing open Long ${sym} (doc ${existingLong.docId}) exit=${price} pnl=${pnl}`);
           } else {
-            // No open Long in Firestore either — skip to prevent phantom Short creation
-            console.log(`${label} [${uid}]: SELL with no matching BUY for ${sym} — skipping (phantom Short suppressed)`);
+            // No open Long in Firestore — could be genuine Short entry or orphan SELL.
+            // Create the trade but mark needsReview so reconcile can resolve it.
+            const { asset: aAsset, instrument: aInstrument, optionType: aOptionType } = mapZerodhaInstrument(fill);
+            pairedTrades.push({
+              id:            zerodhaTradeDocId(sym, date, price),
+              brokerTradeId: fill.order_id || fill.trade_id,
+              source:        "zerodha",
+              broker:        "zerodha",
+              symbol:        sym,
+              asset:         aAsset,
+              instrument:    aInstrument ?? null,
+              optionType:    aOptionType ?? null,
+              strike:        fill.strike ? Number(fill.strike) : null,
+              expiry:        fill.expiry  || null,
+              exchange:      fill.exchange || null,
+              product:       fill.product  || null,
+              direction:     "Short",
+              entry:         price,
+              exit:          null,
+              size:          qty,
+              pnl:           null,
+              isOpen:        true,
+              needsReview:   true,
+              date,
+              entryTime:     time,
+              exitTime:      null,
+              syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+            });
+            console.log(`${label} [${uid}]: SELL with no matching BUY for ${sym} — created needsReview Short`);
           }
         }
         continue;
@@ -389,87 +416,206 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
 }
 
 /**
- * Soft-delete phantom open Zerodha trades — trades marked isOpen:true in Firestore
- * but whose symbol no longer has an open position in Kite.
- * These are created when a SELL arrives without a same-day BUY (now suppressed going
- * forward, but existing phantom docs need cleanup).
+ * Conservative reconciler for open Zerodha trades.
+ * NEVER auto-deletes. Rules:
+ *  - getPositions() fails → abort immediately, touch nothing
+ *  - Symbol still open in Kite → skip
+ *  - Options expiry (qty=0, realised_pnl available) → close with realised pnl
+ *  - Closed today (day position has realised_pnl != 0) → close with day pnl
+ *  - Uncertain (not in any position, no exit, no pnl) → set needsReview:true only
  */
 async function reconcileOpenZerodhaPositions(uid, kite) {
-  // Fetch all open Zerodha trades from Firestore
-  const openSnap = await db.collection("users").doc(uid).collection("trades")
-    .where("source", "==", "zerodha")
-    .where("isOpen",  "==", true)
-    .get();
-
-  if (openSnap.empty) {
-    console.log(`reconcileZerodha [${uid}]: no open Zerodha trades — nothing to reconcile`);
-    return;
-  }
-
-  // Fetch live positions so we know what is genuinely still open
-  let stillOpenSymbols = new Set();
   try {
-    const positions = await kite.getPositions();
-    stillOpenSymbols = new Set(
-      ((positions && positions.net) || [])
-        .filter(p => p.quantity !== 0)
-        .map(p => (p.tradingsymbol || "").toUpperCase())
-    );
-  } catch (e) {
-    console.warn(`reconcileZerodha [${uid}]: getPositions failed (${e.message}) — skipping reconcile`);
-    return;
-  }
+    const openSnap = await db.collection("users").doc(uid).collection("trades")
+      .where("source", "==", "zerodha")
+      .where("isOpen",  "==", true)
+      .get();
 
-  console.log(
-    `reconcileZerodha [${uid}]: Firestore open=${openSnap.size} ` +
-    `Kite still-open=${[...stillOpenSymbols].join(",") || "(none)"}`
-  );
+    const openTrades = openSnap.docs
+      .filter(d => !d.data().deleted)
+      .map(d => ({ _ref: d.ref, _id: d.id, ...d.data() }));
 
-  const batch = db.batch();
-  let fixed = 0;
-  const today = new Date().toISOString().slice(0, 10);
-
-  for (const doc of openSnap.docs) {
-    const trade = doc.data();
-    const sym   = (trade.symbol || "").toUpperCase();
-
-    // Still genuinely open in Kite → leave it
-    if (stillOpenSymbols.has(sym)) continue;
-
-    // Not open in Kite + no exit price = phantom trade — soft-delete it
-    if (!trade.exit) {
-      batch.set(doc.ref, {
-        deleted:   true,
-        deletedAt: today,
-        syncedAt:  admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      console.log(`reconcileZerodha [${uid}]: soft-deleting phantom trade ${sym} (${doc.id})`);
-      fixed++;
-    } else {
-      // Has exit but isOpen still true — data inconsistency, fix the flag
-      batch.set(doc.ref, {
-        isOpen:   false,
-        syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-      }, { merge: true });
-      console.log(`reconcileZerodha [${uid}]: fixing isOpen flag for ${sym} (${doc.id}) — has exit but was marked open`);
-      fixed++;
+    if (openTrades.length === 0) {
+      console.log(`reconcileZerodha [${uid}]: no open non-deleted Zerodha trades`);
+      return;
     }
-  }
 
-  if (fixed > 0) {
-    await batch.commit();
-    console.log(`reconcileZerodha [${uid}]: reconciled ${fixed} phantom/stale trade(s)`);
-  } else {
-    console.log(`reconcileZerodha [${uid}]: all open trades confirmed genuine — no changes`);
+    // ── Positions — abort entirely if unavailable ─────────────────────────────
+    let positions;
+    try {
+      positions = await kite.getPositions();
+    } catch (e) {
+      console.warn(`reconcileZerodha [${uid}]: getPositions failed (${e.message}) — aborting, not modifying anything`);
+      return;
+    }
+    if (!positions?.net) {
+      console.warn(`reconcileZerodha [${uid}]: invalid positions response — aborting`);
+      return;
+    }
+
+    // ── Build symbol maps ─────────────────────────────────────────────────────
+    const netBySymbol = {};
+    const dayBySymbol = {};
+    for (const p of (positions.net || [])) netBySymbol[(p.tradingsymbol || "").toUpperCase()] = p;
+    for (const p of (positions.day || [])) dayBySymbol[(p.tradingsymbol || "").toUpperCase()] = p;
+
+    // ── Fetch today's fills for exit timestamps ───────────────────────────────
+    const fillsBySymbol = {};
+    try {
+      const fills = await kite.getTrades();
+      for (const f of fills) {
+        const sym = (f.tradingsymbol || "").toUpperCase();
+        if (!fillsBySymbol[sym]) fillsBySymbol[sym] = [];
+        fillsBySymbol[sym].push(f);
+      }
+    } catch (e) {
+      console.warn(`reconcileZerodha [${uid}]: getTrades failed (${e.message}) — continuing without fill timestamps`);
+    }
+
+    console.log(
+      `reconcileZerodha [${uid}]: open=${openTrades.length} ` +
+      `netSymbols=${Object.keys(netBySymbol).length} daySymbols=${Object.keys(dayBySymbol).length}`
+    );
+
+    const batch = db.batch();
+    let fixed   = 0;
+
+    for (const trade of openTrades) {
+      const sym    = (trade.symbol || "").toUpperCase();
+      const netPos = netBySymbol[sym];
+      const dayPos = dayBySymbol[sym];
+
+      // Case 1: Still genuinely open in Kite → skip
+      if (netPos && netPos.quantity !== 0) continue;
+
+      // Case 2: Options expiry — qty reached 0, realised_pnl available
+      if (netPos && netPos.quantity === 0 && netPos.realised_pnl != null) {
+        const exitPrice = netPos.last_price ?? 0.05;
+        const pnl       = parseFloat(netPos.realised_pnl.toFixed(2));
+        const exitFill  = fillsBySymbol[sym]?.find(f => f.transaction_type === "SELL");
+        batch.set(trade._ref, {
+          isOpen:   false,
+          exit:     exitPrice,
+          pnl,
+          exitTime: exitFill?.fill_timestamp ? String(exitFill.fill_timestamp).slice(11, 16) : null,
+          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        console.log(`reconcileZerodha [${uid}]: expired ${sym} exit=${exitPrice} pnl=${pnl}`);
+        fixed++;
+        continue;
+      }
+
+      // Case 3: Closed today (day position with non-zero realised pnl)
+      if (dayPos && dayPos.realised_pnl !== 0) {
+        const isLong    = (trade.direction || "Long") === "Long";
+        const exitPrice = isLong ? dayPos.average_sell_price : dayPos.average_buy_price;
+        const pnl       = parseFloat(dayPos.realised_pnl.toFixed(2));
+        const closeType = isLong ? "SELL" : "BUY";
+        const exitFill  = fillsBySymbol[sym]?.find(f => f.transaction_type === closeType);
+        batch.set(trade._ref, {
+          isOpen:   false,
+          exit:     exitPrice,
+          pnl,
+          exitTime: exitFill?.fill_timestamp ? String(exitFill.fill_timestamp).slice(11, 16) : null,
+          syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        console.log(`reconcileZerodha [${uid}]: closed today ${sym} exit=${exitPrice} pnl=${pnl}`);
+        fixed++;
+        continue;
+      }
+
+      // Case 4: Not in any position, no exit, no pnl — uncertain, NEVER delete
+      if (!netPos && !dayPos && !trade.exit && trade.pnl == null) {
+        batch.set(trade._ref, { needsReview: true }, { merge: true });
+        console.log(`reconcileZerodha [${uid}]: needsReview ${sym} (${trade._id}) — not in any Kite position`);
+      }
+    }
+
+    if (fixed > 0) {
+      await batch.commit();
+      console.log(`reconcileZerodha [${uid}]: fixed ${fixed} trade(s)`);
+    } else {
+      console.log(`reconcileZerodha [${uid}]: no changes needed`);
+    }
+  } catch (err) {
+    console.error(`reconcileZerodha [${uid}]: unexpected error — ${err.message}`);
+    // Never re-throw — sync must continue
   }
 }
 
+/**
+ * Build trade documents from Zerodha positions API (combined mode).
+ * One trade per symbol per day, derived from day/net positions.
+ */
+function buildCombinedTrades(positionsData, uid) {
+  const trades = [];
+  const today  = new Date().toISOString().slice(0, 10);
+  // Closed trades from day positions
+  for (const p of (positionsData.day || [])) {
+    if (p.realised_pnl === 0) continue;
+    const sym  = (p.tradingsymbol || "").toUpperCase();
+    const { asset, instrument, optionType } = mapZerodhaInstrument(p);
+    const isLong = p.buy_quantity >= p.sell_quantity;
+    trades.push({
+      id:           zerodhaTradeDocId(sym, today, isLong ? p.average_buy_price : p.average_sell_price),
+      source:       "zerodha",
+      broker:       "zerodha",
+      symbol:       sym,
+      asset,
+      instrument:   instrument ?? null,
+      optionType:   optionType ?? null,
+      direction:    isLong ? "Long" : "Short",
+      entry:        isLong ? Number(p.average_buy_price  || 0) : Number(p.average_sell_price || 0),
+      exit:         isLong ? Number(p.average_sell_price || 0) : Number(p.average_buy_price  || 0),
+      size:         Math.max(p.buy_quantity, p.sell_quantity),
+      pnl:          parseFloat(p.realised_pnl.toFixed(2)),
+      isOpen:       false,
+      groupingMode: "combined",
+      date:         today,
+      entryTime:    null,
+      exitTime:     null,
+      syncedAt:     admin.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+  // Open trades from net positions
+  for (const p of (positionsData.net || [])) {
+    if (p.quantity === 0) continue;
+    const sym  = (p.tradingsymbol || "").toUpperCase();
+    const { asset, instrument, optionType } = mapZerodhaInstrument(p);
+    trades.push({
+      id:           zerodhaTradeDocId(sym, today, Number(p.average_price || 0)),
+      source:       "zerodha",
+      broker:       "zerodha",
+      symbol:       sym,
+      asset,
+      instrument:   instrument ?? null,
+      optionType:   optionType ?? null,
+      direction:    p.quantity > 0 ? "Long" : "Short",
+      entry:        Number(p.average_price || 0),
+      exit:         null,
+      size:         Math.abs(p.quantity),
+      pnl:          null,
+      isOpen:       true,
+      groupingMode: "combined",
+      date:         today,
+      entryTime:    null,
+      exitTime:     null,
+      syncedAt:     admin.firestore.FieldValue.serverTimestamp(),
+    });
+  }
+  console.log(`buildCombinedTrades [${uid}]: ${trades.length} trade(s) from positions`);
+  return trades;
+}
+
 async function syncTradesForUser(uid) {
-  // Read brokerAccountMap from settings to assign accountId to new trades
+  // Read settings — brokerAccountMap + tradeGrouping preference
   let brokerAccountMap = {};
+  let groupingMode     = "fifo";
   try {
     const settingsSnap = await db.collection("users").doc(uid).collection("meta").doc("settings").get();
-    brokerAccountMap = settingsSnap.data()?.brokerAccountMap ?? {};
+    const sData        = settingsSnap.data() ?? {};
+    brokerAccountMap   = sData.brokerAccountMap ?? {};
+    groupingMode       = sData.prefs?.tradeGrouping ?? "fifo";
   } catch(e) { /* settings read is non-critical */ }
 
   const kite = await getKiteForUser(uid);
@@ -567,8 +713,11 @@ async function syncTradesForUser(uid) {
     }
   }
 
-  // ── 5. FIFO pair BUY + SELL fills per symbol → round-trip trades ─────────────
-  const pairedTrades = pairFillsIntoTrades(fills, openSymbols, uid, "syncZerodhaTrades", existingOpenLongs);
+  // ── 5. Pair fills into trades — FIFO (default) or combined (positions-based) ──
+  console.log(`syncZerodhaTrades [${uid}]: groupingMode=${groupingMode}`);
+  const pairedTrades = groupingMode === "combined" && positionsData
+    ? buildCombinedTrades(positionsData, uid)
+    : pairFillsIntoTrades(fills, openSymbols, uid, "syncZerodhaTrades", existingOpenLongs);
 
   // Create open Long trades from positions that have no fills today
   // (e.g. position opened on a previous day, still running)
@@ -611,6 +760,10 @@ async function syncTradesForUser(uid) {
 
   if (accountId) {
     for (const t of pairedTrades) t.accountId = accountId;
+  }
+  // Tag all new trades with the groupingMode so the user can always see how they were built
+  for (const t of pairedTrades) {
+    if (!t.groupingMode) t.groupingMode = groupingMode;
   }
 
   console.log(
@@ -960,6 +1113,51 @@ exports.syncZerodhaHistory = functions.https.onRequest(async (req, res) => {
 
 // ─── 5. zerodhaPostback ───────────────────────────────────────────────────────
 //
+// ─── restoreWronglyDeletedZerodha ────────────────────────────────────────────
+//
+// POST /restoreWronglyDeletedZerodha  (Authorization: Bearer <Firebase ID token>)
+// One-time repair: restores Zerodha trades that reconcileOpenZerodhaPositions()
+// wrongly soft-deleted. Trades with exit price, pnl, or isOpen:false are real
+// closed trades, not phantoms.
+
+exports.restoreWronglyDeletedZerodha = functions.https.onRequest(async (req, res) => {
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  try {
+    const { uid } = await verifyAuth(req);
+    const snap = await db.collection("users").doc(uid).collection("trades")
+      .where("source",  "==", "zerodha")
+      .where("deleted", "==", true)
+      .get();
+
+    const batch = db.batch();
+    let restored = 0;
+    let kept     = 0;
+
+    for (const doc of snap.docs) {
+      const d = doc.data();
+      // Restore if it was a genuinely closed trade
+      const isRealTrade = d.exit != null || d.isOpen === false || (d.pnl != null && isFinite(d.pnl));
+      if (isRealTrade) {
+        batch.set(doc.ref, { deleted: false, deletedAt: null }, { merge: true });
+        restored++;
+        console.log(`restoreWronglyDeletedZerodha [${uid}]: restoring ${doc.id} exit=${d.exit} isOpen=${d.isOpen} pnl=${d.pnl}`);
+      } else {
+        kept++;
+        console.log(`restoreWronglyDeletedZerodha [${uid}]: keeping deleted phantom ${doc.id} ${d.symbol}`);
+      }
+    }
+
+    if (restored > 0) await batch.commit();
+    console.log(`restoreWronglyDeletedZerodha [${uid}]: restored=${restored} kept=${kept}`);
+    res.status(200).json({ restored, kept, message: `Restored ${restored} trade(s), kept ${kept} phantom(s) deleted` });
+  } catch (err) {
+    console.error("restoreWronglyDeletedZerodha:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /zerodhaPostback  (no auth — called by Zerodha's servers)
 // Set this URL as the Postback URL in your Kite developer console.
 // Always returns 200 immediately; Zerodha retries on anything else.
