@@ -241,6 +241,22 @@ function zerodhaTradeDocId(symbol, date, entryPrice) {
 }
 
 /**
+ * Returns the lot size for an NSE/BSE index derivative symbol.
+ * Equities and unknown symbols return 1 (size stays in raw units).
+ */
+function getZerodhaLotSize(tradingsymbol) {
+  if (!tradingsymbol) return 1;
+  const s = tradingsymbol.toUpperCase();
+  if (s.startsWith("BANKNIFTY"))  return 30;
+  if (s.startsWith("FINNIFTY"))   return 65;
+  if (s.startsWith("MIDCPNIFTY")) return 120;
+  if (s.startsWith("SENSEX"))     return 20;
+  if (s.startsWith("BANKEX"))     return 15;
+  if (s.startsWith("NIFTY"))      return 75;
+  return 1;
+}
+
+/**
  * FIFO-pair an array of Kite fills into Edgebook trade documents.
  *
  * Shared by syncTradesForUser (daily) and syncZerodhaHistory (historical).
@@ -297,6 +313,8 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
           // Matched Long round-trip
           const entry = buyEntry.price;
           const exit  = price;
+          const lotSz      = getZerodhaLotSize(sym);
+          const sizeInLots = lotSz > 1 ? matchQty / lotSz : matchQty;
           const pnl   = parseFloat(((exit - entry) * matchQty).toFixed(2));
           pairedTrades.push({
             id:            zerodhaTradeDocId(sym, buyEntry.date, entry),
@@ -314,7 +332,7 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
             direction:     "Long",
             entry,
             exit,
-            size:          matchQty,
+            size:          sizeInLots,
             pnl,
             isOpen:        false,
             date:          buyEntry.date,
@@ -734,7 +752,10 @@ async function syncTradesForUser(uid) {
         direction:     pos.quantity > 0 ? "Long" : "Short",
         entry,
         exit:          null,
-        size:          Math.abs(pos.quantity),
+        size:          (() => {
+          const lsz = getZerodhaLotSize(pos.tradingsymbol);
+          return lsz > 1 ? Math.abs(pos.quantity) / lsz : Math.abs(pos.quantity);
+        })(),
         pnl:           null,
         isOpen:        true,
         date,
