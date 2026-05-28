@@ -418,14 +418,24 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
 /**
  * Conservative reconciler for open Zerodha trades.
  * NEVER auto-deletes. Rules:
- *  - getPositions() fails → abort immediately, touch nothing
+ *  - positionsData missing/invalid → abort immediately, touch nothing
  *  - Symbol still open in Kite → skip
  *  - Options expiry (qty=0, realised_pnl available) → close with realised pnl
  *  - Closed today (day position has realised_pnl != 0) → close with day pnl
  *  - Uncertain (not in any position, no exit, no pnl) → set needsReview:true only
+ *
+ * @param {string} uid
+ * @param {object|null} positionsData  — pre-fetched kite.getPositions() result
+ * @param {object} fillsBySymbol       — pre-built map: symbol → fill[]
  */
-async function reconcileOpenZerodhaPositions(uid, kite) {
+async function reconcileOpenZerodhaPositions(uid, positionsData, fillsBySymbol) {
   try {
+    // Abort if positions are unavailable — we must not guess
+    if (!positionsData?.net) {
+      console.warn(`reconcileZerodha [${uid}]: positionsData unavailable — aborting, not modifying anything`);
+      return;
+    }
+
     const openSnap = await db.collection("users").doc(uid).collection("trades")
       .where("source", "==", "zerodha")
       .where("isOpen",  "==", true)
@@ -440,37 +450,11 @@ async function reconcileOpenZerodhaPositions(uid, kite) {
       return;
     }
 
-    // ── Positions — abort entirely if unavailable ─────────────────────────────
-    let positions;
-    try {
-      positions = await kite.getPositions();
-    } catch (e) {
-      console.warn(`reconcileZerodha [${uid}]: getPositions failed (${e.message}) — aborting, not modifying anything`);
-      return;
-    }
-    if (!positions?.net) {
-      console.warn(`reconcileZerodha [${uid}]: invalid positions response — aborting`);
-      return;
-    }
-
-    // ── Build symbol maps ─────────────────────────────────────────────────────
+    // ── Build symbol maps from pre-fetched positions ──────────────────────────
     const netBySymbol = {};
     const dayBySymbol = {};
-    for (const p of (positions.net || [])) netBySymbol[(p.tradingsymbol || "").toUpperCase()] = p;
-    for (const p of (positions.day || [])) dayBySymbol[(p.tradingsymbol || "").toUpperCase()] = p;
-
-    // ── Fetch today's fills for exit timestamps ───────────────────────────────
-    const fillsBySymbol = {};
-    try {
-      const fills = await kite.getTrades();
-      for (const f of fills) {
-        const sym = (f.tradingsymbol || "").toUpperCase();
-        if (!fillsBySymbol[sym]) fillsBySymbol[sym] = [];
-        fillsBySymbol[sym].push(f);
-      }
-    } catch (e) {
-      console.warn(`reconcileZerodha [${uid}]: getTrades failed (${e.message}) — continuing without fill timestamps`);
-    }
+    for (const p of (positionsData.net || [])) netBySymbol[(p.tradingsymbol || "").toUpperCase()] = p;
+    for (const p of (positionsData.day || [])) dayBySymbol[(p.tradingsymbol || "").toUpperCase()] = p;
 
     console.log(
       `reconcileZerodha [${uid}]: open=${openTrades.length} ` +
@@ -478,7 +462,8 @@ async function reconcileOpenZerodhaPositions(uid, kite) {
     );
 
     const batch = db.batch();
-    let fixed   = 0;
+    let fixed            = 0;
+    let needsReviewCount = 0;
 
     for (const trade of openTrades) {
       const sym    = (trade.symbol || "").toUpperCase();
@@ -528,12 +513,13 @@ async function reconcileOpenZerodhaPositions(uid, kite) {
       if (!netPos && !dayPos && !trade.exit && trade.pnl == null) {
         batch.set(trade._ref, { needsReview: true }, { merge: true });
         console.log(`reconcileZerodha [${uid}]: needsReview ${sym} (${trade._id}) — not in any Kite position`);
+        needsReviewCount++;
       }
     }
 
-    if (fixed > 0) {
+    if (fixed > 0 || needsReviewCount > 0) {
       await batch.commit();
-      console.log(`reconcileZerodha [${uid}]: fixed ${fixed} trade(s)`);
+      console.log(`reconcileZerodha [${uid}]: fixed ${fixed} closed, ${needsReviewCount} flagged for review`);
     } else {
       console.log(`reconcileZerodha [${uid}]: no changes needed`);
     }
@@ -721,7 +707,8 @@ async function syncTradesForUser(uid) {
 
   // Create open Long trades from positions that have no fills today
   // (e.g. position opened on a previous day, still running)
-  if (positionsData && positionsData.net) {
+  // In combined mode buildCombinedTrades() already handles this from net positions.
+  if (groupingMode !== "combined" && positionsData && positionsData.net) {
     for (const pos of positionsData.net) {
       if (pos.quantity === 0) continue;
       const sym = (pos.tradingsymbol || "").toUpperCase();
@@ -865,7 +852,14 @@ async function syncTradesForUser(uid) {
     .update({ lastSync: admin.firestore.FieldValue.serverTimestamp() });
 
   // ── Clean up any phantom open trades left from before this fix ───────────────
-  await reconcileOpenZerodhaPositions(uid, kite).catch(e =>
+  // Build fillsBySymbol from the fills already fetched in step 2 (no extra API call)
+  const fillsBySymbol = {};
+  for (const f of fills) {
+    const sym = (f.tradingsymbol || "").toUpperCase();
+    if (!fillsBySymbol[sym]) fillsBySymbol[sym] = [];
+    fillsBySymbol[sym].push(f);
+  }
+  await reconcileOpenZerodhaPositions(uid, positionsData, fillsBySymbol).catch(e =>
     console.warn(`reconcileZerodha [${uid}]: reconcile error — ${e.message}`)
   );
 
