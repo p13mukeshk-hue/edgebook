@@ -479,6 +479,11 @@ async function reconcileOpenZerodhaPositions(uid, positionsData, fillsBySymbol) 
       `netSymbols=${Object.keys(netBySymbol).length} daySymbols=${Object.keys(dayBySymbol).length}`
     );
 
+    // ── TEMP DEBUG ─────────────────────────────────────────────────────────────
+    console.log(`Zerodha reconcile [${uid}]: net positions:`, JSON.stringify(Object.keys(netBySymbol)));
+    console.log(`Zerodha reconcile [${uid}]: day positions:`, JSON.stringify(Object.keys(dayBySymbol)));
+    // ───────────────────────────────────────────────────────────────────────────
+
     const batch = db.batch();
     let fixed            = 0;
     let needsReviewCount = 0;
@@ -487,6 +492,12 @@ async function reconcileOpenZerodhaPositions(uid, positionsData, fillsBySymbol) 
       const sym    = (trade.symbol || "").toUpperCase();
       const netPos = netBySymbol[sym];
       const dayPos = dayBySymbol[sym];
+
+      // ── TEMP DEBUG ───────────────────────────────────────────────────────────
+      console.log(`Zerodha reconcile [${uid}] checking:`, sym,
+        "netPos:", JSON.stringify(netPos),
+        "dayPos:", JSON.stringify(dayPos));
+      // ─────────────────────────────────────────────────────────────────────────
 
       // Case 1: Still genuinely open in Kite → skip
       if (netPos && netPos.quantity !== 0) continue;
