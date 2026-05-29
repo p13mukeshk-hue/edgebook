@@ -252,7 +252,7 @@ function getZerodhaLotSize(tradingsymbol) {
   if (s.startsWith("MIDCPNIFTY")) return 120;
   if (s.startsWith("SENSEX"))     return 20;
   if (s.startsWith("BANKEX"))     return 15;
-  if (s.startsWith("NIFTY"))      return 75;
+  if (s.startsWith("NIFTY"))      return 65;
   return 1;
 }
 
@@ -3225,35 +3225,14 @@ exports.forceReimportCtrader = functions
       const decoded = await verifyAuth(req);
       const uid = decoded.uid;
 
-      // Step 1: read all cTrader docs and preserve user-owned fields before deleting
-      const tradesRef   = db.collection("users").doc(uid).collection("trades");
-      const allSnap     = await tradesRef.get();
-      const ctraderDocs = allSnap.docs.filter((d) => d.id.startsWith("ctrader_"));
-      console.log(`forceReimportCtrader uid=${uid}: found ${ctraderDocs.length} cTrader docs`);
+      // GOLDEN RULE: never delete trades from Firestore.
+      // runCtraderHistorySync writes with { merge: true }, so re-running it:
+      //   - Adds any new historical deals
+      //   - Updates fields (pnl/exit/etc.) on existing docs
+      //   - Preserves all user-owned fields (notes, screenshots, psychology, ...)
+      // No pre-delete and no user-field preservation/re-apply is needed.
+      console.log(`forceReimportCtrader uid=${uid}: reconcile + sync (no delete)`);
 
-      const USER_FIELDS = ["notes", "screenshots", "psychology", "strategy", "emotion", "tags", "accountId", "deleted", "deletedAt"];
-      const userFieldsMap = {};
-      for (const doc of ctraderDocs) {
-        const data = doc.data();
-        const saved = {};
-        let hasData = false;
-        for (const f of USER_FIELDS) {
-          if (data[f] != null) { saved[f] = data[f]; hasData = true; }
-        }
-        if (hasData) userFieldsMap[doc.id] = saved;
-      }
-      console.log(`forceReimportCtrader uid=${uid}: preserved user fields for ${Object.keys(userFieldsMap).length} doc(s)`);
-
-      // Step 2: delete all cTrader trade docs
-      const BATCH = 400;
-      for (let i = 0; i < ctraderDocs.length; i += BATCH) {
-        const batch = db.batch();
-        ctraderDocs.slice(i, i + BATCH).forEach((d) => batch.delete(d.ref));
-        await batch.commit();
-      }
-      console.log(`forceReimportCtrader uid=${uid}: delete complete`);
-
-      // Step 3: run full history sync
       let result;
       try {
         result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null);
@@ -3262,43 +3241,9 @@ exports.forceReimportCtrader = functions
         throw new Error("Sync failed: " + err.message);
       }
 
-      // Step 4: re-apply preserved user fields to newly imported docs
-      // Uses individual writes (not batch) so one bad doc never aborts the whole re-import.
-      const preservedEntries = Object.entries(userFieldsMap);
-      if (preservedEntries.length > 0) {
-        console.log(`forceReimportCtrader uid=${uid}: re-applying user fields for ${preservedEntries.length} doc(s)`);
-        const newSnap = await tradesRef.get();
-        const newDocIds = new Set(newSnap.docs.filter((d) => d.id.startsWith("ctrader_")).map((d) => d.id));
-        let reapplied = 0;
-
-        for (const [docId, fields] of preservedEntries) {
-          if (!newDocIds.has(docId)) continue;
-
-          const hasUserData = fields.notes || fields.strategy || fields.emotion || fields.deleted ||
-            (fields.psychology && (
-              fields.psychology.preThought ||
-              fields.psychology.executionNote ||
-              fields.psychology.review
-            )) || fields.accountId;
-          if (!hasUserData) continue;
-
-          try {
-            const clean = sanitizeUserFields(fields);
-            console.log(`[reapply] docId=${docId} fields=${JSON.stringify(clean).slice(0, 200)}`);
-            await tradesRef.doc(docId).set(clean, { merge: true });
-            reapplied++;
-          } catch (err) {
-            console.error(`[reapply] FAILED docId=${docId} error=${err.message} raw=${JSON.stringify(fields).slice(0, 500)}`);
-            // Continue — don't let one bad doc abort the entire re-import
-          }
-        }
-
-        console.log(`forceReimportCtrader uid=${uid}: user fields restored for ${reapplied} doc(s)`);
-      }
-
       return res.status(200).json({
         ok: true,
-        deleted: ctraderDocs.length,
+        message: "Reconcile complete. Existing trades preserved.",
         ...result,
       });
     } catch (err) {
