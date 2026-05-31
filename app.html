@@ -6413,8 +6413,70 @@ const BROKER_PROFILES = {
   zerodha: {
     name:'Zerodha / Kite', sub:'tradebook export',
     detect: h => h.includes('symbol') && h.includes('trade_type'),
-    map: { symbol:'symbol', direction:'trade_type', entry:'price', size:'quantity', date:'trade_date', asset:'exchange' },
-    transforms: { direction: v=>v==='BUY'?'Long':'Short', date: v=>v?.split(' ')[0], asset: v=>['NSE','BSE'].includes(v?.toUpperCase())?'eq':'cx' }
+    map: {
+      symbol:    'symbol',
+      direction: 'trade_type',
+      entry:     'price',
+      size:      'quantity',
+      date:      'trade_date',
+    },
+    transforms: {
+      direction: v => (v||'').toString().toUpperCase()==='BUY' ? 'Long' : 'Short',
+      date: v => {
+        // Handle "2026-05-29", "2026-05-29T09:20:16", "2026-05-29 09:20:16"
+        if(!v) return '';
+        return v.toString().split('T')[0].split(' ')[0];
+      },
+      asset: (v, row) => {
+        const seg = (row?.segment  || '').toUpperCase();
+        const exc = (row?.exchange || '').toUpperCase();
+        const sym = (row?.symbol   || '').toUpperCase();
+        if(seg==='FO' || seg==='BFO' || exc==='NFO' || exc==='BFO'){
+          if(sym.endsWith('CE') || sym.endsWith('PE')) return 'eq'; // Options on equity index
+          return 'cm'; // Futures bucket — commodities lot-handling
+        }
+        if(exc==='MCX') return 'cm';
+        if(exc==='CDS') return 'fx';
+        if(seg==='EQ' || exc==='NSE' || exc==='BSE') return 'eq';
+        return 'eq';
+      },
+      size: (v, row) => {
+        // Convert raw units to lots for F&O so calculatePnL gets the right multiplier
+        const qty = parseFloat(v) || 0;
+        const seg = (row?.segment  || '').toUpperCase();
+        const exc = (row?.exchange || '').toUpperCase();
+        const sym = (row?.symbol   || '').toUpperCase();
+        const isFO = seg==='FO' || seg==='BFO' || exc==='NFO' || exc==='BFO';
+        if(!isFO) return qty;
+        let lotSize = 1;
+        if(sym.startsWith('BANKNIFTY'))       lotSize = 30;
+        else if(sym.startsWith('FINNIFTY'))   lotSize = 65;
+        else if(sym.startsWith('MIDCPNIFTY')) lotSize = 120;
+        else if(sym.startsWith('SENSEX'))     lotSize = 20;
+        else if(sym.startsWith('BANKEX'))     lotSize = 15;
+        else if(sym.startsWith('NIFTY'))      lotSize = 65;
+        return lotSize > 1 ? qty / lotSize : qty;
+      },
+    },
+    // FIFO pairing for fill-level tradebooks (BUY+SELL → round-trip)
+    pairFills: true,
+    // Symbol parser for NIFTY-style F&O symbols, e.g. NIFTY2660224000CE
+    parseSymbol: (sym) => {
+      if(!sym) return {};
+      const s = sym.toUpperCase();
+      const m = s.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})(\d+)(CE|PE|FUT)$/);
+      if(!m) return {};
+      const year   = m[2];
+      const month  = m[3];
+      const strike = m[5];
+      const type   = m[6];
+      return {
+        instrument: type === 'FUT' ? 'Futures' : 'Options',
+        optionType: type === 'CE' ? 'CE' : type === 'PE' ? 'PE' : null,
+        strike:     parseFloat(strike),
+        expiry:     `20${year}-${month}-01`, // approximate (day not encoded in symbol)
+      };
+    },
   },
   groww: {
     name:'Groww', sub:'trade history',
@@ -6682,40 +6744,129 @@ function normCSVDirection(raw){
   return 'Long';
 }
 
+// FIFO-pair raw BUY/SELL fills into round-trips (used by brokers whose CSVs
+// are fill-level, e.g. Zerodha tradebook). Closed Longs get exit + pnl;
+// unmatched SELLs become Short entries; unmatched BUYs stay open.
+function csvFifoPair(fills){
+  const bySymbol = {};
+  for(const f of fills){
+    if(!bySymbol[f.symbol]) bySymbol[f.symbol] = [];
+    bySymbol[f.symbol].push(f);
+  }
+
+  const out = [];
+  for(const [sym, symFills] of Object.entries(bySymbol)){
+    // chronological sort: date + time ascending
+    symFills.sort((a,b) => {
+      const ta = (a._rawDate || a.date || '') + (a._rawTime || '');
+      const tb = (b._rawDate || b.date || '') + (b._rawTime || '');
+      return ta.localeCompare(tb);
+    });
+
+    const buyQueue = [];
+    for(const fill of symFills){
+      if(fill.direction === 'Long'){
+        buyQueue.push(fill);
+      } else {
+        // SELL fill
+        if(buyQueue.length > 0){
+          const buyFill = buyQueue.shift();
+          const pnl = parseFloat(
+            ((fill.entry - buyFill.entry) * buyFill.size * (buyFill.lotSize || 1)).toFixed(2)
+          );
+          out.push({
+            ...buyFill,
+            exit:      fill.entry,
+            exitTime:  fill._rawTime || null,
+            pnl,
+            isOpen:    false,
+            direction: 'Long',
+          });
+        } else {
+          // SELL with no matching BUY → treat as Short entry (open)
+          buyQueue.push({ ...fill, direction: 'Short', _isShortEntry: true });
+        }
+      }
+    }
+
+    // Remaining queue entries = open positions
+    for(const f of buyQueue){
+      out.push({ ...f, exit: null, pnl: null, isOpen: true });
+    }
+  }
+  return out;
+}
+
 function csvBuildPreview(){
   if(!csvState.accountId){ showToast('Please select an account','error'); return; }
   const {rawHeaders, rawRows, mapping, transforms} = csvState;
+  const profile = BROKER_PROFILES[csvState.selectedBroker];
 
   const parsed = rawRows.map((row,ri)=>{
+    // Header→value object so row-aware transforms can read other columns
+    const rowObj = {};
+    rawHeaders.forEach((h,i)=>{ rowObj[h] = (row[i]||'').toString().trim(); });
+
     const get = col => { const i=rawHeaders.indexOf(col); return i>=0?(row[i]||'').toString().trim():''; };
     const getField = field => {
       const col=mapping[field]; if(!col) return '';
       const val=get(col);
       const tfn=transforms[field];
-      return tfn ? tfn(val) : val;
+      return tfn ? tfn(val, rowObj) : val;
     };
 
-    const sym  = getField('symbol').toUpperCase().replace(/[-\s]/g,'');
-    if(!sym) return null; // skip empty rows
+    const sym  = getField('symbol').toString().toUpperCase().replace(/[-\s]/g,'');
+    if(!sym) return null;
 
     const rawDir = getField('direction');
-    const dir  = normCSVDirection(rawDir);
-    const entry = parseFloat(getField('entry').replace(/[,₹$£€]/g,''))||null;
-    const exit  = parseFloat(getField('exit').replace(/[,₹$£€]/g,''))||null;
-    const size  = parseFloat(getField('size').replace(/[,]/g,''))||null;
+    const dir   = normCSVDirection(rawDir);
+    const entry = parseFloat(getField('entry').toString().replace(/[,₹$£€]/g,''))||null;
+    const exit  = parseFloat(getField('exit').toString().replace(/[,₹$£€]/g,''))||null;
+
+    // size may already be a number (Zerodha transform returns lots), or a string
+    const sizeRaw = getField('size');
+    const size = typeof sizeRaw === 'number'
+      ? sizeRaw
+      : (parseFloat((sizeRaw||'').toString().replace(/[,]/g,''))||null);
+
     const date  = normCSVDate(getField('date'));
-    const rawAsset = getField('asset')||'';
-    const asset = rawAsset
-      ? (['NSE','BSE'].includes(rawAsset.toUpperCase())?'eq':
-         rawAsset.toLowerCase()==='crypto'?'cx':
-         rawAsset.toLowerCase()==='forex'||rawAsset.toLowerCase()==='fx'?'fx':
-         rawAsset.toLowerCase()==='commodity'||rawAsset.toLowerCase()==='cm'?'cm':'eq')
-      : 'eq';
 
-    if(!entry||!size) return null; // skip rows missing required numeric fields
+    // asset may already be a valid code (eq/cx/fx/cm/ix) from a row-aware transform
+    const rawAsset = getField('asset');
+    const VALID_ASSETS = ['eq','cx','fx','cm','ix'];
+    const asset = (typeof rawAsset === 'string' && VALID_ASSETS.includes(rawAsset.toLowerCase()))
+      ? rawAsset.toLowerCase()
+      : (rawAsset
+          ? (['NSE','BSE'].includes(rawAsset.toString().toUpperCase())?'eq':
+             rawAsset.toString().toLowerCase()==='crypto'?'cx':
+             ['forex','fx'].includes(rawAsset.toString().toLowerCase())?'fx':
+             ['commodity','cm'].includes(rawAsset.toString().toLowerCase())?'cm':'eq')
+          : 'eq');
 
-    // improved duplicate check: same symbol + date + entry + direction + size
-    const isDupe = trades.some(t=>
+    if(!entry||!size) return null;
+
+    // Compute lotSize from raw row so FIFO pairing pnl + import metadata both have it
+    let lotSize = 1;
+    const seg = (rowObj.segment  || '').toUpperCase();
+    const exc = (rowObj.exchange || '').toUpperCase();
+    const isFO = seg==='FO' || seg==='BFO' || exc==='NFO' || exc==='BFO';
+    if(isFO){
+      if(sym.startsWith('BANKNIFTY'))       lotSize = 30;
+      else if(sym.startsWith('FINNIFTY'))   lotSize = 65;
+      else if(sym.startsWith('MIDCPNIFTY')) lotSize = 120;
+      else if(sym.startsWith('SENSEX'))     lotSize = 20;
+      else if(sym.startsWith('BANKEX'))     lotSize = 15;
+      else if(sym.startsWith('NIFTY'))      lotSize = 65;
+    }
+
+    // Capture raw HH:MM[:SS] from the date column for chronological FIFO + entryTime
+    const dateColRaw = mapping['date'] ? get(mapping['date']) : '';
+    const timeMatch  = dateColRaw.match(/[T\s](\d{2}:\d{2}(?::\d{2})?)/);
+    const rawTime    = timeMatch ? timeMatch[1].slice(0,5) : null;
+
+    // Dedup on raw fills only makes sense for non-pairing imports.
+    // For FIFO-pair brokers we dedup AFTER pairing below.
+    const isDupe = !profile?.pairFills && trades.some(t=>
       t.symbol===sym && t.date===date &&
       Math.abs((t.entry||0)-entry)<0.001 &&
       t.direction===dir &&
@@ -6725,20 +6876,37 @@ function csvBuildPreview(){
     const pnl = calculatePnL(asset, sym, dir, entry, exit, size);
 
     return {
-      symbol:sym, direction:dir, entry, exit, size, date, asset,
+      symbol:sym, direction:dir, entry, exit, size, date, asset, lotSize,
       strategy:getField('strategy'), notes:getField('notes'),
-      sl:parseFloat(getField('sl').replace(/[,₹$£€]/g,''))||null,
-      tp:parseFloat(getField('tp').replace(/[,₹$£€]/g,''))||null,
-      pnl, _isDupe:isDupe, _row:ri
+      sl:parseFloat(getField('sl').toString().replace(/[,₹$£€]/g,''))||null,
+      tp:parseFloat(getField('tp').toString().replace(/[,₹$£€]/g,''))||null,
+      pnl, _isDupe:isDupe, _row:ri,
+      _rawDate: date,
+      _rawTime: rawTime,
     };
-  }).filter(Boolean); // remove null rows
+  }).filter(Boolean);
 
   if(!parsed.length){ showToast('No valid trades found in CSV. Check column mapping.','error'); return; }
 
-  csvState.parsedTrades = parsed;
+  // FIFO-pair fills into round-trips for brokers that need it (Zerodha)
+  let finalTrades = parsed;
+  if(profile?.pairFills){
+    finalTrades = csvFifoPair(parsed);
+    // Recompute dedup against existing in-memory trades on the paired round-trips
+    for(const t of finalTrades){
+      t._isDupe = trades.some(et =>
+        et.symbol===t.symbol && et.date===t.date &&
+        Math.abs((et.entry||0)-(t.entry||0))<0.001 &&
+        et.direction===t.direction &&
+        Math.abs((et.size||0)-(t.size||0))<0.001
+      );
+    }
+  }
+
+  csvState.parsedTrades = finalTrades;
   // default: select all non-dupes
   const sel={};
-  parsed.forEach((t,i)=>{ sel[i] = !t._isDupe; });
+  finalTrades.forEach((t,i)=>{ sel[i] = !t._isDupe; });
   csvState.importSelection = sel;
   csvState.step=4;
   renderCSVStep();
@@ -6798,22 +6966,80 @@ function csvImportTrades(){
   const toImport = csvState.parsedTrades.filter((_,i)=>csvState.importSelection[i]!==false);
   if(!toImport.length){ showToast('No trades selected','error'); return; }
 
-  let baseId = Date.now();
-  const newTrades = toImport.map((t,i)=>({
-    id: baseId + i,
-    date: t.date, symbol: t.symbol, asset: t.asset,
-    direction: t.direction, entry: t.entry, exit: t.exit, size: t.size,
-    sl: t.sl, tp: t.tp, strategy: t.strategy||'', notes: t.notes||'',
-    emotion: '', screenshots: [], custom: {},
-    accountId: csvState.accountId,
-    pnl: t.pnl, // already calculated in csvBuildPreview
-  }));
+  const profile = BROKER_PROFILES[csvState.selectedBroker];
+  const baseId  = Date.now();
 
-  trades.unshift(...newTrades);
+  // Build the new trade objects with F&O metadata + deterministic IDs where possible
+  const newTrades = toImport.map((t,i)=>{
+    const foData = profile?.parseSymbol ? profile.parseSymbol(t.symbol) : {};
+
+    // Deterministic docId for Zerodha matches the live-sync format
+    // (zerodhaTradeDocId in functions/index.js) so future syncs dedup naturally.
+    const docId = csvState.selectedBroker === 'zerodha'
+      ? `zerodha_${t.symbol}_${t.date}_${t.entry}`.replace(/[^a-zA-Z0-9_.-]/g, '_')
+      : `csv_${baseId}_${i}`;
+
+    return {
+      id:           docId,
+      source:       csvState.selectedBroker === 'zerodha' ? 'zerodha' : 'csv',
+      broker:       csvState.selectedBroker,
+      symbol:       t.symbol,
+      asset:        t.asset,
+      direction:    t.direction,
+      entry:        t.entry,
+      exit:         t.exit  ?? null,
+      size:         t.size,
+      lotSize:      t.lotSize ?? foData.lotSize ?? null,
+      pnl:          t.pnl   ?? null,
+      isOpen:       t.isOpen ?? false,
+      date:         t.date,
+      entryTime:    t._rawTime ?? null,
+      exitTime:     t.exitTime ?? null,
+      accountId:    csvState.accountId,
+      groupingMode: 'fifo',
+      ...foData,
+      // User fields — empty by default; preserved by Firestore merge if doc exists
+      strategy:    t.strategy || null,
+      emotion:     null,
+      notes:       t.notes || null,
+      screenshots: [],
+      psychology:  {},
+      tags:        [],
+      deleted:     false,
+    };
+  });
+
+  // Close-existing-open: when a paired closed trade matches an existing open
+  // trade in memory, update the existing one in place instead of duplicating.
+  const finalNew = [];
+  let closedExisting = 0;
+  for(const trade of newTrades){
+    if(!trade.isOpen && trade.exit != null){
+      const existing = trades.find(t =>
+        t.symbol === trade.symbol &&
+        t.isOpen === true &&
+        t.source === 'zerodha' &&
+        !t.deleted
+      );
+      if(existing){
+        existing.exit     = trade.exit;
+        existing.pnl      = trade.pnl;
+        existing.isOpen   = false;
+        existing.exitTime = trade.exitTime;
+        closedExisting++;
+        continue;
+      }
+    }
+    finalNew.push(trade);
+  }
+
+  trades.unshift(...finalNew);
   DataStore.saveTrades(trades);
   closeModal('csv-import-modal');
   refreshAll();
-  showToast(`${newTrades.length} trade${newTrades.length!==1?'s':''} imported`,'success');
+  const total = finalNew.length + closedExisting;
+  const tail  = closedExisting ? ` (${closedExisting} closed existing)` : '';
+  showToast(`${total} trade${total!==1?'s':''} imported${tail}`,'success');
 }
 
 /* ══════════════════════════════════════════════════════
