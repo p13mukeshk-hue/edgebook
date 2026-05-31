@@ -1099,7 +1099,7 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
         <div class="charts-row">
           <div class="chart-card" id="widget-equity">
             <div class="chart-header"><div><div class="chart-title">Equity Curve</div><div class="chart-sub" id="equity-sub">Cumulative P&amp;L</div></div></div>
-            <div style="position:relative;height:220px"><canvas id="equity-chart"></canvas></div>
+            <div style="position:relative;height:200px"><canvas id="equity-chart"></canvas></div>
           </div>
           <div class="chart-card" id="widget-assetdist">
             <div class="chart-header"><div><div class="chart-title">By Asset Class</div><div class="chart-sub">P&amp;L distribution</div></div></div>
@@ -5601,29 +5601,11 @@ function renderCharts(){
   const toPnlDisplay = t => isAll ? FxRates.toUSD(t.pnl, acctCur(t.accountId)) : t.pnl;
 
   const closed=[...src].filter(t=>t.pnl!==null && isFinite(t.pnl)).reverse();
-  // Group by date: one point per unique trading day, cumulative P&L
-  const _dateMap={};
   let run=0;
-  for(const t of closed){
-    run+=toPnlDisplay(t);
-    const k=t.date||'';
-    if(k) _dateMap[k]=parseFloat(run.toFixed(2));
-  }
-  const dateKeys=Object.keys(_dateMap).sort();
-  const dateValues=dateKeys.map(k=>_dateMap[k]);
-  // Month-boundary labels only
-  const dateLabels=dateKeys.map((k,i)=>{
-    if(!k) return '';
-    const d=new Date(k);
-    const prev=i>0?new Date(dateKeys[i-1]):null;
-    if(!prev||d.getMonth()!==prev.getMonth()||d.getFullYear()!==prev.getFullYear()){
-      return d.toLocaleString('en',{month:'short',year:'2-digit'});
-    }
-    return '';
-  });
+  const pnlSeq=closed.map(t=>{run+=toPnlDisplay(t);return parseFloat(run.toFixed(2));});
   if(CH.equity) CH.equity.destroy();
   const pos=run>=0;
-  CH.equity=new Chart(document.getElementById('equity-chart'),{type:'line',data:{labels:dateLabels,datasets:[{data:dateValues,borderColor:pos?'#22c987':'#ff5e6a',backgroundColor:pos?'rgba(34,201,135,0.07)':'rgba(255,94,106,0.07)',tension:.4,fill:true,pointRadius:dateKeys.length>50?0:3}]},options:{...CBO,scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:10},maxRotation:0,autoSkip:false}},y:{grid:{color:GC},ticks:{color:TC,font:{size:10},callback:v=>displayC+v}}}}});
+  CH.equity=new Chart(document.getElementById('equity-chart'),{type:'line',data:{labels:closed.map((_,i)=>'T'+(i+1)),datasets:[{data:pnlSeq,borderColor:pos?'#22c987':'#ff5e6a',backgroundColor:pos?'rgba(34,201,135,0.07)':'rgba(255,94,106,0.07)',tension:.4,fill:true,pointRadius:3}]},options:{...CBO,scales:{x:{grid:{color:GC},ticks:{color:TC,font:{size:10}}},y:{grid:{color:GC},ticks:{color:TC,font:{size:10},callback:v=>displayC+v}}}}});
 
   // Donut: also convert to USD for all-accounts
   const apnl={};
