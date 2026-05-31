@@ -5601,17 +5601,29 @@ function renderCharts(){
   const toPnlDisplay = t => isAll ? FxRates.toUSD(t.pnl, acctCur(t.accountId)) : t.pnl;
 
   const closed=[...src].filter(t=>t.pnl!==null && isFinite(t.pnl)).reverse();
+  // Group by date: one point per unique trading day, cumulative P&L
+  const _dateMap={};
   let run=0;
-  const pnlSeq=closed.map(t=>{run+=toPnlDisplay(t);return parseFloat(run.toFixed(2));});
+  for(const t of closed){
+    run+=toPnlDisplay(t);
+    const k=t.date||'';
+    if(k) _dateMap[k]=parseFloat(run.toFixed(2));
+  }
+  const dateKeys=Object.keys(_dateMap).sort();
+  const dateValues=dateKeys.map(k=>_dateMap[k]);
+  // Month-boundary labels only
+  const dateLabels=dateKeys.map((k,i)=>{
+    if(!k) return '';
+    const d=new Date(k);
+    const prev=i>0?new Date(dateKeys[i-1]):null;
+    if(!prev||d.getMonth()!==prev.getMonth()||d.getFullYear()!==prev.getFullYear()){
+      return d.toLocaleString('en',{month:'short',year:'2-digit'});
+    }
+    return '';
+  });
   if(CH.equity) CH.equity.destroy();
   const pos=run>=0;
-  // Sparse date labels: show every Nth trade to avoid crowding; always show last
-  const _showEvery = closed.length > 50 ? 10 : closed.length > 20 ? 5 : 1;
-  const _eqLabels = closed.map((t, i) => {
-    if(i % _showEvery !== 0 && i !== closed.length - 1) return '';
-    return formatDate(t.date) || ('T' + (i + 1));
-  });
-  CH.equity=new Chart(document.getElementById('equity-chart'),{type:'line',data:{labels:_eqLabels,datasets:[{data:pnlSeq,borderColor:pos?'#22c987':'#ff5e6a',backgroundColor:pos?'rgba(34,201,135,0.07)':'rgba(255,94,106,0.07)',tension:.4,fill:true,pointRadius:closed.length>50?0:3}]},options:{...CBO,scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:10},maxRotation:0,autoSkip:true,maxTicksLimit:8}},y:{grid:{color:GC},ticks:{color:TC,font:{size:10},callback:v=>displayC+v}}}}});
+  CH.equity=new Chart(document.getElementById('equity-chart'),{type:'line',data:{labels:dateLabels,datasets:[{data:dateValues,borderColor:pos?'#22c987':'#ff5e6a',backgroundColor:pos?'rgba(34,201,135,0.07)':'rgba(255,94,106,0.07)',tension:.4,fill:true,pointRadius:dateKeys.length>50?0:3}]},options:{...CBO,scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:10},maxRotation:0,autoSkip:false}},y:{grid:{color:GC},ticks:{color:TC,font:{size:10},callback:v=>displayC+v}}}}});
 
   // Donut: also convert to USD for all-accounts
   const apnl={};
