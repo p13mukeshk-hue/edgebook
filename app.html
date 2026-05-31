@@ -1715,36 +1715,10 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
                   </div>
                 </div>
 
-                <!-- cTrader row -->
-                <div class="s-row" id="ctrader-connect-row" style="margin-top:8px">
-                  <div class="s-row-left">
-                    <div class="s-row-label" style="display:flex;align-items:center;gap:8px">
-                      <img src="https://ctrader.com/favicon.ico" width="16" height="16" style="border-radius:3px" onerror="this.style.display='none'">
-                      cTrader (The5ers / prop firms)
-                    </div>
-                    <div class="s-row-desc" id="ctrader-status-desc">Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades</div>
-                  </div>
-                  <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
-                    <span id="ctrader-status-badge" style="display:none;font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>
-                    <button class="btn-ghost" id="ctrader-sync-btn" style="display:none" onclick="syncCtraderTrades()"><i class="fa-solid fa-rotate"></i> Sync now</button>
-                    <button class="btn-ghost" id="ctrader-history-btn" style="display:none" onclick="importCtraderHistory()" title="Import all historical deals from your cTrader account"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>
-                    <button class="btn-accent" id="ctrader-connect-btn" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
-                    <button class="btn-ghost" id="ctrader-disconnect-btn" style="display:none;color:var(--red);border-color:rgba(226,75,74,0.3)" onclick="disconnectCtrader()"><i class="fa-solid fa-unlink"></i> Disconnect</button>
-                  </div>
-                </div>
-                <div id="ctrader-last-sync" style="padding:8px 20px;font-size:11px;color:var(--text3);display:none">Last synced: never</div>
-                <div class="broker-mapping-row" id="ctrader-mapping-row">
-                  <span class="broker-mapping-label">Maps to account →</span>
-                  <select class="broker-mapping-select" id="ctrader-account-map" onchange="saveBrokerMapping('ctrader',this.value)">
-                    <option value="">Not mapped</option>
-                  </select>
-                </div>
-                <div id="ctrader-advanced-section" style="display:none;padding:4px 20px 12px">
-                  <button onclick="toggleAdvanced('ctrader-adv-body',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
-                  <div id="ctrader-adv-body" style="display:none;margin-top:8px;padding:12px;background:rgba(29,158,117,0.04);border:1px solid rgba(29,158,117,0.18);border-radius:8px">
-                    <button class="btn-ghost" id="ctrader-reimport-btn" onclick="forceReimportCtrader()"><i class="fa-solid fa-arrows-rotate"></i> Reconcile &amp; sync</button>
-                    <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.5">Re-syncs all historical trades from cTrader and reconciles open positions. Your existing trade history and notes are always preserved.</div>
-                  </div>
+                <!-- cTrader connections — rendered dynamically by renderCtraderCards() -->
+                <div id="ctrader-connections-container"></div>
+                <div style="padding:4px 20px 12px">
+                  <button class="btn-ghost" onclick="openCtraderModal()" style="font-size:12px"><i class="fa-solid fa-plus"></i> Add cTrader account</button>
                 </div>
               </div>
 
@@ -2626,8 +2600,8 @@ function bootApp(user){
     handleZerodhaCallback();
     // Check Zerodha connection status
     setTimeout(checkZerodhaStatus, 1000);
-    // Check cTrader connection status
-    setTimeout(checkCtraderStatus, 1200);
+    // Load cTrader connections and render cards
+    setTimeout(loadCtraderConnections, 1200);
     // Auto-fix cTrader IST times once, silently in background
     if (!localStorage.getItem('istTimesFixed_v1')) {
       localStorage.setItem('istTimesFixed_v1', '1');
@@ -2857,6 +2831,12 @@ function saveBrokerMapping(broker, accountId){
   else delete S.brokerAccountMap[broker];
   console.log('[saveBrokerMapping]', broker, '->', accountId||'(cleared)', JSON.stringify(S.brokerAccountMap));
   SettingsManager.set(S);
+  // For cTrader broker docs, also persist mapToEdgebookAccountId directly to the broker doc
+  if((broker === 'ctrader' || broker.startsWith('ctrader_')) && DataStore._uid && DataStore._uid !== 'guest'){
+    const docRef = window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', broker);
+    window._fbSetDoc(docRef, { mapToEdgebookAccountId: accountId || null }, { merge: true })
+      .catch(e => console.warn('[saveBrokerMapping] Firestore write failed:', e.message));
+  }
   showToast('Account mapping saved','success');
 }
 
@@ -3024,6 +3004,7 @@ function openCtraderModal(){
   const modal = document.getElementById('ctrader-modal');
   modal.style.display = 'flex';
   document.getElementById('ctrader-token-input').value = '';
+  if(document.getElementById('ctrader-refresh-input')) document.getElementById('ctrader-refresh-input').value = '';
   document.getElementById('ctrader-connect-error').style.display = 'none';
 }
 
@@ -3051,9 +3032,11 @@ async function connectCtrader(){
     if(!res.ok || data.error) throw new Error(data.error || 'Connection failed');
     if(data.warning) showToast(data.warning, 'info');
     closeCtraderModal();
-    updateCtraderUI(true);
     showToast('cTrader connected! Syncing your trades…', 'success');
-    setTimeout(syncCtraderTrades, 1500);
+    await loadCtraderConnections();
+    // Sync the newly-connected account (brokerDocId derived from returned accountId)
+    const newBrokerDocId = data.accountId ? `ctrader_${data.accountId}` : 'ctrader';
+    setTimeout(() => syncCtraderAccount(newBrokerDocId), 1500);
   } catch(e){
     showCtraderError(e.message || 'Failed to connect. Check your token and try again.');
   }
@@ -3126,19 +3109,210 @@ async function disconnectCtrader(){
 }
 
 function updateCtraderUI(connected){
-  document.getElementById('ctrader-connect-btn').style.display     = connected ? 'none'        : 'inline-flex';
-  document.getElementById('ctrader-disconnect-btn').style.display  = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-sync-btn').style.display          = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-history-btn').style.display        = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-status-badge').style.display       = connected ? 'inline-flex' : 'none';
-  document.getElementById('ctrader-last-sync').style.display          = connected ? 'block'       : 'none';
-  document.getElementById('ctrader-advanced-section').style.display   = connected ? 'block'       : 'none';
-  document.getElementById('ctrader-status-desc').textContent = connected
+  // Legacy stub — kept for backward compat. Live UI now driven by loadCtraderConnections().
+  loadCtraderConnections();
+}
+
+// ── MULTI-ACCOUNT CTRADER UI ──────────────────────────────────────────────────
+
+async function loadCtraderConnections(){
+  if(!window._firebaseReady || DataStore._uid === 'guest') return;
+  try{
+    const brokersRef = window._fbCollection(window._fbDb, 'users', DataStore._uid, 'brokers');
+    const snap = await window._fbGetDocs(brokersRef);
+    const connections = [];
+    snap.forEach(doc => {
+      if(doc.id === 'ctrader' || doc.id.startsWith('ctrader_')){
+        connections.push({ brokerDocId: doc.id, ...doc.data() });
+      }
+    });
+    const connected = connections.filter(c => c.connected);
+    // Always show at least the "not connected" default card
+    renderCtraderCards(connected.length ? connected : [{ brokerDocId:'ctrader', connected:false }]);
+    // Check token expiry for each connected account
+    for(const conn of connected){
+      _checkCtraderTokenExpiry(conn);
+    }
+  } catch(e){
+    renderCtraderCards([{ brokerDocId:'ctrader', connected:false }]);
+  }
+}
+
+function _checkCtraderTokenExpiry(conn){
+  if(!conn.tokenExpiresAt) return;
+  const expiresAt = conn.tokenExpiresAt.toDate ? conn.tokenExpiresAt.toDate() : new Date(conn.tokenExpiresAt);
+  const daysLeft  = Math.floor((expiresAt - Date.now()) / (1000*60*60*24));
+  const hoursLeft = Math.floor((expiresAt - Date.now()) / (1000*60*60));
+  if(hoursLeft <= 0){
+    showToast('cTrader token expired — please reconnect in Settings', 'error');
+  } else if(hoursLeft < 24){
+    showToast(`cTrader token expires in ${hoursLeft}h — reconnect soon`, 'error');
+  } else if(daysLeft <= 7){
+    showToast(`cTrader token expires in ${daysLeft} days — consider reconnecting`, 'info');
+  }
+  if(conn.tokenRefreshFailed) showToast('cTrader auto-refresh failed — please reconnect manually', 'error');
+}
+
+function renderCtraderCards(connections){
+  const container = document.getElementById('ctrader-connections-container');
+  if(!container) return;
+  container.innerHTML = connections.map(conn => renderCtraderAccountCard(conn)).join('');
+}
+
+function renderCtraderAccountCard(conn){
+  const docId     = conn.brokerDocId || 'ctrader';
+  const safeId    = docId.replace(/[^a-zA-Z0-9]/g, '-');
+  const connected = conn.connected === true;
+
+  const accountLabel = conn.accountId
+    ? `cTrader — ${conn.accountId}${conn.accountName ? ' ('+conn.accountName+')' : ''}`
+    : 'cTrader (The5ers / prop firms)';
+  const bal = (conn.accountBalance != null && connected)
+    ? ` · ${conn.accountBalance} ${conn.accountCurrency || ''}` : '';
+  const desc = connected
     ? 'Trades sync automatically every 5 mins, 24/7. Click Sync now for an immediate update.'
     : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
-  const mappingRow = document.getElementById('ctrader-mapping-row');
-  if(mappingRow){ if(connected){ mappingRow.classList.add('visible'); populateBrokerMappingDropdown('ctrader'); } else mappingRow.classList.remove('visible'); }
+
+  let lastSyncText = 'Last synced: never';
+  if(conn.lastSyncTimestamp){
+    const ms = conn.lastSyncTimestamp.toMillis ? conn.lastSyncTimestamp.toMillis() : Number(conn.lastSyncTimestamp);
+    lastSyncText = `Last synced: ${new Date(ms).toLocaleString('en-IN')}`;
+  }
+
+  // Build account-mapping dropdown from current settings
+  const mappedTo = (S.brokerAccountMap || {})[docId] || (conn.mapToEdgebookAccountId || '');
+  const accountOptions = (S.accounts || []).map(a =>
+    `<option value="${a.id}" ${mappedTo===a.id?'selected':''}>${a.name}</option>`
+  ).join('');
+
+  return `<div class="s-row" id="ctrader-row-${safeId}" style="margin-top:8px">
+  <div class="s-row-left">
+    <div class="s-row-label" style="display:flex;align-items:center;gap:8px">
+      <img src="https://ctrader.com/favicon.ico" width="16" height="16" style="border-radius:3px" onerror="this.style.display='none'">
+      ${accountLabel}${bal}
+    </div>
+    <div class="s-row-desc">${desc}</div>
+  </div>
+  <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
+    ${connected ? `<span style="font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>` : ''}
+    ${connected ? `<button class="btn-ghost" id="ctrader-sync-${safeId}" onclick="syncCtraderAccount('${docId}',this)"><i class="fa-solid fa-rotate"></i> Sync now</button>` : ''}
+    ${connected ? `<button class="btn-ghost" id="ctrader-hist-${safeId}" onclick="importCtraderAccountHistory('${docId}',this)" title="Import all historical deals"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>` : ''}
+    ${!connected ? `<button class="btn-accent" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>` : ''}
+    ${connected ? `<button class="btn-ghost" onclick="disconnectCtraderAccount('${docId}',this)" style="color:var(--red);border-color:rgba(226,75,74,0.3)"><i class="fa-solid fa-unlink"></i> Disconnect</button>` : ''}
+  </div>
+</div>
+${connected ? `<div style="padding:8px 20px;font-size:11px;color:var(--text3)">${lastSyncText}</div>` : ''}
+${connected ? `<div class="broker-mapping-row visible">
+  <span class="broker-mapping-label">Maps to account →</span>
+  <select class="broker-mapping-select" onchange="saveBrokerMapping('${docId}',this.value)">
+    <option value="">Not mapped</option>
+    ${accountOptions}
+  </select>
+</div>` : ''}
+${connected ? `<div style="padding:4px 20px 12px">
+  <button onclick="toggleAdvanced('ctrader-adv-${safeId}',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
+  <div id="ctrader-adv-${safeId}" style="display:none;margin-top:8px;padding:12px;background:rgba(29,158,117,0.04);border:1px solid rgba(29,158,117,0.18);border-radius:8px">
+    <button class="btn-ghost" onclick="forceReimportCtraderAccount('${docId}',this)"><i class="fa-solid fa-arrows-rotate"></i> Reconcile &amp; sync</button>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.5">Re-syncs all historical trades from cTrader and reconciles open positions. Your existing trade history and notes are always preserved.</div>
+  </div>
+</div>` : ''}`;
 }
+
+async function syncCtraderAccount(brokerDocId, btn){
+  const token = await getIdToken(); if(!token) return;
+  showToast('Syncing cTrader trades… Your history is preserved.', 'info');
+  const origHtml = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Syncing…'; }
+  try{
+    const res = await fetch(`${CTRADER_FN}/syncCtraderTrades`, {
+      method:'POST',
+      headers:{ Authorization:`Bearer ${token}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ brokerDocId })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || `Server error ${res.status}`);
+    const saveCount = data.saved ?? 0;
+    if(saveCount > 0){
+      await DataStore.loadFromFirestore();
+      showToast(`${saveCount} new trade(s) synced from cTrader`, 'success');
+    } else {
+      showToast(data.note || 'No new trades to sync', 'info');
+    }
+    await loadCtraderConnections(); // refresh last-sync timestamp
+  } catch(e){ showToast(`cTrader sync failed: ${e.message}`, 'error'); }
+  if(btn){ btn.disabled=false; btn.innerHTML=origHtml||'<i class="fa-solid fa-rotate"></i> Sync now'; }
+}
+
+async function importCtraderAccountHistory(brokerDocId, btn){
+  if(!confirm('Import all historical deals from cTrader?\n\nThis fetches your complete account history. Existing trades will not be duplicated. This may take up to a minute.')) return;
+  const idToken = await getIdToken(); if(!idToken) return;
+  const origHtml = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Importing…'; }
+  try{
+    const res = await fetch(`${CTRADER_FN}/syncCtraderHistory`, {
+      method:'POST',
+      headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ brokerDocId })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Import failed');
+    if(data.imported > 0){
+      await DataStore.loadFromFirestore();
+      showToast(`Imported ${data.imported} trade(s) from cTrader history (${data.skipped} already existed)`, 'success');
+    } else {
+      showToast(data.note || 'No new trades found in history', 'info');
+    }
+  } catch(e){
+    showToast(`cTrader history import failed: ${e.message}`, 'error');
+  }
+  if(btn){ btn.disabled=false; btn.innerHTML=origHtml||'<i class="fa-solid fa-clock-rotate-left"></i> Import history'; }
+}
+
+async function disconnectCtraderAccount(brokerDocId, btn){
+  if(!confirm(`Disconnect cTrader account (${brokerDocId})? Auto-sync will stop.`)) return;
+  try{
+    await window._fbSetDoc(window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', brokerDocId),
+      { connected: false, accessToken: null, refreshToken: null }, { merge: true });
+    showToast('cTrader disconnected', 'success');
+    await loadCtraderConnections();
+  } catch(e){ showToast('Failed to disconnect', 'error'); }
+}
+
+async function forceReimportCtraderAccount(brokerDocId, btn){
+  const confirmed = await showConfirm(
+    'Reconcile cTrader trades?',
+    `<ul style="margin:8px 0 0 16px;padding:0;line-height:1.8;font-size:12px">
+      <li>✅ Fetches complete cTrader history</li>
+      <li>✅ Adds new trades, updates open positions</li>
+      <li>⚠ Your notes &amp; manual edits are preserved</li>
+      <li>⚠ No trades are deleted — ever</li>
+    </ul>`,
+    'Reconcile & sync', 'Cancel'
+  );
+  if(!confirmed) return;
+  const idToken = await getIdToken(); if(!idToken) return;
+  const origHtml = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Reconciling…'; }
+  try{
+    showToast('Reconciling cTrader trades…', 'info');
+    const res = await fetch(`${CTRADER_FN}/forceReimportCtrader`, {
+      method:'POST',
+      headers:{ Authorization:`Bearer ${idToken}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ brokerDocId })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Reconcile failed');
+    await DataStore.loadFromFirestore();
+    showToast(`Reconcile complete — ${data.imported ?? data.written ?? 0} trades updated`, 'success');
+    refreshAll();
+  } catch(e){
+    showToast(`cTrader reconcile failed: ${e.message}`, 'error');
+  }
+  if(btn){ btn.disabled=false; btn.innerHTML=origHtml||'<i class="fa-solid fa-arrows-rotate"></i> Reconcile &amp; sync'; }
+}
+
+// Legacy checkCtraderStatus — now delegates to loadCtraderConnections
+async function checkCtraderStatus(){ await loadCtraderConnections(); }
 
 async function importCtraderHistory(){
   if(!confirm('Import all historical deals from cTrader?\n\nThis fetches your complete account history. Existing trades will not be duplicated. This may take up to a minute.')) return;

@@ -2487,18 +2487,23 @@ async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDet
   console.log(`cTrader reconcile uid=${uid}: auto-closed ${closedCount} of ${openPositions.length} open position(s)`);
 }
 
-async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
+async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ctrader' } = {}) {
   const syncStart = Date.now();
 
   // ── 1. Load broker state ────────────────────────────────────────────────────
-  const brokerRef = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+  const brokerRef = db.collection("users").doc(uid).collection("brokers").doc(brokerDocId);
   const brokerSnap = await brokerRef.get();
 
   if (!brokerSnap.exists || !brokerSnap.data().connected) {
-    throw new Error(`cTrader not connected for uid=${uid}`);
+    throw new Error(`cTrader not connected for uid=${uid} brokerDocId=${brokerDocId}`);
   }
 
   const brokerData = brokerSnap.data();
+  // Derive trade doc prefix from broker doc ID for multi-account support.
+  // Legacy single-account: brokerDocId='ctrader' → _docPrefix='ctrader' (unchanged doc IDs).
+  // Multi-account: brokerDocId='ctrader_12345' → _docPrefix='ctrader_12345'.
+  const _derivedAccountId = brokerDocId.startsWith('ctrader_') ? brokerDocId.slice('ctrader_'.length) : null;
+  const _docPrefix = _derivedAccountId ? `ctrader_${_derivedAccountId}` : 'ctrader';
 
   // ── 1b. Check token expiry — auto-refresh if within 7 days ─────────────────
   let bearerToken;
@@ -2756,7 +2761,7 @@ async function syncCtraderForUser(uid, { forceRefresh = false } = {}) {
   for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
     const batch = db.batch();
     for (const trade of toProcess.slice(i, i + BATCH_SIZE)) {
-      const docId     = `ctrader_${trade.brokerTradeId}`;
+      const docId     = `${_docPrefix}_${trade.brokerTradeId}`;
       const docRef    = tradesRef.doc(docId);
       const preserved = existingPreservedMap.get(docId);
       batch.set(docRef, {
@@ -2927,6 +2932,11 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
     const CTRADER_ACCESS_TOKEN_EXPIRY_S = 2_628_000; // from cTrader Open API docs
     const tokenExpiresAtMs = Date.now() + CTRADER_ACCESS_TOKEN_EXPIRY_S * 1000;
 
+    // Extract cTrader accountId from balance response (available in Open API responses)
+    const ctraderAccountId = typeof balance === "object"
+      ? (balance.accountId ?? balance.account_id ?? balance.id ?? null)
+      : null;
+
     const brokerPayload = {
       connected:       true,
       accessToken:     encrypt(cleanBearer),
@@ -2939,6 +2949,8 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
       // Balance snapshot for UI display (no sensitive trading data)
       accountBalance:  typeof balance === "object" ? (balance.balance ?? balance.equity ?? null) : null,
       accountCurrency: typeof balance === "object" ? (balance.currency ?? null) : null,
+      // cTrader account identifier (may be null for older API versions)
+      accountId:       ctraderAccountId ? String(ctraderAccountId) : null,
     };
 
     // Store refresh token encrypted if provided — required for auto-refresh
@@ -2954,20 +2966,30 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
       );
     }
 
+    // Write to legacy 'ctrader' doc (backward compat — single-account syncs read this)
     await db
       .collection("users").doc(uid)
       .collection("brokers").doc("ctrader")
       .set(brokerPayload, { merge: true });
 
+    // Write to per-account doc for multi-account support
+    if (ctraderAccountId) {
+      const accountDocId  = `ctrader_${ctraderAccountId}`;
+      const accountDocRef = db.collection("users").doc(uid).collection("brokers").doc(accountDocId);
+      await accountDocRef.set({ ...brokerPayload, accountId: String(ctraderAccountId) }, { merge: true });
+      console.log(`ctraderConnect: uid=${uid} also saved to ${accountDocId}`);
+    }
+
     console.log(
-      `ctraderConnect: uid=${uid} connected — symbolCount=${symbolCount} ` +
-      `tokenExpiresAt=${new Date(tokenExpiresAtMs).toISOString()} ` +
+      `ctraderConnect: uid=${uid} connected — accountId=${ctraderAccountId ?? "unknown"} ` +
+      `symbolCount=${symbolCount} tokenExpiresAt=${new Date(tokenExpiresAtMs).toISOString()} ` +
       `refreshToken=${cleanRefresh ? "stored" : "not provided"}`
     );
 
     return res.status(200).json({
       ok:                 true,
       message:            "cTrader connected successfully",
+      accountId:          ctraderAccountId ? String(ctraderAccountId) : null,
       symbolCount,
       tokenExpiresAt:     tokenExpiresAtMs,
       tokenExpiresAtISO:  new Date(tokenExpiresAtMs).toISOString(),
@@ -3295,20 +3317,23 @@ exports.forceReimportCtrader = functions
 // We deliberately set a 540-second timeout (max for 1st-gen) because a full
 // account history fetch can be large.
 
-async function runCtraderHistorySync(uid, fromTimestamp) {
+async function runCtraderHistorySync(uid, fromTimestamp, brokerDocId = 'ctrader') {
   const fnStart = Date.now();
 
   // ── 1. Load broker state + token ──────────────────────────────────────────
-  const brokerRef  = db.collection("users").doc(uid).collection("brokers").doc("ctrader");
+  const brokerRef  = db.collection("users").doc(uid).collection("brokers").doc(brokerDocId);
   const brokerSnap = await brokerRef.get();
 
   if (!brokerSnap.exists || !brokerSnap.data().connected) {
-    const err = new Error("cTrader is not connected for this account");
+    const err = new Error(`cTrader is not connected for this account (brokerDocId=${brokerDocId})`);
     err.status = 403;
     throw err;
   }
 
   const brokerData = brokerSnap.data();
+  // Derive trade doc prefix for multi-account support (mirrors syncCtraderForUser).
+  const _derivedAccountId = brokerDocId.startsWith('ctrader_') ? brokerDocId.slice('ctrader_'.length) : null;
+  const _docPrefix = _derivedAccountId ? `ctrader_${_derivedAccountId}` : 'ctrader';
 
   let bearerToken;
   const tokenExpiresAt = brokerData.tokenExpiresAt?.toMillis?.() ?? null;
@@ -3406,7 +3431,7 @@ async function runCtraderHistorySync(uid, fromTimestamp) {
   for (let i = 0; i < positionTrades.length; i += BATCH_SIZE) {
     const batch = db.batch();
     for (const trade of positionTrades.slice(i, i + BATCH_SIZE)) {
-      const docRef = tradesRef.doc(`ctrader_${trade.brokerTradeId}`);
+      const docRef = tradesRef.doc(`${_docPrefix}_${trade.brokerTradeId}`);
       batch.set(docRef, { ...trade, importedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
     }
     await batch.commit();
@@ -3920,8 +3945,9 @@ exports.ctraderScheduledSync = functions.pubsub
       .where("connected", "==", true)
       .get();
 
-    // Filter to cTrader broker documents only (Zerodha has its own scheduler)
-    const ctraderDocs = snapshot.docs.filter((doc) => doc.id === "ctrader");
+    // Filter to cTrader broker documents only (Zerodha has its own scheduler).
+    // Include both legacy 'ctrader' doc and per-account 'ctrader_{accountId}' docs.
+    const ctraderDocs = snapshot.docs.filter((doc) => doc.id === "ctrader" || doc.id.startsWith("ctrader_"));
 
     console.log(`ctraderScheduledSync: ${ctraderDocs.length} connected cTrader account(s)`);
 
@@ -3934,9 +3960,9 @@ exports.ctraderScheduledSync = functions.pubsub
       ctraderDocs.map(async (doc) => {
         const uid = doc.ref.parent.parent.id;
         try {
-          const result = await syncCtraderForUser(uid);
+          const result = await syncCtraderForUser(uid, { brokerDocId: doc.id });
           console.log(
-            `ctraderScheduledSync: uid=${uid} saved=${result.saved} ` +
+            `ctraderScheduledSync: uid=${uid} brokerDocId=${doc.id} saved=${result.saved} ` +
             `skipped=${result.skipped} duration=${result.durationMs}ms`
           );
           return { uid, ...result };
