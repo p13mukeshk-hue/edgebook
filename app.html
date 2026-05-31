@@ -4788,6 +4788,40 @@ function sourceBadge(t){
   if(src==='csv')     return '<span class="badge badge-src-csv">CSV</span>';
   return '<span class="badge badge-src-manual">Manual</span>';
 }
+// Pick the correct size unit label for a trade based on its instrument/asset.
+// F&O (Options/Futures), commodities and any trade with an explicit lotSize > 1
+// are shown in "lot/lots". Forex is "lot/lots". Equities are "share/shares".
+// Crypto is "units". Everything else is "unit/units".
+function getSizeLabel(trade){
+  const size = trade.size ?? 0;
+
+  // F&O instruments → always "lot/lots"
+  if (trade.instrument === 'Options' ||
+      trade.instrument === 'Futures' ||
+      (trade.lotSize && trade.lotSize > 1) ||
+      trade.asset === 'cm') {
+    return size === 1 ? 'lot' : 'lots';
+  }
+
+  // Forex → lots
+  if (trade.asset === 'fx') {
+    return size === 1 ? 'lot' : 'lots';
+  }
+
+  // Equities (no F&O instrument) → shares
+  if (trade.asset === 'eq' && !trade.instrument) {
+    return size === 1 ? 'share' : 'shares';
+  }
+
+  // Crypto → units (note: this codebase uses 'cx' as the crypto asset key)
+  if (trade.asset === 'cx' || trade.asset === 'cr') {
+    return 'units';
+  }
+
+  // Default
+  return size === 1 ? 'unit' : 'units';
+}
+
 function tradeRow(t){
   const c      = acctCur(t.accountId);
   const pnl    = (t.pnl !== undefined && t.pnl !== null) ? t.pnl : null;
@@ -4801,7 +4835,7 @@ function tradeRow(t){
 
   const bd       = pnlBreakdown(t);
   const futSpec  = FUTURES_SPECS[sym];
-  const szLabel  = futSpec ? 'contracts' : asset==='fx' ? 'lots' : asset==='eq' ? 'shares' : 'units';
+  const szLabel  = getSizeLabel(t);
   const decimals = asset==='fx' ? 4 : 2;
 
   const isOpen = pnl === null;
@@ -4862,10 +4896,16 @@ function getBaseFilteredTrades(page, searchId, assetId, dirId, resultId){
     if(sq&&!((t.symbol||'').toLowerCase().includes(sq)||(t.notes||'').toLowerCase().includes(sq))) return false;
     return true;
   });
-  // Newest first: date DESC, then entryTime DESC within same day
-  list.sort((a,b)=>{
-    const dc=(b.date??'').localeCompare(a.date??'');
-    return dc!==0 ? dc : (b.entryTime??'99:99').localeCompare(a.entryTime??'99:99');
+  // Newest trade always on top.
+  // Primary: date DESC. Secondary: entryTime DESC within the same day.
+  // Trades without entryTime are treated as '99:99' so they pin to the top
+  // of their day (the most-recently-logged ones).
+  list.sort((a, b) => {
+    const dateCompare = (b.date ?? '').localeCompare(a.date ?? '');
+    if (dateCompare !== 0) return dateCompare;
+    const timeA = a.entryTime ?? '99:99';
+    const timeB = b.entryTime ?? '99:99';
+    return timeB.localeCompare(timeA);
   });
   return list;
 }
