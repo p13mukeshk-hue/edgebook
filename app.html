@@ -70,7 +70,7 @@ document.dispatchEvent(new Event('firebase-ready'));
   --red:#ff5e6a;--red-bg:rgba(255,94,106,0.1);
   --amber:#f5a623;--amber-bg:rgba(245,166,35,0.1);
   --blue:#4da6ff;--blue-bg:rgba(77,166,255,0.1);
-  --radius:16px;--radius-sm:10px;--sidebar-w:240px;
+  --radius:16px;--radius-sm:10px;--radius-lg:20px;--sidebar-w:240px;
   --font-display:'DM Serif Display',serif;--font-body:'DM Sans',sans-serif;--font-mono:'JetBrains Mono',monospace;
   --shadow:0 1px 3px rgba(0,0,0,0.4);
 }
@@ -375,6 +375,9 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .btn-primary:hover{background:var(--accent2);box-shadow:0 4px 16px var(--accent-glow)}
 .btn-danger{padding:10px 18px;background:rgba(255,94,106,0.1);border:1px solid rgba(255,94,106,0.25);border-radius:10px;color:var(--red);font-family:var(--font-body);font-size:13px;font-weight:500;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:6px}
 .btn-danger:hover{background:rgba(255,94,106,0.18)}
+.btn-accent{padding:8px 16px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);font-size:13px;font-weight:500;font-family:var(--font-body);cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:opacity .15s}
+.btn-accent:hover{opacity:.88}
+.btn-accent:disabled{opacity:.5;cursor:not-allowed}
 .section-divider{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.8px;margin:20px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border)}
 .emoji-row{display:flex;gap:6px;flex-wrap:wrap}
 .emoji-opt{padding:5px 12px;border:1px solid var(--border);border-radius:20px;cursor:pointer;font-size:13px;background:none;color:var(--text2);font-family:var(--font-body);transition:.15s}
@@ -945,6 +948,25 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
 .broker-mapping-label{font-size:12px;color:var(--text2);white-space:nowrap}
 .broker-mapping-select{padding:5px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-family:var(--font-body);font-size:12px;cursor:pointer;outline:none;transition:.15s}
 .broker-mapping-select:focus{border-color:var(--accent)}
+/* ── Broker account cards ─────────────────────────────────────────────── */
+.broker-account-card{border:1px solid var(--border2);border-radius:var(--radius-sm);margin:10px 20px;overflow:hidden;background:var(--bg3);transition:border-color .15s}
+.broker-account-card:hover{border-color:rgba(108,99,255,0.25)}
+.broker-account-card-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg2)}
+.broker-account-card-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--text)}
+.broker-account-card-sub{font-size:11px;color:var(--text3);margin-top:2px}
+.broker-account-card-actions{display:flex;gap:8px;align-items:center;flex-shrink:0}
+.broker-meta-row{display:flex;align-items:center;gap:16px;padding:8px 16px;font-size:11px;color:var(--text3);flex-wrap:wrap}
+.broker-meta-item{display:flex;align-items:center;gap:4px}
+.broker-mapping-inline{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:12px;color:var(--text2);border-top:1px solid var(--border)}
+.broker-mapping-inline select{padding:4px 8px;border-radius:8px;border:1px solid var(--border2);background:var(--bg3);color:var(--text);font-size:12px;cursor:pointer;outline:none;transition:.15s}
+.broker-mapping-inline select:focus{border-color:var(--accent)}
+.broker-advanced-toggle{background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:6px 16px;display:flex;align-items:center;gap:4px;width:100%;text-align:left;font-family:var(--font-body);transition:color .15s}
+.broker-advanced-toggle:hover{color:var(--text2)}
+.broker-advanced-body{margin:4px 16px 12px;padding:12px;background:rgba(29,158,117,0.04);border:1px solid rgba(29,158,117,0.18);border-radius:8px}
+.broker-add-card{margin:10px 20px 16px;border:1.5px dashed var(--accent);border-radius:var(--radius-sm);padding:14px;display:flex;align-items:center;justify-content:center;cursor:pointer;background:rgba(108,99,255,0.04);transition:background .15s,border-color .15s;gap:8px;color:var(--accent);font-size:13px;font-weight:500;font-family:var(--font-body)}
+.broker-add-card:hover{background:rgba(108,99,255,0.08);border-color:var(--accent2)}
+.broker-add-card i{font-size:14px}
+.broker-section-label{padding:8px 20px 2px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.8px}
 /* ── Duplicate resolution modal ───────────────────────────────────────── */
 .dup-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .dup-card{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:16px}
@@ -1683,6 +1705,7 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
               <!-- BROKER CONNECTIONS -->
               <div class="s-section">
                 <div class="s-section-head"><div class="s-section-title">Broker connections</div><div class="s-section-sub">Auto-sync trades directly from your broker</div></div>
+                <div class="broker-section-label">Zerodha</div>
                 <div class="s-row" id="zerodha-connect-row">
                   <div class="s-row-left">
                     <div class="s-row-label" style="display:flex;align-items:center;gap:8px">
@@ -1715,11 +1738,10 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
                   </div>
                 </div>
 
+                <div class="broker-section-label" style="margin-top:8px">cTrader</div>
                 <!-- cTrader connections — rendered dynamically by renderCtraderCards() -->
+                <!-- "Add cTrader account" button is appended by renderCtraderCards() -->
                 <div id="ctrader-connections-container"></div>
-                <div style="padding:4px 20px 12px">
-                  <button class="btn-ghost" onclick="openCtraderModal()" style="font-size:12px"><i class="fa-solid fa-plus"></i> Add cTrader account</button>
-                </div>
               </div>
 
               <!-- cTrader token modal -->
@@ -3156,24 +3178,27 @@ function _checkCtraderTokenExpiry(conn){
 function renderCtraderCards(connections){
   const container = document.getElementById('ctrader-connections-container');
   if(!container) return;
-  container.innerHTML = connections.map(conn => renderCtraderAccountCard(conn)).join('');
+  const cards = connections.map(conn => renderCtraderAccountCard(conn)).join('');
+  const addBtn = `<div class="broker-add-card" onclick="openCtraderModal()">
+    <i class="fa-solid fa-plus"></i> Add cTrader account
+  </div>`;
+  container.innerHTML = cards + addBtn;
 }
+
+function connectNewCtrader(){ openCtraderModal(); }
 
 function renderCtraderAccountCard(conn){
   const docId     = conn.brokerDocId || 'ctrader';
   const safeId    = docId.replace(/[^a-zA-Z0-9]/g, '-');
   const connected = conn.connected === true;
 
-  const accountLabel = conn.accountId
-    ? `cTrader — ${conn.accountId}${conn.accountName ? ' ('+conn.accountName+')' : ''}`
-    : 'cTrader (The5ers / prop firms)';
+  const accountName = conn.accountName || (conn.accountId ? `Account ${conn.accountId}` : 'cTrader (The5ers / prop firms)');
+  const accountIdBadge = conn.accountId
+    ? `<span style="color:var(--text3);font-weight:400;font-size:11px">#${conn.accountId}</span>` : '';
   const bal = (conn.accountBalance != null && connected)
-    ? ` · ${conn.accountBalance} ${conn.accountCurrency || ''}` : '';
-  const desc = connected
-    ? 'Trades sync automatically every 5 mins, 24/7. Click Sync now for an immediate update.'
-    : 'Connect your cTrader account to auto-sync Gold, BTC, Oil, Silver trades';
+    ? ` · Balance: ${conn.accountBalance} ${conn.accountCurrency || ''}` : '';
 
-  let lastSyncText = 'Last synced: never';
+  let lastSyncText = 'Never synced';
   if(conn.lastSyncTimestamp){
     const ms = conn.lastSyncTimestamp.toMillis ? conn.lastSyncTimestamp.toMillis() : Number(conn.lastSyncTimestamp);
     lastSyncText = `Last synced: ${new Date(ms).toLocaleString('en-IN')}`;
@@ -3185,37 +3210,67 @@ function renderCtraderAccountCard(conn){
     `<option value="${a.id}" ${mappedTo===a.id?'selected':''}>${a.name}</option>`
   ).join('');
 
-  return `<div class="s-row" id="ctrader-row-${safeId}" style="margin-top:8px">
-  <div class="s-row-left">
-    <div class="s-row-label" style="display:flex;align-items:center;gap:8px">
-      <img src="https://ctrader.com/favicon.ico" width="16" height="16" style="border-radius:3px" onerror="this.style.display='none'">
-      ${accountLabel}${bal}
+  if(!connected){
+    // Not-connected state: compact placeholder card
+    return `<div class="broker-account-card" id="ctrader-row-${safeId}">
+  <div class="broker-account-card-header">
+    <div>
+      <div class="broker-account-card-title">
+        <img src="https://ctrader.com/favicon.ico" width="14" height="14" style="border-radius:3px" onerror="this.style.display='none'">
+        cTrader (The5ers / prop firms)
+      </div>
+      <div class="broker-account-card-sub">Connect to auto-sync Gold, BTC, Oil, Silver trades</div>
     </div>
-    <div class="s-row-desc">${desc}</div>
+    <div class="broker-account-card-actions">
+      <button class="btn-accent" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>
+    </div>
   </div>
-  <div class="s-row-right" style="display:flex;gap:8px;align-items:center">
-    ${connected ? `<span style="font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(29,158,117,0.12);color:var(--green);border:0.5px solid rgba(29,158,117,0.3)">● Connected</span>` : ''}
-    ${connected ? `<button class="btn-ghost" id="ctrader-sync-${safeId}" onclick="syncCtraderAccount('${docId}',this)"><i class="fa-solid fa-rotate"></i> Sync now</button>` : ''}
-    ${connected ? `<button class="btn-ghost" id="ctrader-hist-${safeId}" onclick="importCtraderAccountHistory('${docId}',this)" title="Import all historical deals"><i class="fa-solid fa-clock-rotate-left"></i> Import history</button>` : ''}
-    ${!connected ? `<button class="btn-accent" onclick="openCtraderModal()"><i class="fa-solid fa-link"></i> Connect</button>` : ''}
-    ${connected ? `<button class="btn-ghost" onclick="disconnectCtraderAccount('${docId}',this)" style="color:var(--red);border-color:rgba(226,75,74,0.3)"><i class="fa-solid fa-unlink"></i> Disconnect</button>` : ''}
+</div>`;
+  }
+
+  return `<div class="broker-account-card" id="ctrader-row-${safeId}">
+
+  <!-- Header: name + action buttons -->
+  <div class="broker-account-card-header">
+    <div>
+      <div class="broker-account-card-title">
+        <img src="https://ctrader.com/favicon.ico" width="14" height="14" style="border-radius:3px" onerror="this.style.display='none'">
+        ${accountName} ${accountIdBadge}
+      </div>
+      <div class="broker-account-card-sub">Syncs every 5 min, 24/7${bal}</div>
+    </div>
+    <div class="broker-account-card-actions">
+      <span style="font-size:11px;padding:3px 10px;border-radius:20px;background:var(--green-bg);color:var(--green);border:0.5px solid rgba(34,201,135,0.3);white-space:nowrap">● Connected</span>
+      <button class="btn-ghost" id="ctrader-sync-${safeId}" onclick="syncCtraderAccount('${docId}',this)" style="padding:6px 12px;font-size:12px"><i class="fa-solid fa-rotate"></i> Sync</button>
+      <button class="btn-ghost" id="ctrader-hist-${safeId}" onclick="importCtraderAccountHistory('${docId}',this)" style="padding:6px 12px;font-size:12px" title="Import all historical deals"><i class="fa-solid fa-clock-rotate-left"></i> History</button>
+      <button class="btn-ghost" onclick="disconnectCtraderAccount('${docId}',this)" style="padding:6px 10px;font-size:12px;color:var(--red);border-color:rgba(255,94,106,0.25)" title="Disconnect"><i class="fa-solid fa-unlink"></i></button>
+    </div>
   </div>
-</div>
-${connected ? `<div style="padding:8px 20px;font-size:11px;color:var(--text3)">${lastSyncText}</div>` : ''}
-${connected ? `<div class="broker-mapping-row visible">
-  <span class="broker-mapping-label">Maps to account →</span>
-  <select class="broker-mapping-select" onchange="saveBrokerMapping('${docId}',this.value)">
-    <option value="">Not mapped</option>
-    ${accountOptions}
-  </select>
-</div>` : ''}
-${connected ? `<div style="padding:4px 20px 12px">
-  <button onclick="toggleAdvanced('ctrader-adv-${safeId}',this)" style="background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:4px">Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i></button>
-  <div id="ctrader-adv-${safeId}" style="display:none;margin-top:8px;padding:12px;background:rgba(29,158,117,0.04);border:1px solid rgba(29,158,117,0.18);border-radius:8px">
-    <button class="btn-ghost" onclick="forceReimportCtraderAccount('${docId}',this)"><i class="fa-solid fa-arrows-rotate"></i> Reconcile &amp; sync</button>
+
+  <!-- Meta row: last sync timestamp -->
+  <div class="broker-meta-row">
+    <span class="broker-meta-item"><i class="fa-regular fa-clock" style="font-size:10px"></i> ${lastSyncText}</span>
+  </div>
+
+  <!-- Account mapping -->
+  <div class="broker-mapping-inline">
+    <span>Maps to account →</span>
+    <select onchange="saveBrokerMapping('${docId}',this.value)">
+      <option value="">Not mapped</option>
+      ${accountOptions}
+    </select>
+  </div>
+
+  <!-- Advanced -->
+  <button class="broker-advanced-toggle" onclick="toggleAdvanced('ctrader-adv-${safeId}',this)">
+    Advanced <i class="fa-solid fa-chevron-down" style="font-size:9px"></i>
+  </button>
+  <div id="ctrader-adv-${safeId}" class="broker-advanced-body" style="display:none">
+    <button class="btn-ghost" onclick="forceReimportCtraderAccount('${docId}',this)" style="padding:6px 12px;font-size:12px"><i class="fa-solid fa-arrows-rotate"></i> Reconcile &amp; sync</button>
     <div style="font-size:11px;color:var(--text3);margin-top:8px;line-height:1.5">Re-syncs all historical trades from cTrader and reconciles open positions. Your existing trade history and notes are always preserved.</div>
   </div>
-</div>` : ''}`;
+
+</div>`;
 }
 
 async function syncCtraderAccount(brokerDocId, btn){
