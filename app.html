@@ -6748,6 +6748,7 @@ function normCSVDirection(raw){
 // are fill-level, e.g. Zerodha tradebook). Closed Longs get exit + pnl;
 // unmatched SELLs become Short entries; unmatched BUYs stay open.
 function csvFifoPair(fills){
+  // Group by symbol
   const bySymbol = {};
   for(const f of fills){
     if(!bySymbol[f.symbol]) bySymbol[f.symbol] = [];
@@ -6756,26 +6757,45 @@ function csvFifoPair(fills){
 
   const out = [];
   for(const [sym, symFills] of Object.entries(bySymbol)){
-    // chronological sort: date + time ascending
+    // Sort chronologically by date + raw time
     symFills.sort((a,b) => {
-      const ta = (a._rawDate || a.date || '') + (a._rawTime || '');
-      const tb = (b._rawDate || b.date || '') + (b._rawTime || '');
+      const ta = (a.date || '') + (a._rawTime || '');
+      const tb = (b.date || '') + (b._rawTime || '');
       return ta.localeCompare(tb);
     });
 
-    const buyQueue = [];
+    // Two queues — BUYs waiting for a SELL, SELLs waiting for a BUY (Short cover)
+    const buyQueue  = [];   // open Longs
+    const sellQueue = [];   // open Shorts
+
     for(const fill of symFills){
       if(fill.direction === 'Long'){
-        buyQueue.push(fill);
-      } else {
-        // SELL fill
-        if(buyQueue.length > 0){
-          const buyFill = buyQueue.shift();
+        // BUY fill — closes an open Short FIFO if any, else opens a new Long
+        if(sellQueue.length > 0){
+          const shortEntry = sellQueue.shift();
           const pnl = parseFloat(
-            ((fill.entry - buyFill.entry) * buyFill.size * (buyFill.lotSize || 1)).toFixed(2)
+            ((shortEntry.entry - fill.entry) * shortEntry.size * (shortEntry.lotSize || 1)).toFixed(2)
           );
           out.push({
-            ...buyFill,
+            ...shortEntry,
+            exit:      fill.entry,
+            exitTime:  fill._rawTime || null,
+            pnl,
+            isOpen:    false,
+            direction: 'Short',
+          });
+        } else {
+          buyQueue.push(fill);
+        }
+      } else {
+        // SELL fill — closes an open Long FIFO if any, else opens a new Short
+        if(buyQueue.length > 0){
+          const longEntry = buyQueue.shift();
+          const pnl = parseFloat(
+            ((fill.entry - longEntry.entry) * longEntry.size * (longEntry.lotSize || 1)).toFixed(2)
+          );
+          out.push({
+            ...longEntry,
             exit:      fill.entry,
             exitTime:  fill._rawTime || null,
             pnl,
@@ -6783,17 +6803,21 @@ function csvFifoPair(fills){
             direction: 'Long',
           });
         } else {
-          // SELL with no matching BUY → treat as Short entry (open)
-          buyQueue.push({ ...fill, direction: 'Short', _isShortEntry: true });
+          sellQueue.push(fill);
         }
       }
     }
 
-    // Remaining queue entries = open positions
+    // Remaining BUYs → open Longs
     for(const f of buyQueue){
-      out.push({ ...f, exit: null, pnl: null, isOpen: true });
+      out.push({ ...f, exit: null, pnl: null, isOpen: true, direction: 'Long' });
+    }
+    // Remaining SELLs → open Shorts
+    for(const f of sellQueue){
+      out.push({ ...f, exit: null, pnl: null, isOpen: true, direction: 'Short' });
     }
   }
+
   return out;
 }
 
