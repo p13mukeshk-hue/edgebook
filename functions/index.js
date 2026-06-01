@@ -289,7 +289,12 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
   const pairedTrades = [];
 
   for (const [sym, symFills] of Object.entries(bySymbol)) {
-    const buyQueue = [];  // unmatched BUY fills (FIFO)
+    // Dual queues: opening fills wait here until matched by the closing side.
+    // A BUY that arrives with no open Short goes to buyQueue (open Long).
+    // A SELL that arrives with no open Long goes to sellQueue (open Short).
+    // This correctly handles option selling: SELL=open, BUY=close.
+    const buyQueue  = [];  // unmatched BUY fills → open Longs
+    const sellQueue = [];  // unmatched SELL fills → open Shorts
 
     for (const fill of symFills) {
       const txType = (fill.transaction_type || "").toUpperCase();
@@ -300,24 +305,59 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
       const time   = ts ? String(ts).slice(11, 16) : null;
 
       if (txType === "BUY") {
-        buyQueue.push({ fill, qty, price, date, time });
+        if (sellQueue.length > 0) {
+          // BUY closes an open Short (e.g. option selling: SELL-then-BUY)
+          const shortEntry = sellQueue.shift();
+          const matchQty   = Math.min(shortEntry.qty, qty);
+          const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+          const lotSz      = getZerodhaLotSize(sym);
+          const sizeInLots = lotSz > 1 ? matchQty / lotSz : matchQty;
+          // Short P&L: positive when exit < entry (price fell after selling)
+          const pnl = parseFloat(((shortEntry.price - price) * matchQty).toFixed(2));
+          console.log(`${label} [${uid}]: BUY closes Short ${sym} entry=${shortEntry.price} exit=${price} qty=${matchQty} pnl=${pnl}`);
+          pairedTrades.push({
+            id:            zerodhaTradeDocId(sym, shortEntry.date, shortEntry.price),
+            brokerTradeId: fill.order_id || fill.trade_id,
+            source:        "zerodha",
+            broker:        "zerodha",
+            symbol:        sym,
+            asset,
+            instrument:    instrument ?? null,
+            optionType:    optionType ?? null,
+            strike:        fill.strike    ? Number(fill.strike)    : null,
+            expiry:        fill.expiry    || null,
+            exchange:      fill.exchange  || null,
+            product:       fill.product   || null,
+            direction:     "Short",
+            entry:         shortEntry.price,
+            exit:          price,
+            size:          sizeInLots,
+            pnl,
+            isOpen:        false,
+            date:          shortEntry.date,
+            entryTime:     shortEntry.time,
+            exitTime:      time,
+            syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } else {
+          // No open Short — BUY opens a Long
+          buyQueue.push({ fill, qty, price, date, time });
+        }
         continue;
       }
 
       if (txType === "SELL") {
-        const buyEntry = buyQueue.shift();
-        const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
-        const matchQty = buyEntry ? Math.min(buyEntry.qty, qty) : qty;
-
-        if (buyEntry) {
-          // Matched Long round-trip
-          const entry = buyEntry.price;
-          const exit  = price;
+        if (buyQueue.length > 0) {
+          // SELL closes an open Long (standard equity / long-option trade)
+          const longEntry = buyQueue.shift();
+          const matchQty  = Math.min(longEntry.qty, qty);
+          const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
           const lotSz      = getZerodhaLotSize(sym);
           const sizeInLots = lotSz > 1 ? matchQty / lotSz : matchQty;
-          const pnl   = parseFloat(((exit - entry) * matchQty).toFixed(2));
+          const pnl = parseFloat(((price - longEntry.price) * matchQty).toFixed(2));
+          console.log(`${label} [${uid}]: SELL closes Long ${sym} entry=${longEntry.price} exit=${price} qty=${matchQty} pnl=${pnl}`);
           pairedTrades.push({
-            id:            zerodhaTradeDocId(sym, buyEntry.date, entry),
+            id:            zerodhaTradeDocId(sym, longEntry.date, longEntry.price),
             brokerTradeId: fill.order_id || fill.trade_id,
             source:        "zerodha",
             broker:        "zerodha",
@@ -330,25 +370,23 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
             exchange:      fill.exchange  || null,
             product:       fill.product   || null,
             direction:     "Long",
-            entry,
-            exit,
+            entry:         longEntry.price,
+            exit:          price,
             size:          sizeInLots,
             pnl,
             isOpen:        false,
-            date:          buyEntry.date,
-            entryTime:     buyEntry.time,
+            date:          longEntry.date,
+            entryTime:     longEntry.time,
             exitTime:      time,
             syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
           });
         } else {
-          // SELL with no same-day BUY — could be closing a multi-day Long position.
-          // Check existingOpenLongs before creating anything to avoid phantom Short trades.
+          // No open Long — check if this SELL closes a multi-day Long from a prior day
           const existingLong = existingOpenLongs.get(sym);
           if (existingLong) {
-            // Close the existing open Long from a prior day
             const pnl = parseFloat(((price - existingLong.entry) * existingLong.size).toFixed(2));
             pairedTrades.push({
-              id:       existingLong.docId,   // same doc id — dedup will update it to isOpen:false
+              id:       existingLong.docId,  // same doc id — dedup updates isOpen:false
               symbol:   sym,
               direction: "Long",
               exit:     price,
@@ -359,35 +397,9 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
             });
             console.log(`${label} [${uid}]: SELL closes existing open Long ${sym} (doc ${existingLong.docId}) exit=${price} pnl=${pnl}`);
           } else {
-            // No open Long in Firestore — could be genuine Short entry or orphan SELL.
-            // Create the trade but mark needsReview so reconcile can resolve it.
-            const { asset: aAsset, instrument: aInstrument, optionType: aOptionType } = mapZerodhaInstrument(fill);
-            pairedTrades.push({
-              id:            zerodhaTradeDocId(sym, date, price),
-              brokerTradeId: fill.order_id || fill.trade_id,
-              source:        "zerodha",
-              broker:        "zerodha",
-              symbol:        sym,
-              asset:         aAsset,
-              instrument:    aInstrument ?? null,
-              optionType:    aOptionType ?? null,
-              strike:        fill.strike ? Number(fill.strike) : null,
-              expiry:        fill.expiry  || null,
-              exchange:      fill.exchange || null,
-              product:       fill.product  || null,
-              direction:     "Short",
-              entry:         price,
-              exit:          null,
-              size:          qty,
-              pnl:           null,
-              isOpen:        true,
-              needsReview:   true,
-              date,
-              entryTime:     time,
-              exitTime:      null,
-              syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
-            });
-            console.log(`${label} [${uid}]: SELL with no matching BUY for ${sym} — created needsReview Short`);
+            // No open Long anywhere — SELL opens a new Short position
+            sellQueue.push({ fill, qty, price, date, time });
+            console.log(`${label} [${uid}]: SELL opens Short ${sym} @ ${price}`);
           }
         }
         continue;
@@ -403,6 +415,8 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
         continue;
       }
       const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+      const lotSz      = getZerodhaLotSize(sym);
+      const sizeInLots = lotSz > 1 ? qty / lotSz : qty;
       pairedTrades.push({
         id:            zerodhaTradeDocId(sym, date, price),
         brokerTradeId: fill.order_id || fill.trade_id,
@@ -419,9 +433,45 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
         direction:     "Long",
         entry:         price,
         exit:          null,
-        size:          qty,
+        size:          sizeInLots,
         pnl:           null,
         isOpen:        true,
+        date,
+        entryTime:     time,
+        exitTime:      null,
+        syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+
+    // Remaining unmatched SELL fills → open Short positions (skip if not in openSymbols)
+    for (const { fill, qty, price, date, time } of sellQueue) {
+      if (!openSymbols.has(sym)) {
+        console.log(`${label} [${uid}]: unmatched SELL ${sym} not in openSymbols — marking needsReview`);
+        // Fall through and save as needsReview so it surfaces for manual review
+      }
+      const { asset, instrument, optionType } = mapZerodhaInstrument(fill);
+      const lotSz      = getZerodhaLotSize(sym);
+      const sizeInLots = lotSz > 1 ? qty / lotSz : qty;
+      pairedTrades.push({
+        id:            zerodhaTradeDocId(sym, date, price),
+        brokerTradeId: fill.order_id || fill.trade_id,
+        source:        "zerodha",
+        broker:        "zerodha",
+        symbol:        sym,
+        asset,
+        instrument:    instrument ?? null,
+        optionType:    optionType ?? null,
+        strike:        fill.strike  ? Number(fill.strike) : null,
+        expiry:        fill.expiry  || null,
+        exchange:      fill.exchange || null,
+        product:       fill.product  || null,
+        direction:     "Short",
+        entry:         price,
+        exit:          null,
+        size:          sizeInLots,
+        pnl:           null,
+        isOpen:        true,
+        needsReview:   !openSymbols.has(sym),
         date,
         entryTime:     time,
         exitTime:      null,
