@@ -2038,6 +2038,22 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
 </div>
 
 <script>
+/* ═══════════════════════════════════════════════════════
+   EDGEBOOK APP.HTML — SECTION INDEX
+
+   § SETTINGS MANAGER       — SettingsManager
+   § DATA NORMALISATION     — normaliseFsTrade
+   § FIRESTORE SYNC         — startTradesListener
+   § P&L ENGINE             — calculatePnL
+   § TRADE FORM             — openTradeModal
+   § DELETE & ARCHIVE       — deleteTrade
+   § TRADE TABLE            — refreshAll, renderTradeTable
+
+   When editing: search for § SECTION NAME
+   to jump directly to that section.
+   DO NOT edit sections marked DO NOT EDIT
+   ═══════════════════════════════════════════════════════ */
+
 /* ══════════════════════════════════════════════════════
    CONSTANTS
 ══════════════════════════════════════════════════════ */
@@ -2118,6 +2134,11 @@ const DEFAULT_SYMBOLS = {
    SETTINGS MANAGER (swap-ready)
    Key: tradedesk_settings_{userId}
 ══════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════
+   § SETTINGS MANAGER — DO NOT EDIT
+   Object: SettingsManager
+   Handles all user settings persistence
+   ═══════════════════════════════════════════ */
 const SettingsManager = {
   _uid:'guest',
   _key(){ return `tradedesk_settings_${this._uid}`; },
@@ -2255,10 +2276,16 @@ const SettingsManager = {
   set(s){ return this._save(s); },
   reset(){ this._clear(); return this.defaults(); },
 };
+/* ═══ END SETTINGS MANAGER ═══ */
 
 /* ══════════════════════════════════════════════════════
    DATA STORE (swap-ready)
 ══════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════
+   § DATA NORMALISATION — DO NOT EDIT
+   Functions: normaliseFsTrade
+   Maps Firestore data to app schema
+   ═══════════════════════════════════════════ */
 // Normalise a trade doc loaded from Firestore.
 // Trades written by the app already have the correct shape.
 // Trades written by the Cloud Function (Zerodha Kite raw format) may have
@@ -2305,6 +2332,7 @@ function normaliseFsTrade(t){
     custom:    t.custom        || {},
   };
 }
+/* ═══ END DATA NORMALISATION ═══ */
 
 const DataStore = {
   _uid:'guest',
@@ -2463,6 +2491,13 @@ async function doSignOut(){
 /* ══════════════════════════════════════════════════════
    REAL-TIME TRADES LISTENER
 ══════════════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════
+   § FIRESTORE SYNC — DO NOT EDIT
+   Functions: startTradesListener,
+              DataStore.loadFromFirestore
+   Core data pipeline — editing breaks all
+   trade loading and real-time sync
+   ═══════════════════════════════════════════ */
 let _tradesUnsubscribe = null;
 
 function startTradesListener(uid){
@@ -2514,6 +2549,7 @@ function startTradesListener(uid){
     }
   );
 }
+/* ═══ END FIRESTORE SYNC ═══ */
 
 function bootApp(user){
   const uid = user.uid;
@@ -4273,6 +4309,12 @@ function showSPanel(id,el){
   document.getElementById('sp-'+id)?.classList.add('active');
 }
 
+/* ═══════════════════════════════════════════
+   § TRADE FORM — DO NOT EDIT
+   Functions: openTradeModal, validateTrade,
+              saveTrade
+   Handles all trade entry and editing
+   ═══════════════════════════════════════════ */
 /* ══════════════════════════════════════════════════════
    MODALS
 ══════════════════════════════════════════════════════ */
@@ -4486,6 +4528,11 @@ const FX_PAIRS = {
   'NZD/JPY':3,'NZD/CAD':3,'NZD/CHF':3,'CAD/JPY':3,'CAD/CHF':3,'CHF/JPY':3,
 };
 
+/* ═══════════════════════════════════════════
+   § P&L ENGINE — DO NOT EDIT
+   Functions: calculatePnL, pnlBreakdown
+   Any change here affects ALL trade P&L values
+   ═══════════════════════════════════════════ */
 /**
  * calculatePnL — master P&L function
  * @param {string}  asset     'eq'|'cx'|'fx'|'cm'
@@ -4616,6 +4663,7 @@ function pnlBreakdown(t) {
   }
   return `${sign}${diff.toFixed(4)} × ${t.size} ${sizeLabel(t.asset, t.symbol)}`;
 }
+/* ═══ END P&L ENGINE ═══ */
 
 /* ══════════════════════════════════════════════════════
    TRADES CRUD
@@ -4750,6 +4798,14 @@ function saveTrade(){
   showToast('Trade logged','success');
   DataStore.saveTrades(trades);
 }
+/* ═══ END TRADE FORM ═══ */
+
+/* ═══════════════════════════════════════════
+   § DELETE & ARCHIVE — DO NOT EDIT
+   Functions: deleteTrade, restoreTrade,
+              permanentDeleteTrade
+   Handles soft delete and restore workflow
+   ═══════════════════════════════════════════ */
 function deleteTrade(id){
   showConfirm('Archive trade?','This trade will be hidden from your journal. You can restore it from Settings → Danger zone.',async()=>{
     console.log('[deleteTrade] confirmed for:', id);
@@ -4913,6 +4969,7 @@ async function permanentDeleteTrade(id){
     }
   });
 }
+/* ═══ END DELETE & ARCHIVE ═══ */
 
 /* ══════════════════════════════════════════════════════
    MOOD
@@ -4935,6 +4992,12 @@ function saveModalMood(){
   closeModal('mood-modal'); renderMoodHistory(); showToast('Mood saved','success');
 }
 
+/* ═══════════════════════════════════════════
+   § TRADE TABLE — DO NOT EDIT
+   Functions: getBaseFilteredTrades, tradeRow,
+              renderTradeTable, refreshAll
+   Handles all trade display and filtering
+   ═══════════════════════════════════════════ */
 /* ══════════════════════════════════════════════════════
    RENDER
 ══════════════════════════════════════════════════════ */
@@ -5302,6 +5365,7 @@ function renderFullJournal(){
     }
   });
 })();
+/* ═══ END TRADE TABLE ═══ */
 
 // ── AI COACHING REPORT SYSTEM ──
 let _aiReportType=null,_aiReportText='',_aiReportTitle='';
