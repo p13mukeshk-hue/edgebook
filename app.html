@@ -1744,7 +1744,7 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
                 <div id="ctrader-connections-container"></div>
               </div>
 
-              <!-- cTrader token modal -->
+              <!-- cTrader token modal (initial connect) -->
               <div id="ctrader-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:500;align-items:center;justify-content:center">
                 <div style="background:var(--bg2);border:0.5px solid var(--border2);border-radius:var(--radius-lg);padding:28px;width:480px;max-width:95vw">
                   <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
@@ -1770,6 +1770,39 @@ body.light .notif-item.notif-unread{background:rgba(196,125,10,0.04)}
                   <div style="display:flex;gap:10px;justify-content:flex-end">
                     <button class="btn-ghost" onclick="closeCtraderModal()">Cancel</button>
                     <button class="btn-accent" id="ctrader-connect-submit" onclick="connectCtrader()"><i class="fa-solid fa-link"></i> Connect</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Add cTrader account modal (for 2nd/Nth accounts with same token) -->
+              <div id="ctrader-add-account-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:500;align-items:center;justify-content:center">
+                <div style="background:var(--bg2);border:0.5px solid var(--border2);border-radius:var(--radius-lg);padding:28px;width:480px;max-width:95vw">
+                  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+                    <i class="fa-solid fa-plus" style="color:var(--accent2)"></i>
+                    <span style="font-size:15px;font-weight:500;color:var(--text)">Add cTrader account</span>
+                  </div>
+                  <p style="font-size:12px;color:var(--text2);margin-bottom:20px;line-height:1.6">Add another cTrader account using the same bearer token. Paste your account ID from cTrader and give it a label.</p>
+
+                  <div style="margin-bottom:14px">
+                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Bearer token <span style="color:var(--red)">*</span></label>
+                    <textarea id="ctrader-add-token-input" rows="2" placeholder="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..." style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:11px;color:var(--text);font-family:var(--font-mono);resize:none;outline:none"></textarea>
+                  </div>
+
+                  <div style="margin-bottom:14px">
+                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Account ID <span style="color:var(--red)">*</span></label>
+                    <input id="ctrader-add-accountid-input" type="text" placeholder="e.g. 5043464" style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--text);outline:none;box-sizing:border-box">
+                    <div style="font-size:10px;color:var(--text3);margin-top:4px">Find in cTrader → Account settings. This is the numeric account ID.</div>
+                  </div>
+
+                  <div style="margin-bottom:14px">
+                    <label style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px">Account label <span style="font-size:10px;color:var(--text3);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+                    <input id="ctrader-add-label-input" type="text" placeholder="e.g. 25K 2 Step" style="width:100%;background:var(--bg3);border:0.5px solid var(--border2);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--text);outline:none;box-sizing:border-box">
+                  </div>
+
+                  <div id="ctrader-add-account-error" style="display:none;font-size:12px;color:var(--red);margin-bottom:12px;padding:8px 10px;background:rgba(226,75,74,0.08);border-radius:6px"></div>
+                  <div style="display:flex;gap:10px;justify-content:flex-end">
+                    <button class="btn-ghost" onclick="closeAddCtraderModal()">Cancel</button>
+                    <button class="btn-accent" id="ctrader-add-account-submit" onclick="addCtraderAccount()"><i class="fa-solid fa-plus"></i> Add account</button>
                   </div>
                 </div>
               </div>
@@ -3106,6 +3139,60 @@ function showCtraderError(msg){
   el.textContent = msg; el.style.display = 'block';
 }
 
+function openAddCtraderModal(){
+  const modal = document.getElementById('ctrader-add-account-modal');
+  modal.style.display = 'flex';
+  document.getElementById('ctrader-add-token-input').value = '';
+  document.getElementById('ctrader-add-accountid-input').value = '';
+  document.getElementById('ctrader-add-label-input').value = '';
+  document.getElementById('ctrader-add-account-error').style.display = 'none';
+}
+
+function closeAddCtraderModal(){
+  document.getElementById('ctrader-add-account-modal').style.display = 'none';
+}
+
+async function addCtraderAccount(){
+  const token     = document.getElementById('ctrader-add-token-input').value.trim();
+  const accountId = document.getElementById('ctrader-add-accountid-input').value.trim();
+  const label     = document.getElementById('ctrader-add-label-input').value.trim();
+  const errEl     = document.getElementById('ctrader-add-account-error');
+  const btn       = document.getElementById('ctrader-add-account-submit');
+
+  if(!token){ errEl.textContent='Bearer token is required.'; errEl.style.display='block'; return; }
+  if(!accountId){ errEl.textContent='Account ID is required.'; errEl.style.display='block'; return; }
+  errEl.style.display = 'none';
+  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Adding…';
+
+  try{
+    const idToken = await getIdToken();
+    const res = await fetch(`${CTRADER_FN}/ctraderAddAccount`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${idToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, accountId, accountLabel: label || null })
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Failed to add account');
+    closeAddCtraderModal();
+    showToast(`cTrader account ${accountId} added! Syncing trades…`, 'success');
+    await loadCtraderConnections();
+    setTimeout(() => syncCtraderAccount(data.docId), 1500);
+  } catch(e){
+    errEl.textContent = e.message || 'Failed to add account. Check your token and account ID.';
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-plus"></i> Add account';
+}
+
+async function saveAccountLabel(docId, newLabel){
+  if(!DataStore._uid || DataStore._uid === 'guest') return;
+  try{
+    const docRef = window._fbDoc(window._fbDb, 'users', DataStore._uid, 'brokers', docId);
+    await window._fbSetDoc(docRef, { accountLabel: newLabel.trim() || null }, { merge: true });
+    console.log(`[saveAccountLabel] ${docId} → "${newLabel}"`);
+  } catch(e){ console.warn('saveAccountLabel failed:', e.message); }
+}
+
 async function syncCtraderTrades(){
   const token = await getIdToken(); if(!token) return;
   showToast('Syncing cTrader trades… Your history is preserved.', 'info');
@@ -3184,14 +3271,19 @@ async function loadCtraderConnections(){
         connections.push({ brokerDocId: doc.id, ...doc.data() });
       }
     });
-    const connected = connections.filter(c => c.connected);
-    // Always show at least the "not connected" default card
-    renderCtraderCards(connected.length ? connected : [{ brokerDocId:'ctrader', connected:false }]);
+    // Show ALL ctrader accounts (connected or not) so users can see and manage every account.
+    // If no docs exist at all, show the generic "not connected" placeholder.
+    if(connections.length > 0){
+      renderCtraderCards(connections);
+    } else {
+      renderCtraderCards([{ brokerDocId:'ctrader', connected:false }]);
+    }
     // Check token expiry for each connected account
-    for(const conn of connected){
+    for(const conn of connections.filter(c => c.connected)){
       _checkCtraderTokenExpiry(conn);
     }
   } catch(e){
+    console.error('[loadCtraderConnections] error:', e);
     renderCtraderCards([{ brokerDocId:'ctrader', connected:false }]);
   }
 }
@@ -3214,8 +3306,17 @@ function _checkCtraderTokenExpiry(conn){
 function renderCtraderCards(connections){
   const container = document.getElementById('ctrader-connections-container');
   if(!container) return;
-  const cards = connections.map(conn => renderCtraderAccountCard(conn)).join('');
-  const addBtn = `<div class="broker-add-card" onclick="openCtraderModal()">
+  const cards = connections.map(conn => {
+    try { return renderCtraderAccountCard(conn); }
+    catch(e){
+      console.error('[renderCtraderCards] card render error for', conn.brokerDocId, e);
+      // Render a minimal error card so the container is never silently blank
+      return `<div class="broker-account-card" style="padding:12px 16px;font-size:12px;color:var(--red)">
+        Error rendering card for ${conn.brokerDocId}: ${e.message}
+      </div>`;
+    }
+  }).join('');
+  const addBtn = `<div class="broker-add-card" onclick="openAddCtraderModal()">
     <i class="fa-solid fa-plus"></i> Add cTrader account
   </div>`;
   container.innerHTML = cards + addBtn;
@@ -3228,11 +3329,26 @@ function renderCtraderAccountCard(conn){
   const safeId    = docId.replace(/[^a-zA-Z0-9]/g, '-');
   const connected = conn.connected === true;
 
-  const accountName = conn.accountName || (conn.accountId ? `Account ${conn.accountId}` : 'cTrader (The5ers / prop firms)');
+  // Prefer accountLabel (user-defined), fall back to accountName or generic label
+  const accountLabel = conn.accountLabel || conn.accountName || (conn.accountId ? `Account ${conn.accountId}` : 'cTrader (The5ers / prop firms)');
   const accountIdBadge = conn.accountId
     ? `<span style="color:var(--text3);font-weight:400;font-size:11px">#${conn.accountId}</span>` : '';
   const bal = (conn.accountBalance != null && connected)
     ? ` · Balance: ${conn.accountBalance} ${conn.accountCurrency || ''}` : '';
+
+  // Token expiry status badge
+  let tokenStatusHtml = '';
+  if(connected && conn.tokenExpiresAt){
+    const expiresAt = conn.tokenExpiresAt.toDate ? conn.tokenExpiresAt.toDate() : new Date(conn.tokenExpiresAt);
+    const daysLeft  = Math.floor((expiresAt - Date.now()) / (1000*60*60*24));
+    if(daysLeft <= 0){
+      tokenStatusHtml = `<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:rgba(226,75,74,0.1);color:var(--red)">Token expired</span>`;
+    } else if(daysLeft <= 7){
+      tokenStatusHtml = `<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:rgba(255,170,0,0.1);color:#f5a623">Expires in ${daysLeft}d</span>`;
+    } else {
+      tokenStatusHtml = `<span style="font-size:10px;padding:2px 7px;border-radius:10px;background:rgba(34,201,135,0.08);color:var(--green)">Token valid · ${daysLeft}d left</span>`;
+    }
+  }
 
   let lastSyncText = 'Never synced';
   if(conn.lastSyncTimestamp){
@@ -3268,10 +3384,18 @@ function renderCtraderAccountCard(conn){
 
   <!-- Header: name + action buttons -->
   <div class="broker-account-card-header">
-    <div>
-      <div class="broker-account-card-title">
+    <div style="flex:1;min-width:0">
+      <div class="broker-account-card-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <img src="https://ctrader.com/favicon.ico" width="14" height="14" style="border-radius:3px" onerror="this.style.display='none'">
-        ${accountName} ${accountIdBadge}
+        <input
+          value="${accountLabel.replace(/"/g,'&quot;')}"
+          onblur="saveAccountLabel('${docId}',this.value)"
+          onkeydown="if(event.key==='Enter')this.blur()"
+          style="background:transparent;border:none;border-bottom:1px dashed var(--border2);outline:none;font-size:13px;font-weight:500;color:var(--text);min-width:80px;max-width:180px;padding:1px 2px"
+          title="Click to edit account label"
+        >
+        ${accountIdBadge}
+        ${tokenStatusHtml}
       </div>
       <div class="broker-account-card-sub">Syncs every 5 min, 24/7${bal}</div>
     </div>
@@ -4021,6 +4145,8 @@ function buildSettingsUI(){
   buildSymbolUI(); buildAcctList(); syncPrefUI();
   buildColorRow('new-acct-color-row','new',selectedNewAcctColor);
   document.getElementById('trade-count-label').textContent=trades.length;
+  // Refresh broker cards every time Settings opens (belt-and-suspenders alongside showSPanel hook)
+  loadCtraderConnections();
 }
 function buildFieldToggles(){
   document.getElementById('field-toggle-rows').innerHTML=
@@ -4307,6 +4433,9 @@ function showSPanel(id,el){
   el?.classList.add('active');
   document.querySelectorAll('.settings-panel').forEach(p=>p.classList.remove('active'));
   document.getElementById('sp-'+id)?.classList.add('active');
+  // Always re-fetch broker docs from Firestore when the Broker Connections panel is shown,
+  // so manually-created docs (e.g. ctrader_5043464) appear immediately without a page reload.
+  if(id === 'data') loadCtraderConnections();
 }
 
 /* ═══════════════════════════════════════════

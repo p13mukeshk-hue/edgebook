@@ -2304,6 +2304,24 @@ const CTRADER_TOKEN_URL = "https://openapi.ctrader.com/apps/token";
 const TOKEN_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
 
 /**
+ * Read the bearer token from a broker doc, supporting two storage formats:
+ *   • `token`       — raw string (manually-created Firestore docs, e.g. ctrader_5043464 added by hand)
+ *   • `accessToken` — AES-256-GCM encrypted string (docs written by ctraderConnect / ctraderAddAccount)
+ * Always try `token` first so manually-created docs work without re-encrypting.
+ */
+function readBrokerToken(brokerData) {
+  const raw = brokerData.token || null;
+  if (raw && typeof raw === 'string') {
+    if (/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/i.test(raw)) {
+      try { return decrypt(raw); } catch { /* fall through */ }
+    }
+    return raw;
+  }
+  if (brokerData.accessToken) return decrypt(brokerData.accessToken);
+  return null;
+}
+
+/**
  * Attempt to refresh the cTrader access token using the stored refresh token.
  * Returns the new bearer token string on success.
  * Marks the account disconnected and throws on failure.
@@ -2319,13 +2337,13 @@ async function refreshCtraderToken(uid, brokerRef, brokerData) {
       `Add these to enable auto-refresh.`;
     console.warn(msg);
     // Return the existing token — sync will proceed, expiry will just tick down
-    return decrypt(brokerData.accessToken);
+    return readBrokerToken(brokerData);
   }
 
   if (!brokerData.refreshToken) {
     const msg = `cTrader uid=${uid}: no refresh token stored — user must reconnect to enable auto-refresh`;
     console.warn(msg);
-    return decrypt(brokerData.accessToken); // proceed with current token
+    return readBrokerToken(brokerData); // proceed with current token
   }
 
   const refreshToken = decrypt(brokerData.refreshToken);
@@ -2420,7 +2438,7 @@ async function refreshCtraderToken(uid, brokerRef, brokerData) {
 // force). Fetches the last 7 days of deals in a single API call and patches
 // any Firestore trade that is still marked isOpen=true but has a closing deal
 // in that window, using the same price/P&L logic as buildPositionTrade.
-async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails) {
+async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails, { accountId = null, docPrefix = null } = {}) {
   const openSnap = await db
     .collection("users").doc(uid)
     .collection("trades")
@@ -2433,14 +2451,26 @@ async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDet
     return;
   }
 
-  const openPositions = openSnap.docs.map(d => ({
+  // When a docPrefix is given (multi-account), only reconcile positions that belong
+  // to this specific broker account. Legacy prefix='ctrader' matches all old-style IDs.
+  const allOpenPositions = openSnap.docs.map(d => ({
     firestoreId: d.id,
     ...d.data(),
     positionId: d.data().brokerTradeId,
   }));
-  console.log(`cTrader reconcile uid=${uid}: ${openPositions.length} open position(s) to check`);
+  const openPositions = docPrefix
+    ? allOpenPositions.filter(p => p.firestoreId.startsWith(`${docPrefix}_`))
+    : allOpenPositions;
+
+  if (openPositions.length === 0) {
+    console.log(`cTrader reconcile uid=${uid} docPrefix=${docPrefix}: no matching open positions — skipping`);
+    return;
+  }
+  console.log(`cTrader reconcile uid=${uid}: ${openPositions.length} open position(s) to check (docPrefix=${docPrefix})`);
 
   // One 7-day deal fetch covers positions open over weekends or multi-day gaps.
+  // NOTE: accountId is NOT sent as a param — cTrader MCP ignores it.
+  // We filter by accountId client-side after unwrapping (same approach as syncCtraderForUser).
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const nowIso = new Date().toISOString();
 
@@ -2457,6 +2487,20 @@ async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDet
     allDeals = arrayKey ? dealsRaw[arrayKey] : [];
   } else {
     allDeals = [];
+  }
+
+  // Filter deals to this broker account (API returns all accounts' deals for the token).
+  if (accountId && allDeals.length > 0) {
+    const targetId  = String(accountId);
+    const usedField = ["accountId", "tradingAccountId", "accountLogin", "login", "account"]
+      .find(f => allDeals[0][f] != null) ?? null;
+    if (usedField) {
+      const before = allDeals.length;
+      allDeals = allDeals.filter(d => String(d[usedField]) === targetId);
+      console.log(`cTrader reconcile uid=${uid}: account filter field="${usedField}" target=${targetId} — ${before} → ${allDeals.length} deal(s)`);
+    } else {
+      console.warn(`cTrader reconcile uid=${uid}: no account field on deals — skipping filter`);
+    }
   }
 
   if (allDeals.length === 0) {
@@ -2540,6 +2584,8 @@ async function reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDet
 async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ctrader' } = {}) {
   const syncStart = Date.now();
 
+  console.log(`cTrader syncCtraderForUser CALLED uid=${uid} brokerDocId=${brokerDocId} forceRefresh=${forceRefresh}`);
+
   // ── 1. Load broker state ────────────────────────────────────────────────────
   const brokerRef = db.collection("users").doc(uid).collection("brokers").doc(brokerDocId);
   const brokerSnap = await brokerRef.get();
@@ -2554,6 +2600,9 @@ async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ct
   // Multi-account: brokerDocId='ctrader_12345' → _docPrefix='ctrader_12345'.
   const _derivedAccountId = brokerDocId.startsWith('ctrader_') ? brokerDocId.slice('ctrader_'.length) : null;
   const _docPrefix = _derivedAccountId ? `ctrader_${_derivedAccountId}` : 'ctrader';
+  // Explicit Edgebook account mapping set by user via Settings → Brokers dropdown.
+  // Persisted to broker doc by saveBrokerMapping() in the frontend.
+  const _mappedEdgebookAccountId = brokerData.mapToEdgebookAccountId || null;
 
   // ── 1b. Check token expiry — auto-refresh if within 7 days ─────────────────
   let bearerToken;
@@ -2568,10 +2617,14 @@ async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ct
     );
     bearerToken = await refreshCtraderToken(uid, brokerRef, brokerData);
   } else {
-    bearerToken = decrypt(brokerData.accessToken);
+    bearerToken = readBrokerToken(brokerData);
     if (daysUntilExpiry !== null) {
       console.log(`cTrader uid=${uid}: token valid for ${daysUntilExpiry} more day(s)`);
     }
+  }
+
+  if (!bearerToken) {
+    throw new Error(`cTrader uid=${uid}: no bearer token found in broker doc — check 'token' or 'accessToken' field`);
   }
 
   // fromTimestamp: force=true → 24h ago; normal → max(lastSync - 30min, 24h ago).
@@ -2614,8 +2667,8 @@ async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ct
   console.log(`cTrader uid=${uid}: symbol map loaded — ${symbolCount} symbols`);
 
   // ── 4. Fetch deals ───────────────────────────────────────────────────────────
-  // cTrader MCP get_deals requires fromTimestamp and toTimestamp as ISO 8601
-  // strings, not numbers — confirmed from validation error in Cloud Logging.
+  // NOTE: accountId is NOT sent as a request param — cTrader MCP ignores it and
+  // returns all deals for the token. We filter by deal.accountId after unwrapping.
   const dealsRaw = await callCtraderTool(bearerToken, sessionId, "get_deals", {
     fromTimestamp: new Date(fromTimestamp).toISOString(),
     toTimestamp:   new Date(toTimestamp).toISOString(),
@@ -2666,7 +2719,36 @@ async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ct
     );
   }
 
-  console.log(`cTrader uid=${uid}: fetched ${rawDeals.length} raw deal(s)`);
+  console.log(`cTrader uid=${uid}: fetched ${rawDeals.length} raw deal(s) (unfiltered, all accounts)`);
+
+  // ── 4a. Log first deal shape — identifies which field carries the accountId ──
+  // cTrader MCP ignores accountId in get_deals params; we filter client-side instead.
+  // Candidate field names: accountId, tradingAccountId, accountLogin, login, account.
+  if (rawDeals.length > 0) {
+    console.log(`cTrader uid=${uid}: first deal fields — ${JSON.stringify(rawDeals[0])}`);
+  }
+
+  // ── 4b. Filter deals to this broker account ──────────────────────────────────
+  // The API returns deals for ALL accounts under the token. Keep only the ones that
+  // belong to brokerData.accountId so two accounts never write each other's trades.
+  const DEAL_ACCOUNT_FIELDS = ["accountId", "tradingAccountId", "accountLogin", "login", "account"];
+  if (brokerData.accountId && rawDeals.length > 0) {
+    const targetId   = String(brokerData.accountId);
+    const usedField  = DEAL_ACCOUNT_FIELDS.find(f => rawDeals[0][f] != null) ?? null;
+    const beforeLen  = rawDeals.length;
+    if (usedField) {
+      rawDeals = rawDeals.filter(d => String(d[usedField]) === targetId);
+      console.log(
+        `cTrader uid=${uid}: account filter field="${usedField}" target=${targetId}` +
+        ` — ${beforeLen} → ${rawDeals.length} deal(s) for brokerDocId=${brokerDocId}`
+      );
+    } else {
+      console.warn(
+        `cTrader uid=${uid}: no account field found on deals — skipping filter` +
+        ` (brokerDocId=${brokerDocId}, deal keys: ${Object.keys(rawDeals[0]).join(", ")})`
+      );
+    }
+  }
 
   if (rawDeals.length === 0) {
     const durationMs = Date.now() - syncStart;
@@ -2679,14 +2761,17 @@ async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ct
       },
       { merge: true }
     );
-    await reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails);
+    await reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails, { accountId: brokerData.accountId, docPrefix: _docPrefix });
     return { saved: 0, skipped: 0, errors: [], durationMs, symbolLog: {} };
   }
 
-  // ── 4b. Resolve prop account ID (same logic as syncCtraderHistory) ─────────
-  const liveAccountId = await resolvePropAccountId(uid);
+  // ── 4b. Resolve Edgebook account ID for tagging trades ──────────────────────
+  // Prefer explicit broker-doc mapping (set by user via Settings → Brokers dropdown)
+  // over keyword-based prop-account matching. For multi-account setups each broker
+  // doc has its own mapToEdgebookAccountId so trades land in the right account.
+  const liveAccountId = _mappedEdgebookAccountId || await resolvePropAccountId(uid);
   if (liveAccountId) {
-    console.log(`cTrader uid=${uid}: matched prop account id="${liveAccountId}" for live sync`);
+    console.log(`cTrader uid=${uid}: tagging trades with edgebook accountId="${liveAccountId}" (${_mappedEdgebookAccountId ? "explicit mapping" : "prop-keyword match"})`);
   }
 
   // ── 5. Validate all deals, group by positionId, build one trade per position ──
@@ -2869,7 +2954,7 @@ async function syncCtraderForUser(uid, { forceRefresh = false, brokerDocId = 'ct
     console.log(`cTrader uid=${uid} skipped positions:`, JSON.stringify(skipped));
   }
 
-  await reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails);
+  await reconcileOpenPositions(uid, db, bearerToken, sessionId, symbolDetails, { accountId: brokerData.accountId, docPrefix: _docPrefix });
 
   return { saved: written, skipped: skipped.length, errors: [], durationMs, symbolLog };
 }
@@ -2934,7 +3019,7 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const { bearerToken, refreshToken } = req.body || {};
+    const { bearerToken, refreshToken, accountLabel } = req.body || {};
     if (!bearerToken || typeof bearerToken !== "string") {
       return res.status(400).json({ error: "bearerToken is required in request body" });
     }
@@ -3001,6 +3086,8 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
       accountCurrency: typeof balance === "object" ? (balance.currency ?? null) : null,
       // cTrader account identifier (may be null for older API versions)
       accountId:       ctraderAccountId ? String(ctraderAccountId) : null,
+      // User-defined friendly name for the account
+      accountLabel:    (accountLabel && typeof accountLabel === "string") ? accountLabel.trim() : null,
     };
 
     // Store refresh token encrypted if provided — required for auto-refresh
@@ -3056,6 +3143,64 @@ exports.ctraderConnect = functions.https.onRequest(async (req, res) => {
   }
 });
 
+// ─── 7b. ctraderAddAccount ────────────────────────────────────────────────────
+//
+// POST /ctraderAddAccount  { token: "<bearer>", accountId: "5043464", accountLabel: "25K 2 Step" }
+// Adds a second (or Nth) cTrader account using an existing bearer token.
+// No full validation — the token is already proven valid from the first connect.
+// Writes users/{uid}/brokers/ctrader_{accountId} with connected:true.
+
+exports.ctraderAddAccount = functions.https.onRequest(async (req, res) => {
+  setCors(req, res);
+  if (req.method === "OPTIONS") { res.status(204).send(""); return; }
+
+  try {
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+    const decoded = await verifyAuth(req);
+    const uid = decoded.uid;
+
+    const { token, accountId, accountLabel } = req.body || {};
+    if (!token || typeof token !== "string") {
+      return res.status(400).json({ error: "token is required" });
+    }
+    if (!accountId || typeof accountId !== "string") {
+      return res.status(400).json({ error: "accountId is required" });
+    }
+
+    const cleanBearer = parseCtraderBearerInput(token);
+    if (!cleanBearer) {
+      return res.status(400).json({ error: "Could not extract a valid Bearer token from the input." });
+    }
+
+    const cleanLabel = (accountLabel && typeof accountLabel === "string") ? accountLabel.trim() : null;
+    const docId = `ctrader_${accountId.trim()}`;
+
+    await db.collection("users").doc(uid).collection("brokers").doc(docId).set({
+      connected:       true,
+      accessToken:     encrypt(cleanBearer),
+      accountId:       accountId.trim(),
+      accountLabel:    cleanLabel,
+      connectedAt:     admin.firestore.FieldValue.serverTimestamp(),
+      tokenRefreshFailed: false,
+      tokenRefreshError:  null,
+    }, { merge: true });
+
+    console.log(`ctraderAddAccount: uid=${uid} added accountId=${accountId} docId=${docId} label="${cleanLabel}"`);
+
+    return res.status(200).json({
+      ok:      true,
+      docId,
+      accountId: accountId.trim(),
+      message: `cTrader account ${accountId} added successfully`,
+    });
+
+  } catch (err) {
+    console.error("ctraderAddAccount error:", err);
+    return res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
 // ─── 8a. ctraderSymbolInfo ────────────────────────────────────────────────────
 //
 // POST /ctraderSymbolInfo  (no body required, or { filter: "XAUUSD" })
@@ -3081,8 +3226,11 @@ exports.ctraderSymbolInfo = functions.https.onRequest(async (req, res) => {
     }
 
     let bearerToken;
-    try { bearerToken = decrypt(brokerSnap.data().accessToken); } catch {
-      return res.status(400).json({ error: "Failed to decrypt cTrader token." });
+    try {
+      bearerToken = readBrokerToken(brokerSnap.data());
+      if (!bearerToken) throw new Error("no token");
+    } catch {
+      return res.status(400).json({ error: "Failed to read cTrader token." });
     }
 
     const sessionId = await initCtraderSession(bearerToken);
@@ -3180,7 +3328,8 @@ exports.syncCtraderTrades = functions.https.onRequest(async (req, res) => {
     }
 
     const forceRefresh = req.body?.force === true;
-    const result = await syncCtraderForUser(uid, { forceRefresh });
+    const brokerDocId  = req.body?.brokerDocId ?? 'ctrader';
+    const result = await syncCtraderForUser(uid, { forceRefresh, brokerDocId });
 
     const note = result.saved === 0
       ? "No new deals to save — all deals either already imported, outside trading hours, or no activity since last sync."
@@ -3221,7 +3370,10 @@ exports.backfillCtraderTimes = functions
 
       const brokerData = brokerSnap.data();
       let bearerToken;
-      try { bearerToken = decrypt(brokerData.accessToken); } catch {
+      try {
+        bearerToken = readBrokerToken(brokerData);
+        if (!bearerToken) throw new Error("no token");
+      } catch {
         return res.status(503).json({ message: "Token unavailable", updated: 0 });
       }
 
@@ -3318,7 +3470,7 @@ exports.forceReimportCtrader = functions
 
       let result;
       try {
-        result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null);
+        result = await runCtraderHistorySync(uid, req.body?.fromTimestamp ?? null, req.body?.brokerDocId ?? 'ctrader');
       } catch (err) {
         console.error(`forceReimportCtrader uid=${uid}: sync step failed:`, err.message);
         throw new Error("Sync failed: " + err.message);
@@ -3392,7 +3544,10 @@ async function runCtraderHistorySync(uid, fromTimestamp, brokerDocId = 'ctrader'
     console.log(`syncCtraderHistory uid=${uid}: token near expiry — auto-refreshing`);
     bearerToken = await refreshCtraderToken(uid, brokerRef, brokerData);
   } else {
-    bearerToken = decrypt(brokerData.accessToken);
+    bearerToken = readBrokerToken(brokerData);
+  }
+  if (!bearerToken) {
+    throw new Error(`syncCtraderHistory uid=${uid}: no bearer token found — check 'token' or 'accessToken' field`);
   }
 
   // ── 2. Open MCP session ───────────────────────────────────────────────────
@@ -3410,8 +3565,9 @@ async function runCtraderHistorySync(uid, fromTimestamp, brokerDocId = 'ctrader'
   const allDeals = await fetchAllHistoricalDeals(bearerToken, sessionId, uid, explicitFrom, toTimestamp);
   console.log(`syncCtraderHistory uid=${uid}: total deals fetched = ${allDeals.length}`);
 
-  // ── 6. Resolve prop account ───────────────────────────────────────────────
-  const accountId = await resolvePropAccountId(uid);
+  // ── 6. Resolve Edgebook account ID for tagging trades ────────────────────
+  // Prefer explicit broker-doc mapping over keyword-based prop matching.
+  const accountId = brokerData.mapToEdgebookAccountId || await resolvePropAccountId(uid);
 
   // ── 7. Validate + group by positionId ────────────────────────────────────
   const tradesRef      = db.collection("users").doc(uid).collection("trades");
@@ -3527,7 +3683,7 @@ exports.syncCtraderHistory = functions
     if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
     try {
       const decoded = await verifyAuth(req);
-      const result  = await runCtraderHistorySync(decoded.uid, req.body?.fromTimestamp ?? null);
+      const result  = await runCtraderHistorySync(decoded.uid, req.body?.fromTimestamp ?? null, req.body?.brokerDocId ?? 'ctrader');
       return res.status(200).json(result);
     } catch (err) {
       console.error("syncCtraderHistory error:", err);
