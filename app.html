@@ -533,8 +533,8 @@ body.light .theme-toggle-btn .theme-icon{transform:rotate(180deg)}
 
 /* color dot selector */
 .color-dots{display:flex;gap:6px}
-.color-dot-opt{width:20px;height:20px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:.15s;flex-shrink:0}
-.color-dot-opt.selected{border-color:#fff;transform:scale(1.15)}
+.color-dot-opt{width:22px;height:22px;border-radius:50%;cursor:pointer;transition:.15s;flex-shrink:0;box-shadow:0 0 0 2px transparent,0 0 0 4px transparent}
+.color-dot-opt.selected{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--dot-color,#6c63ff);transform:scale(1.1)}
 .acct-color-preview{width:12px;height:12px;border-radius:50%;flex-shrink:0}
 
 /* CONFIRM */
@@ -2223,7 +2223,7 @@ const SettingsManager = {
     }
     return obj;
   },
-  _save(d){
+  async _save(d){
     if(Array.isArray(d)){ console.error('Settings: received array instead of object, aborting save'); return false; }
     if(typeof d !== 'object' || d === null){ console.error('Settings: invalid data type:', typeof d); return false; }
     const normalized = this._normalizeArrayFields({...d});
@@ -2232,10 +2232,11 @@ const SettingsManager = {
       console.log('Settings saved to localStorage:', this._key());
     } catch(e){ console.warn('Settings localStorage write failed:', e); }
     if(window._firebaseReady && this._uid !== 'guest'){
-      const cleanD = this._cleanForFirestore(normalized);
-      window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),cleanD)
-        .then(()=>console.log('Settings synced to Firestore'))
-        .catch(e=>console.error('Settings Firestore sync failed:',e.message));
+      try{
+        const cleanD = this._cleanForFirestore(normalized);
+        await window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,'meta','settings'),cleanD);
+        console.log('Settings synced to Firestore');
+      } catch(e){ console.error('Settings Firestore sync failed:',e.message); }
     }
     return true;
   },
@@ -2624,7 +2625,23 @@ function bootApp(user){
           // Merge field-by-field — never replace S entirely with Firestore data.
           // Each field is only applied if it is present and valid in the remote doc
           // to avoid an empty/stale Firestore doc wiping out good local settings.
-          if(fs.accounts?.length > 0)    S.accounts = fs.accounts;
+
+          // Accounts: merge by id using updatedAt timestamp — keep whichever version is newer.
+          // This prevents a stale Firestore load from overwriting a local edit the user
+          // just made before this async getDoc completed.
+          if(fs.accounts?.length > 0){
+            const merged = fs.accounts.map(fsAcc => {
+              const localAcc = (S.accounts || []).find(a => a.id === fsAcc.id);
+              if(localAcc && (localAcc.updatedAt || 0) > (fsAcc.updatedAt || 0)){
+                return localAcc; // local is newer — user just edited, keep it
+              }
+              return fsAcc; // Firestore is authoritative
+            });
+            const localOnly = (S.accounts || []).filter(a => !fs.accounts.find(f => f.id === a.id));
+            S.accounts = [...merged, ...localOnly];
+            if(localOnly.length > 0) console.log('[boot] preserved', localOnly.length, 'local-only account(s) not yet in Firestore');
+          }
+
           if(fs.brokerAccountMap && Object.keys(fs.brokerAccountMap).length > 0){
             // Merge both maps — local wins on conflict so a failed Firestore sync
             // (which left the remote doc with an older map) can't erase local changes
@@ -2636,7 +2653,10 @@ function bootApp(user){
           if(fs.sidebarSections && Object.keys(fs.sidebarSections).length > 0) S.sidebarSections = {...S.sidebarSections, ...fs.sidebarSections};
           if(fs.customFields?.length > 0) S.customFields = fs.customFields;
           SettingsManager._normalizeArrayFields(S);
-          SettingsManager.set(S);
+          // Persist merged result to localStorage only — do NOT write back to Firestore here.
+          // Writing back would overwrite any pending Firestore write the user triggered
+          // before this async load completed, causing their edits to silently disappear.
+          try{ localStorage.setItem(SettingsManager._key(), JSON.stringify(SettingsManager._normalizeArrayFields({...S}))); }catch(e){}
         }
       }catch(e){ console.warn('Settings Firestore load failed:', e); }
     }
@@ -3928,7 +3948,7 @@ function addAccount(){
   const size=document.getElementById('new-acct-size').value;
   const currency=document.getElementById('new-acct-currency').value||'$';
   if(!name){ showToast('Enter an account name','error'); return; }
-  const acct={ id:'acct_'+Date.now(), name, size:size?Number(size):null, color:selectedNewAcctColor, currency };
+  const acct={ id:'acct_'+Date.now(), name, size:size?Number(size):null, color:selectedNewAcctColor, currency, updatedAt:Date.now() };
   S.accounts.push(acct);
   SettingsManager.set(S);
   document.getElementById('new-acct-name').value=''; document.getElementById('new-acct-size').value='';
@@ -3968,6 +3988,7 @@ function saveEditAccount(){
   a.currency=document.getElementById('edit-acct-currency').value||'$';
   a.dailyDDLimit=parseFloat(document.getElementById('edit-acct-daily-dd').value)||null;
   a.maxDDLimit=parseFloat(document.getElementById('edit-acct-max-dd').value)||null;
+  a.updatedAt=Date.now();
   SettingsManager.set(S);
   closeModal('edit-acct-modal');
   buildAcctList(); buildAcctDropdown(); updateAccountSelect(); renderPageAcctTabs(); refreshAll();
@@ -3977,12 +3998,13 @@ function saveEditAccount(){
 function buildColorRow(containerId, mode, selectedColor){
   const row=document.getElementById(containerId);
   row.innerHTML=ACCT_COLORS.map(c=>`
-    <div class="color-dot-opt ${c===selectedColor?'selected':''}" style="background:${c}" onclick="pickAcctColor('${c}','${mode}','${containerId}')"></div>`).join('');
+    <div class="color-dot-opt ${c===selectedColor?'selected':''}" style="background:${c};--dot-color:${c}" data-color="${c}" onclick="pickAcctColor('${c}','${mode}','${containerId}')"></div>`).join('');
 }
 function pickAcctColor(color,mode,containerId){
   if(mode==='new') selectedNewAcctColor=color;
   else selectedEditAcctColor=color;
-  document.querySelectorAll('#'+containerId+' .color-dot-opt').forEach(d=>d.classList.toggle('selected',d.style.background===color));
+  // Use data-color for reliable comparison — style.background is browser-normalised to rgb()
+  document.querySelectorAll('#'+containerId+' .color-dot-opt').forEach(d=>d.classList.toggle('selected',d.dataset.color===color));
 }
 
 function buildAcctList(){
@@ -5215,12 +5237,16 @@ function sourceBadge(t){
 // Crypto is "units". Everything else is "unit/units".
 function getSizeLabel(trade){
   const size = trade.size ?? 0;
+  const sym  = (trade.symbol || '').toUpperCase();
 
-  // F&O instruments → always "lot/lots"
+  // F&O instruments → always "lot/lots".
+  // Also infer from symbol suffix for legacy docs where instrument field is null
+  // (Kite options symbols always end with CE/PE; futures contain FUT).
   if (trade.instrument === 'Options' ||
       trade.instrument === 'Futures' ||
       (trade.lotSize && trade.lotSize > 1) ||
-      trade.asset === 'cm') {
+      trade.asset === 'cm' ||
+      sym.endsWith('CE') || sym.endsWith('PE') || sym.includes('FUT')) {
     return size === 1 ? 'lot' : 'lots';
   }
 

@@ -789,3 +789,38 @@ functions/
 ```
 Split `app.html` into src/ files in a follow-up session.
 Rule: no new features during restructure sessions.
+
+---
+
+## 21. Session Updates — June 4, 2026
+
+### Bugs Fixed
+
+1. **NIFTY lot size showing `1 share` instead of `1 lot`**
+   - Root cause: `mapZerodhaInstrument` defaulted to `"EQ"` when `instrument_type` absent
+   - Fix: infer instrument from tradingsymbol suffix (PE/CE → Options, FUT → Futures)
+   - Frontend `getSizeLabel()` also fixed: detects PE/CE/FUT suffix directly on symbol
+
+2. **Account edits not persisting after hard refresh**
+   - Root cause: `_save()` was fire-and-forget (setDoc not awaited), no updatedAt timestamp
+   - Fix: `_save()` now async with awaited setDoc, `updatedAt: Date.now()` added to every account
+   - Boot merge now uses updatedAt comparison — local wins if newer than Firestore
+
+3. **New accounts disappearing after hard refresh**
+   - Same root cause as Bug 2 — fixed by same change
+
+4. **Color selector no visual feedback**
+   - Root cause: browser normalizes hex to rgb, `d.style.background === color` always failed
+   - Fix: use `data-color` attribute for comparison, CSS box-shadow ring for selected state
+
+### Deferred
+- Zerodha NFO fill timestamps — Kite API returns null timestamps on NFO options fills
+  entryTime backfill logic is in place but has nothing to backfill
+  Will revisit with orders API approach later
+
+### Pending (Next Sessions)
+1. Restructure `functions/index.js` into modules (weekend — 3hr session)
+2. AI Coaching Reports
+3. Risk Manager
+4. Zerodha CSV import rewrite
+5. Node.js 20→22 upgrade (Oct 30 2026 deadline)

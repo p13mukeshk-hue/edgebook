@@ -219,7 +219,7 @@ function checkTradeDedup(index, docId, symbol, date, entry) {
  * Kite instrument_type values: EQ, FUT, CE, PE (options).
  */
 function mapZerodhaInstrument(fill) {
-  const itype = (fill.instrument_type || "EQ").toUpperCase();
+  const itype = (fill.instrument_type || "").toUpperCase();
   switch (itype) {
     case "FUT":
       return { asset: "eq", instrument: "Futures",  optionType: null };
@@ -227,8 +227,15 @@ function mapZerodhaInstrument(fill) {
       return { asset: "eq", instrument: "Options",  optionType: "CE" };
     case "PE":
       return { asset: "eq", instrument: "Options",  optionType: "PE" };
-    default:
-      return { asset: "eq", instrument: null,        optionType: null };
+    default: {
+      // instrument_type absent or unrecognised — infer from tradingsymbol suffix.
+      // Kite options symbols always end with CE/PE; futures contain FUT.
+      const sym = (fill.tradingsymbol || "").toUpperCase();
+      if (sym.endsWith("CE"))             return { asset: "eq", instrument: "Options", optionType: "CE" };
+      if (sym.endsWith("PE"))             return { asset: "eq", instrument: "Options", optionType: "PE" };
+      if (sym.includes("FUT"))            return { asset: "eq", instrument: "Futures",  optionType: null };
+      return { asset: "eq", instrument: null, optionType: null };
+    }
   }
 }
 
@@ -335,7 +342,7 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
             pnl,
             isOpen:        false,
             date:          shortEntry.date,
-            entryTime:     shortEntry.time,
+            entryTime:     shortEntry.time ?? shortEntry.entryTime ?? null,
             exitTime:      time,
             syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
           });
@@ -376,7 +383,7 @@ function pairFillsIntoTrades(fills, openSymbols, uid, label = "zerodha", existin
             pnl,
             isOpen:        false,
             date:          longEntry.date,
-            entryTime:     longEntry.time,
+            entryTime:     longEntry.time ?? longEntry.entryTime ?? null,
             exitTime:      time,
             syncedAt:      admin.firestore.FieldValue.serverTimestamp(),
           });
@@ -556,14 +563,22 @@ async function reconcileOpenZerodhaPositions(uid, positionsData, fillsBySymbol) 
       if (netPos && netPos.quantity === 0 && netPos.realised_pnl != null) {
         const exitPrice = netPos.last_price ?? 0.05;
         const pnl       = parseFloat(netPos.realised_pnl.toFixed(2));
-        const exitFill  = fillsBySymbol[sym]?.find(f => f.transaction_type === "SELL");
-        batch.set(trade._ref, {
+        const exitFill  = fillsBySymbol[sym]?.find(f => (f.transaction_type || "").toUpperCase() === "SELL");
+        const update2   = {
           isOpen:   false,
           exit:     exitPrice,
           pnl,
           exitTime: exitFill?.fill_timestamp ? String(exitFill.fill_timestamp).slice(11, 16) : null,
           syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
+        };
+        // Backfill entryTime only when currently null — never overwrite an existing value
+        if (trade.entryTime == null) {
+          const openType2 = (trade.direction || "Long") === "Long" ? "BUY" : "SELL";
+          const openFill2 = fillsBySymbol[sym]?.find(f => (f.transaction_type || "").toUpperCase() === openType2);
+          const openTs2   = openFill2?.fill_timestamp || openFill2?.order_timestamp || openFill2?.exchange_timestamp;
+          if (openTs2) update2.entryTime = String(openTs2).slice(11, 16);
+        }
+        batch.set(trade._ref, update2, { merge: true });
         console.log(`reconcileZerodha [${uid}]: expired ${sym} exit=${exitPrice} pnl=${pnl}`);
         fixed++;
         continue;
@@ -575,14 +590,32 @@ async function reconcileOpenZerodhaPositions(uid, positionsData, fillsBySymbol) 
         const exitPrice = isLong ? dayPos.average_sell_price : dayPos.average_buy_price;
         const pnl       = parseFloat(dayPos.realised_pnl.toFixed(2));
         const closeType = isLong ? "SELL" : "BUY";
-        const exitFill  = fillsBySymbol[sym]?.find(f => f.transaction_type === closeType);
-        batch.set(trade._ref, {
+        const openType3 = isLong ? "BUY" : "SELL";
+        // Case-insensitive match — Kite may return 'BUY'/'SELL' or 'buy'/'sell'
+        const exitFill  = fillsBySymbol[sym]?.find(f => (f.transaction_type || "").toUpperCase() === closeType);
+        const update3   = {
           isOpen:   false,
           exit:     exitPrice,
           pnl,
           exitTime: exitFill?.fill_timestamp ? String(exitFill.fill_timestamp).slice(11, 16) : null,
           syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }, { merge: true });
+        };
+        // Backfill entryTime only when currently null — never overwrite an existing value
+        if (trade.entryTime == null) {
+          // DIAG: log symbol lookup state to identify why opening fill may not be found
+          const fillKeys    = Object.keys(fillsBySymbol);
+          const symFills    = fillsBySymbol[sym] ?? [];
+          const openFill3   = symFills.find(f => (f.transaction_type || "").toUpperCase() === openType3);
+          console.log(
+            `[DIAG entryTime] sym=${sym} openType=${openType3}` +
+            ` fillsBySymbol keys=${JSON.stringify(fillKeys)}` +
+            ` fills for sym=${JSON.stringify(symFills.map(f => ({ type: f.transaction_type, ts: f.fill_timestamp })))}` +
+            ` openFillFound=${!!openFill3}`
+          );
+          const openTs3 = openFill3?.fill_timestamp || openFill3?.order_timestamp || openFill3?.exchange_timestamp;
+          if (openTs3) update3.entryTime = String(openTs3).slice(11, 16);
+        }
+        batch.set(trade._ref, update3, { merge: true });
         console.log(`reconcileZerodha [${uid}]: closed today ${sym} exit=${exitPrice} pnl=${pnl}`);
         fixed++;
         continue;
@@ -755,7 +788,7 @@ async function syncTradesForUser(uid) {
   // ── 4. Load existing Zerodha docs — needed for dedup AND multi-day close matching ─
   const existingSnap = await tradesRef
     .where("broker", "==", "zerodha")
-    .select("id", "isOpen", "accountId", "deleted", "deletedAt", "symbol", "direction", "entry", "size", "source")
+    .select("id", "isOpen", "accountId", "deleted", "deletedAt", "symbol", "direction", "entry", "size", "source", "entryTime")
     .get();
   const existingByDocId  = new Map();
   const existingOpenLongs = new Map();  // symbol → { docId, entry, size }
@@ -767,6 +800,7 @@ async function syncTradesForUser(uid) {
       accountId: d.accountId ?? null,
       deleted:   d.deleted   ?? null,
       deletedAt: d.deletedAt ?? null,
+      entryTime: d.entryTime ?? null,
     });
     // Index open Long trades by symbol so SELL-without-BUY can close them
     if (d.isOpen === true && !d.deleted && d.direction === "Long" && d.source === "zerodha") {
@@ -856,15 +890,29 @@ async function syncTradesForUser(uid) {
     if (existing) {
       if (!trade.isOpen && existing.isOpen !== false) {
         // Trade just closed — update only closing fields, preserve user-owned fields
-        toWriteUpdate.push({ ref: existing.ref, fields: {
+        const closingFields = {
           exit:     trade.exit,
           pnl:      trade.pnl,
           exitTime: trade.exitTime,
           isOpen:   false,
           syncedAt: admin.firestore.FieldValue.serverTimestamp(),
-        }});
+        };
+        // Backfill entryTime if it was null and we now have a value from the fills
+        if (existing.entryTime == null && trade.entryTime != null) {
+          closingFields.entryTime = trade.entryTime;
+        }
+        toWriteUpdate.push({ ref: existing.ref, fields: closingFields });
       } else {
-        console.log(`syncZerodhaTrades [${uid}]: ${trade.id} already up-to-date — no change`);
+        // Trade already exists and is not transitioning — check if entryTime needs backfilling
+        if (existing.entryTime == null && trade.entryTime != null) {
+          toWriteUpdate.push({ ref: existing.ref, fields: {
+            entryTime: trade.entryTime,
+            syncedAt:  admin.firestore.FieldValue.serverTimestamp(),
+          }});
+          console.log(`syncZerodhaTrades [${uid}]: ${trade.id} backfilling entryTime=${trade.entryTime}`);
+        } else {
+          console.log(`syncZerodhaTrades [${uid}]: ${trade.id} already up-to-date — no change`);
+        }
       }
     } else {
       // New trade — assign accountId from brokerAccountMap if available
