@@ -73,6 +73,10 @@ function numeric(value) {
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : null;
 }
+function textValue(value) {
+  const raw = scalar(value);
+  return raw === null || raw === undefined ? null : String(raw);
+}
 function normalizedDate(value) {
   const raw = scalar(value);
   if (raw === null || raw === undefined || raw === '') return null;
@@ -191,7 +195,7 @@ function canonicalTrade(data, deletedFallback = null) {
     optionType: first(data, 'optionType'),
     strike: numeric(first(data, 'strike')),
     expiry: normalizedDate(first(data, 'expiry')),
-    exchange: first(data, 'exchange'),
+    exchange: textValue(first(data, 'exchange')),
     product: first(data, 'product'),
     date: normalizedDate(first(data, 'date', 'fill_timestamp', 'order_timestamp')),
     entry: numeric(first(data, 'entry', 'average_price')),

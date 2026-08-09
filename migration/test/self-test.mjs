@@ -92,7 +92,7 @@ const baseDocuments = [
     path: 'users/firebase-user-1/trades/active',
     data: {
       tradingsymbol: 'NIFTY', date: '2026-08-08', transaction_type: 'BUY', average_price: '100.5',
-      quantity: '2', pnl: '4.25', entryTime: '09:15', screenshots: fiveScreenshots,
+      quantity: '2', pnl: '4.25', exchange: 7, entryTime: '09:15', screenshots: fiveScreenshots,
     },
     createTime: null,
     updateTime: null,
@@ -251,7 +251,7 @@ try {
       legacyPath: 'users/firebase-user-1/trades/active',
       data: {
         symbol: 'NIFTY', date: '2026-08-08', direction: 'Long', entry: 100.5, size: 2,
-        pnl: 4.25, entryTime: '09:15', deleted: false,
+        pnl: 4.25, exchange: '7', entryTime: '09:15', deleted: false,
         screenshots: fiveScreenshots.map(({ name }) => ({ name })),
       },
       mapped: {
