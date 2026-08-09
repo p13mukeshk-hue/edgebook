@@ -2,7 +2,7 @@
 import { lstat, realpath, unlink } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import pg from 'pg';
-import { appendNdjson, openNdjson, parseArgs, resolveContainedRegularFile, sha256File } from '../lib/bundle.mjs';
+import { appendNdjson, databaseDateOnly, openNdjson, parseArgs, resolveContainedRegularFile, sha256File } from '../lib/bundle.mjs';
 
 const args=parseArgs(process.argv.slice(2));
 if(!args.output||!isAbsolute(args.output)||!args['upload-root']||!isAbsolute(args['upload-root'])){
@@ -56,8 +56,8 @@ try{
       source:row.source_system,sourceSystem:row.source_system,ingestionMethod:row.ingestion_method,
       accountId:row.legacy_account_id,externalTradeKey:row.external_trade_key,brokerTradeId:row.broker_trade_id,
       symbol:row.symbol,asset:row.asset,instrument:row.instrument,optionType:row.option_type,strike:numeric(row.strike),
-      expiry:row.expiry===null?null:String(row.expiry).slice(0,10),exchange:row.exchange,product:row.product,
-      date:String(row.trade_date).slice(0,10),entry:Number(row.entry_price),exit:numeric(row.exit_price),
+      expiry:databaseDateOnly(row.expiry),exchange:row.exchange,product:row.product,
+      date:databaseDateOnly(row.trade_date),entry:Number(row.entry_price),exit:numeric(row.exit_price),
       size:Number(row.quantity),pnl:numeric(row.pnl),sl:numeric(row.stop_loss),tp:numeric(row.take_profit),
       direction:row.direction,isOpen:row.is_open,
       entryTime:row.legacy_entry_time?.slice(0,8)??null,exitTime:row.legacy_exit_time?.slice(0,8)??null,
@@ -138,7 +138,7 @@ try{
     ORDER BY u.legacy_firebase_uid,j.journal_date`);
   for(const row of journals.rows){
     await appendNdjson(handle,{recordType:'journal',firebaseUid:row.legacy_firebase_uid,
-      date:String(row.journal_date).slice(0,10),data:row.legacy_document}); counts.journals+=1;
+      date:databaseDateOnly(row.journal_date),data:row.legacy_document}); counts.journals+=1;
   }
   await client.query('COMMIT');
   await handle.close();

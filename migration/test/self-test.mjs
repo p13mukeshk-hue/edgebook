@@ -6,6 +6,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   canonicalJson,
+  databaseDateOnly,
   findForbiddenCredentialPaths,
   redactBrokerCredentials,
   sha256Text,
@@ -19,6 +20,10 @@ const validate = resolve(migrationRoot, 'scripts/validate-bundle.mjs');
 const importStaging = resolve(migrationRoot, 'scripts/import-staging.mjs');
 const reconcile = resolve(migrationRoot, 'scripts/reconcile.mjs');
 const temporaryRoot = await mkdtemp(resolve(tmpdir(), 'edgebook-migration-test-'));
+
+assert.equal(databaseDateOnly(new Date('2026-08-09T23:59:58.000Z')), '2026-08-09');
+assert.equal(databaseDateOnly('2026-03-31'), '2026-03-31');
+assert.equal(databaseDateOnly(null), null);
 
 function run(script, args, { failure = false } = {}) {
   const result = spawnSync(process.execPath, [script, ...args], {

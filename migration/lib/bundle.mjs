@@ -41,6 +41,12 @@ export function canonicalJson(value) {
   return JSON.stringify(canonicalize(value));
 }
 
+export function databaseDateOnly(value) {
+  if (value === null || value === undefined) return null;
+  const text = value instanceof Date ? value.toISOString() : String(value);
+  return text.slice(0, 10);
+}
+
 export function sha256Text(value) {
   return createHash('sha256').update(value).digest('hex');
 }
