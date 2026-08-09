@@ -262,9 +262,9 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 .mc-change{font-size:11px;color:var(--text3)}
 
 /* CHARTS */
-.charts-row{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:20px}
+.charts-row{display:grid;grid-template-columns:minmax(0,2fr) minmax(500px,1fr);gap:16px;margin-bottom:20px;align-items:stretch}
 .chart-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
-.chart-card.widget-hidden,.table-card.widget-hidden{display:none!important}
+.chart-card.widget-hidden,.table-card.widget-hidden,.dashboard-insight-grid.widget-hidden{display:none!important}
 .chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
 .chart-title{font-size:14px;font-weight:500}
 .chart-sub{font-size:12px;color:var(--text3)}
@@ -278,6 +278,29 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 @media(max-width:560px){.equity-chart-wrap{height:300px}.chart-header.equity-chart-header{align-items:flex-start;gap:10px;flex-direction:column}}
 .donut-legend{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .legend-item{display:flex;align-items:center;justify-content:space-between;font-size:12px}
+.dashboard-insight-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:10px;min-width:0;align-self:stretch}
+.insight-mini-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:13px 14px;min-width:0;overflow:hidden;display:flex;flex-direction:column}
+.insight-mini-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:7px;min-height:32px}
+.insight-mini-title{font-size:12px;font-weight:600;color:var(--text);line-height:1.25}
+.insight-mini-sub{font-size:9px;color:var(--text3);margin-top:2px;line-height:1.3}
+.insight-chart{height:118px;position:relative;min-height:0;flex:1}
+.insight-ring-layout{display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:10px;flex:1;min-height:118px}
+.insight-ring-wrap{position:relative;width:92px;height:92px;margin:auto}
+.insight-ring-wrap canvas{width:100%!important;height:100%!important}
+.insight-ring-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center}
+.insight-ring-value{font-family:var(--font-mono);font-size:17px;font-weight:600;color:var(--text)}
+.insight-ring-label{font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:.45px;margin-top:1px}
+.insight-legend{display:flex;flex-direction:column;gap:6px;min-width:0}
+.insight-legend-row{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:9px;color:var(--text2)}
+.insight-legend-name{display:flex;align-items:center;gap:5px;min-width:0}
+.insight-legend-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+.insight-legend-val{font-family:var(--font-mono);font-weight:600;color:var(--text)}
+.insight-mini-footer{font-size:9px;color:var(--text3);line-height:1.35;margin-top:4px;min-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.insight-empty{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;color:var(--text3);font-size:10px;line-height:1.4;padding:10px}
+.insight-empty.visible{display:flex}
+@media(max-width:1480px){.charts-row{grid-template-columns:1fr}.dashboard-insight-grid{grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:none}.insight-mini-card{min-height:220px}}
+@media(max-width:980px){.dashboard-insight-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.dashboard-insight-grid{grid-template-columns:1fr}.insight-ring-layout{grid-template-columns:110px 1fr}}
 .legend-dot{width:8px;height:8px;border-radius:50%;margin-right:8px;flex-shrink:0}
 
 /* TABLE */
@@ -1122,10 +1145,31 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
             </div>
             <div class="equity-chart-wrap"><canvas id="equity-chart" role="img" aria-label="Cumulative profit and loss equity curve"></canvas><div class="equity-empty" id="equity-empty">Log a completed trade to start your equity curve.</div></div>
           </div>
-          <div class="chart-card" id="widget-assetdist">
-            <div class="chart-header"><div><div class="chart-title">By Asset Class</div><div class="chart-sub">P&amp;L distribution</div></div></div>
-            <div style="position:relative;height:155px"><canvas id="asset-chart"></canvas></div>
-            <div class="donut-legend" id="donut-legend"></div>
+          <div class="dashboard-insight-grid" id="widget-assetdist" aria-label="Dashboard performance insights">
+            <section class="insight-mini-card">
+              <div class="insight-mini-head"><div><div class="insight-mini-title">P&amp;L by Symbol</div><div class="insight-mini-sub">Top five · gains and losses</div></div></div>
+              <div class="insight-chart"><canvas id="symbol-chart" role="img" aria-label="Signed profit and loss by trading symbol"></canvas><div class="insight-empty" id="symbol-empty">Complete a trade to compare symbols.</div></div>
+              <div class="insight-mini-footer" id="symbol-summary"></div>
+            </section>
+            <section class="insight-mini-card">
+              <div class="insight-mini-head"><div><div class="insight-mini-title">Outcome Mix</div><div class="insight-mini-sub">Wins · losses · break-even</div></div></div>
+              <div class="insight-ring-layout">
+                <div class="insight-ring-wrap"><canvas id="outcome-chart" role="img" aria-label="Win loss and break-even trade distribution"></canvas><div class="insight-ring-center"><span class="insight-ring-value" id="outcome-rate">—</span><span class="insight-ring-label">Win rate</span></div><div class="insight-empty" id="outcome-empty">No completed outcomes yet.</div></div>
+                <div class="insight-legend" id="outcome-legend"></div>
+              </div>
+            </section>
+            <section class="insight-mini-card">
+              <div class="insight-mini-head"><div><div class="insight-mini-title">Direction Edge</div><div class="insight-mini-sub">Long vs short P&amp;L</div></div></div>
+              <div class="insight-chart"><canvas id="direction-chart" role="img" aria-label="Long versus short profit and loss"></canvas><div class="insight-empty" id="direction-empty">No direction data yet.</div></div>
+              <div class="insight-mini-footer" id="direction-summary"></div>
+            </section>
+            <section class="insight-mini-card">
+              <div class="insight-mini-head"><div><div class="insight-mini-title">Day Consistency</div><div class="insight-mini-sub">Profitable vs losing days</div></div></div>
+              <div class="insight-ring-layout">
+                <div class="insight-ring-wrap"><canvas id="day-chart" role="img" aria-label="Profitable losing and flat trading-day distribution"></canvas><div class="insight-ring-center"><span class="insight-ring-value" id="day-rate">—</span><span class="insight-ring-label">Green days</span></div><div class="insight-empty" id="day-empty">No realised trading days yet.</div></div>
+                <div class="insight-legend" id="day-legend"></div>
+              </div>
+            </section>
           </div>
         </div>
         <div class="table-card" id="widget-recenttrades">
@@ -1689,7 +1733,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 
             <!-- DASHBOARD WIDGETS -->
             <div id="sp-dashboard" class="settings-panel">
-              <div class="s-panel-head"><div class="s-panel-head-left"><div class="s-panel-title">Dashboard widgets</div><div class="s-panel-sub">Show or hide metric cards and charts on the dashboard.</div></div><div class="help-wrap"><div class="help-icon help-lg" onclick="toggleHelp('ht-widgets',event)">?</div><div class="help-tooltip ht-below" id="ht-widgets"><div class="ht-title"><i class="fa-solid fa-gauge" style="font-size:11px"></i> Dashboard widgets</div><div class="ht-body">Toggle metric cards (Net P&L, Win Rate etc.) and charts (Equity curve, Asset distribution) on or off. Hiding widgets you don't use keeps the dashboard clean.</div></div></div></div>
+              <div class="s-panel-head"><div class="s-panel-head-left"><div class="s-panel-title">Dashboard widgets</div><div class="s-panel-sub">Show or hide metric cards and charts on the dashboard.</div></div><div class="help-wrap"><div class="help-icon help-lg" onclick="toggleHelp('ht-widgets',event)">?</div><div class="help-tooltip ht-below" id="ht-widgets"><div class="ht-title"><i class="fa-solid fa-gauge" style="font-size:11px"></i> Dashboard widgets</div><div class="ht-body">Toggle metric cards, the equity curve, the four-panel insight grid, and recent trades. Hiding widgets you don't use keeps the dashboard clean.</div></div></div></div>
               <div class="s-section">
                 <div class="s-section-label">Metric cards</div>
                 <div class="widget-grid-2" id="metric-toggles"></div>
@@ -2309,7 +2353,7 @@ const SettingsManager = {
         avgloss:{label:'Avg loss',enabled:true},
         pf:{label:'Profit factor',enabled:true},
         equity:{label:'Equity curve chart',enabled:true},
-        assetdist:{label:'Asset distribution',enabled:true},
+        assetdist:{label:'Performance insight grid',enabled:true},
         recenttrades:{label:'Recent trades table',enabled:true},
       },
       sidebarSections:{
@@ -6919,6 +6963,89 @@ function bootstrapMonthlyOutcomes(pnls,tradesPerMonth,simulations=500){
   return results.sort((a,b)=>a-b);
 }
 
+function equityAxisDomain(values,paddingRatio=.06){
+  const finite=values.map(Number).filter(Number.isFinite);
+  if(!finite.length)return {min:-1,max:1};
+  const low=Math.min(0,...finite),high=Math.max(0,...finite);
+  if(low===high)return {min:-1,max:1};
+  const padding=Math.max(1,(high-low)*paddingRatio);
+  return {min:low<0?low-padding:0,max:high>0?high+padding:0};
+}
+function setDashboardInsightEmpty(name,isEmpty){
+  const canvas=document.getElementById(`${name}-chart`),empty=document.getElementById(`${name}-empty`);
+  if(canvas)canvas.style.visibility=isEmpty?'hidden':'visible';
+  empty?.classList.toggle('visible',isEmpty);
+}
+function insightLegendHtml(rows){
+  return rows.map(row=>`<div class="insight-legend-row"><span class="insight-legend-name"><span class="insight-legend-dot" style="background:${safeAccountColor(row.color)}"></span>${escapeHtml(row.label)}</span><span class="insight-legend-val">${escapeHtml(row.value)}</span></div>`).join('');
+}
+function renderDashboardInsights(src,closed,displayC,isAll){
+  ['asset','symbol','outcome','direction','day'].forEach(key=>{if(CH[key]){CH[key].destroy();CH[key]=null;}});
+  const ledger=realizedLedgerForTrades(src).map(event=>{
+    const value=isAll?FxRates.toUSD(event.ledgerPnl,acctCur(event.accountId)):Number(event.ledgerPnl);
+    return {...event,displayPnl:Number(value)};
+  }).filter(event=>Number.isFinite(event.displayPnl));
+
+  // Signed P&L by symbol. Unlike the previous doughnut, losses are retained.
+  const bySymbol=new Map();
+  ledger.forEach(event=>{
+    const symbol=String(event.symbol||'Unknown').trim().toUpperCase()||'Unknown';
+    bySymbol.set(symbol,(bySymbol.get(symbol)||0)+event.displayPnl);
+  });
+  const symbolRows=[...bySymbol].map(([symbol,pnl])=>({symbol,pnl})).sort((a,b)=>Math.abs(b.pnl)-Math.abs(a.pnl)||a.symbol.localeCompare(b.symbol)).slice(0,5);
+  setDashboardInsightEmpty('symbol',!symbolRows.length);
+  document.getElementById('symbol-summary').textContent=symbolRows.length?`${bySymbol.size} symbol${bySymbol.size===1?'':'s'} · net ${signedMoney(ledger.reduce((sum,event)=>sum+event.displayPnl,0),displayC,0)}`:'';
+  if(symbolRows.length){
+    CH.symbol=new Chart(document.getElementById('symbol-chart'),{type:'bar',data:{labels:symbolRows.map(row=>row.symbol),datasets:[{data:symbolRows.map(row=>Number(row.pnl.toFixed(2))),backgroundColor:symbolRows.map(row=>row.pnl>=0?'rgba(34,201,135,.78)':'rgba(255,94,106,.78)'),borderRadius:4,barThickness:9}]},options:{...CBO,indexAxis:'y',animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)}`}}},scales:{x:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,.35)':GC},ticks:{color:TC,font:{size:8},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}},y:{grid:{display:false},ticks:{color:TC,font:{size:8},autoSkip:false}}}}});
+  }
+
+  // Completed-trade outcomes; a doughnut is appropriate because these are counts.
+  const outcomes=closed.map(trade=>Number(isAll?FxRates.toUSD(trade.pnl,acctCur(trade.accountId)):trade.pnl)).filter(Number.isFinite);
+  const outcomeCounts=[outcomes.filter(value=>value>0).length,outcomes.filter(value=>value<0).length,outcomes.filter(value=>value===0).length];
+  const outcomeTotal=outcomeCounts.reduce((sum,value)=>sum+value,0),winRate=outcomeTotal?Math.round(outcomeCounts[0]/outcomeTotal*100):null;
+  setDashboardInsightEmpty('outcome',!outcomeTotal);
+  document.getElementById('outcome-rate').textContent=winRate===null?'—':`${winRate}%`;
+  document.getElementById('outcome-legend').innerHTML=insightLegendHtml([
+    {label:'Wins',value:outcomeCounts[0],color:'#22c987'},
+    {label:'Losses',value:outcomeCounts[1],color:'#ff5e6a'},
+    {label:'Break-even',value:outcomeCounts[2],color:'#6f7895'},
+  ]);
+  if(outcomeTotal){
+    CH.outcome=new Chart(document.getElementById('outcome-chart'),{type:'doughnut',data:{labels:['Wins','Losses','Break-even'],datasets:[{data:outcomeCounts,backgroundColor:['#22c987','#ff5e6a','#6f7895'],borderWidth:0,hoverOffset:2}]},options:{...CBO,cutout:'74%',animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${context.label}: ${context.raw} trade${context.raw===1?'':'s'}`}}}}});
+  }
+
+  // Realised P&L by direction, with completed-trade win rates in the footer.
+  const directionNames=['Long','Short'];
+  const directionStats=Object.fromEntries(directionNames.map(name=>[name,{pnl:0,count:0,wins:0}]));
+  ledger.forEach(event=>{const name=event.direction==='Short'?'Short':'Long';directionStats[name].pnl+=event.displayPnl;});
+  closed.forEach(trade=>{const name=trade.direction==='Short'?'Short':'Long',value=Number(isAll?FxRates.toUSD(trade.pnl,acctCur(trade.accountId)):trade.pnl);if(!Number.isFinite(value))return;directionStats[name].count++;if(value>0)directionStats[name].wins++;});
+  const hasDirection=ledger.length>0;
+  setDashboardInsightEmpty('direction',!hasDirection);
+  document.getElementById('direction-summary').textContent=hasDirection?directionNames.map(name=>`${name} ${directionStats[name].count?Math.round(directionStats[name].wins/directionStats[name].count*100):0}% WR`).join(' · '):'';
+  if(hasDirection){
+    CH.direction=new Chart(document.getElementById('direction-chart'),{type:'bar',data:{labels:directionNames,datasets:[{data:directionNames.map(name=>Number(directionStats[name].pnl.toFixed(2))),backgroundColor:directionNames.map(name=>directionStats[name].pnl>=0?'rgba(34,201,135,.78)':'rgba(255,94,106,.78)'),borderRadius:5,maxBarThickness:38}]},options:{...CBO,animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)} realised`}}},scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:9}}},y:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,.35)':GC},ticks:{color:TC,font:{size:8},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}}}}});
+  }
+
+  // Realised-event ledger keeps partial closes on their actual trading day.
+  const byDay=new Map();
+  ledger.forEach(event=>{
+    const day=String(event.ledgerDate||'').slice(0,10);
+    if(isRealIsoDate(day))byDay.set(day,(byDay.get(day)||0)+event.displayPnl);
+  });
+  const dayValues=[...byDay.values()],dayCounts=[dayValues.filter(value=>value>.005).length,dayValues.filter(value=>value<-.005).length,dayValues.filter(value=>Math.abs(value)<=.005).length];
+  const dayTotal=dayCounts.reduce((sum,value)=>sum+value,0),greenDayRate=dayTotal?Math.round(dayCounts[0]/dayTotal*100):null;
+  setDashboardInsightEmpty('day',!dayTotal);
+  document.getElementById('day-rate').textContent=greenDayRate===null?'—':`${greenDayRate}%`;
+  document.getElementById('day-legend').innerHTML=insightLegendHtml([
+    {label:'Profitable',value:dayCounts[0],color:'#22c987'},
+    {label:'Losing',value:dayCounts[1],color:'#ff5e6a'},
+    {label:'Flat',value:dayCounts[2],color:'#6f7895'},
+  ]);
+  if(dayTotal){
+    CH.day=new Chart(document.getElementById('day-chart'),{type:'doughnut',data:{labels:['Profitable','Losing','Flat'],datasets:[{data:dayCounts,backgroundColor:['#22c987','#ff5e6a','#6f7895'],borderWidth:0,hoverOffset:2}]},options:{...CBO,cutout:'74%',animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${context.label}: ${context.raw} day${context.raw===1?'':'s'}`}}}}});
+  }
+}
+
 function renderCharts(){
   const src=tradesForContext('dashboard');
   const pid=activePageAcct['dashboard']||'all';
@@ -6952,7 +7079,7 @@ function renderCharts(){
   const displayedEquityPoints=chartAxisMode==='date'?aggregateEquityDaily(rawEquityPoints):rawEquityPoints;
   const equityPoints=insertEquityZeroCrossings(displayedEquityPoints);
   const datedValues=displayedEquityPoints.map(point=>point.x),xRange=datedValues.length>1?Math.max(1,datedValues[datedValues.length-1]-datedValues[0]):1;
-  const visibleEquityValues=displayedEquityPoints.map(point=>point.y),yMin=Math.min(0,...visibleEquityValues),yMax=Math.max(0,...visibleEquityValues),yRange=Math.max(1,yMax-yMin),yPadding=Math.max(1,yRange*.08);
+  const visibleEquityValues=displayedEquityPoints.map(point=>point.y),yDomain=equityAxisDomain(visibleEquityValues);
   CH.equity=new Chart(equityCanvas,{
     type:'line',
     data:{datasets:[{
@@ -6994,8 +7121,8 @@ function renderCharts(){
           ticks:{color:TC,font:{size:10},autoSkip:true,maxTicksLimit:7,maxRotation:0,callback:value=>chartAxisMode==='date'?equityDateTick(value,xRange):`#${Math.round(value)}`}
         },
         y:{
-          suggestedMin:yMin-yPadding,
-          suggestedMax:yMax+yPadding,
+          min:yDomain.min,
+          max:yDomain.max,
           grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,0.42)':GC,lineWidth:context=>Number(context.tick?.value)===0?1.25:1},
           title:{display:true,text:`Cumulative P&L (${isAll?'USD':displayC})`,color:TC,font:{size:10,weight:'normal'}},
           ticks:{color:TC,font:{size:10},maxTicksLimit:7,callback:value=>equityMoneyTick(value,displayC)}
@@ -7004,15 +7131,7 @@ function renderCharts(){
     }
   });
 
-  // Donut: also convert to USD for all-accounts
-  const apnl={};
-  src.filter(tradeHasPnl).forEach(t=>{const pnl=toPnlDisplay(t);if(Number.isFinite(pnl))apnl[t.asset]=(apnl[t.asset]||0)+pnl;});
-  const ak=Object.keys(apnl).filter(k=>apnl[k]>0);
-  if(CH.asset) CH.asset.destroy();
-  if(ak.length){
-    CH.asset=new Chart(document.getElementById('asset-chart'),{type:'doughnut',data:{labels:ak.map(k=>ASSET_LABELS[k]),datasets:[{data:ak.map(k=>parseFloat(apnl[k].toFixed(0))),backgroundColor:ak.map(k=>ASSET_COLORS[k]),borderWidth:0,hoverOffset:4}]},options:{...CBO,cutout:'70%'}});
-    document.getElementById('donut-legend').innerHTML=ak.map(k=>`<div class="legend-item"><div style="display:flex;align-items:center"><div class="legend-dot" style="background:${ASSET_COLORS[k]}"></div>${ASSET_LABELS[k]}</div><span class="td-mono" style="font-size:11px;color:var(--green)">+${displayC}${apnl[k].toFixed(0)}</span></div>`).join('');
-  }
+  renderDashboardInsights(src,closed,displayC,isAll);
 }
 
 function renderAnalyticsCharts(){

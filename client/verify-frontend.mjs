@@ -305,12 +305,23 @@ requireMatch(app, /pointRadius:0[\s\S]{0,100}?pointHoverRadius:4/, 'decluttered 
 requireMatch(app, /maxTicksLimit:7[\s\S]{0,180}?equityDateTick/, 'bounded date ticks on equity curve');
 requireMatch(app, /Cumulative P&L:\s*\$\{signedMoney\(point\.y/, 'cumulative P&L equity tooltip');
 requireMatch(app, /aggregateEquityDaily\(rawEquityPoints\)/, 'daily-close smoothing for date equity view');
-requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,220}?yPadding/, 'dynamic equity Y-domain from visible points');
+requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,160}?equityAxisDomain\(visibleEquityValues\)/, 'dynamic equity Y-domain from visible points');
+requireMatch(app, /y:\{[\s\S]{0,100}?min:yDomain\.min,[\s\S]{0,60}?max:yDomain\.max/, 'exact equity Y-domain without library tick expansion');
 requireMatch(app, /insertEquityZeroCrossings\(displayedEquityPoints\)/, 'exact zero crossing projection');
 requireMatch(app, /segment:\{borderColor:[\s\S]{0,180}?EQUITY_POS_COLOR[\s\S]{0,80}?EQUITY_NEG_COLOR/, 'zero-aware equity line colors');
 requireMatch(app, /backgroundColor:equityFillGradient/, 'zero-aware gradual equity fill');
 requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 'empty equity curve guidance');
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
+for (const insightCanvas of ['symbol-chart', 'outcome-chart', 'direction-chart', 'day-chart']) {
+  requireMatch(app, new RegExp(`id=["']${insightCanvas}["']`), `dashboard insight canvas ${insightCanvas}`);
+}
+requireMatch(app, /function renderDashboardInsights[\s\S]*?realizedLedgerForTrades\(src\)/, 'dashboard insights use the actual-date realised-event ledger');
+requireMatch(app, /const day=String\(event\.ledgerDate\|\|''\)\.slice\(0,10\)/, 'day consistency canonicalizes timestamp dates');
+requireMatch(app, /\.insight-ring-wrap canvas\{width:100%!important;height:100%!important\}/, 'dashboard ring canvases have bounded empty-state dimensions');
+requireMatch(app, /bySymbol[\s\S]{0,500}?Math\.abs\(b\.pnl\)-Math\.abs\(a\.pnl\)/, 'signed symbol P&L ranking retains gains and losses');
+requireMatch(app, /outcomeCounts=\[outcomes\.filter\(value=>value>0\)[\s\S]{0,160}?value===0/, 'outcome mix includes break-even trades');
+requireMatch(app, /dayCounts=\[dayValues\.filter\(value=>value>\.005\)[\s\S]{0,180}?Math\.abs\(value\)<=\.005/, 'day consistency includes profitable losing and flat days');
+rejectMatch(app, /id=["']asset-chart["']|Object\.keys\(apnl\)\.filter\(k=>apnl\[k\]>0\)/, 'positive-only asset-class doughnut');
 
 // Daily Journal dictation must remain a review-first, browser-native feature:
 // append to existing notes, expose live status, and never save automatically.
@@ -323,6 +334,7 @@ requireMatch(journalVoiceSource, /textarea\.value=djJoinVoiceText/, 'voice trans
 requireMatch(journalVoiceSource, /Transcript added[^\n]*review it[^\n]*save the entry/, 'review-before-save dictation completion state');
 rejectMatch(journalVoiceSource, /djAutoSave|djSaveEntry/, 'automatic persistence from voice dictation');
 const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
+const equityAxisDomainSource = sourceBetween('function equityAxisDomain', 'function setDashboardInsightEmpty');
 const equityProjectionContext = {};
 vm.runInNewContext(`
   function isRealIsoDate(value){
@@ -333,6 +345,7 @@ vm.runInNewContext(`
     return parsed.getUTCFullYear()===year&&parsed.getUTCMonth()===month-1&&parsed.getUTCDate()===day;
   }
   ${equityProjectionSource}
+  ${equityAxisDomainSource}
   const projected=new Date(equityTradeTimestamp({date:'2026-06-02T00:00:00.000Z',exitTime:'09:15'}));
   globalThis.result=[projected.getFullYear(),projected.getMonth()+1,projected.getDate(),projected.getHours(),projected.getMinutes()];
   const dayOne=new Date(2026,5,2,9,15).getTime(),dayTwo=new Date(2026,5,3,10,0).getTime();
@@ -345,6 +358,7 @@ vm.runInNewContext(`
   const stops=[];
   equityFillGradient({chart:{chartArea:{top:0,bottom:100},scales:{y:{getPixelForValue:()=>40}},ctx:{createLinearGradient:()=>({addColorStop:(offset,color)=>stops.push([offset,color])})}}});
   globalThis.gradientStops=stops;
+  globalThis.axisDomain=equityAxisDomain([-3000,2800]);
 `, equityProjectionContext);
 if (equityProjectionContext.result?.join('-') !== '2026-6-2-9-15') {
   failures.push('Equity date projection rejected the VPS ISO timestamp shape');
@@ -357,6 +371,72 @@ if (equityProjectionContext.crossings?.length !== 3 || equityProjectionContext.c
 }
 if (equityProjectionContext.gradientStops?.length !== 4 || !equityProjectionContext.gradientStops[0]?.[1]?.includes('34,201,135') || !equityProjectionContext.gradientStops[3]?.[1]?.includes('255,94,106')) {
   failures.push('Equity area gradient does not transition from positive green to negative red');
+}
+if (equityProjectionContext.axisDomain?.min !== -3348 || equityProjectionContext.axisDomain?.max !== 3148) {
+  failures.push('Equity axis does not stay close to the actual visible P&L range');
+}
+
+try {
+  const insightDocument = makeFakeDocument();
+  for (const id of ['symbol-chart','symbol-empty','symbol-summary','outcome-chart','outcome-empty','outcome-rate','outcome-legend','direction-chart','direction-empty','direction-summary','day-chart','day-empty','day-rate','day-legend']) {
+    insightDocument.getElementById(id).id = id;
+  }
+  const renderedInsightCharts = new Map();
+  class FakeInsightChart {
+    constructor(element, config) { this.element = element; this.config = config; renderedInsightCharts.set(element.id, this); }
+    destroy() { this.destroyed = true; }
+  }
+  const insightSource = sourceBetween('function setDashboardInsightEmpty', 'function renderCharts');
+  const { exports: insightRenderer } = evaluateSecurityFixture(
+    insightSource,
+    {
+      document: insightDocument,
+      Chart: FakeInsightChart,
+      CH: {},
+      CBO: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+      GC: 'grid',
+      TC: 'text',
+      FxRates: { toUSD: value => Number(value) },
+      acctCur: () => '$',
+      realizedLedgerForTrades: source => source,
+      isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
+      safeAccountColor: value => value,
+      escapeHtml: value => String(value),
+      signedMoney: (value, symbol) => `${Number(value) < 0 ? '-' : Number(value) > 0 ? '+' : ''}${symbol}${Math.abs(Number(value)).toFixed(0)}`,
+      equityMoneyTick: (value, symbol) => `${symbol}${value}`,
+    },
+    '{renderDashboardInsights}',
+  );
+  const realised = [
+    { symbol: 'XAUUSD', ledgerDate: '2026-08-01T00:00:00.000Z', ledgerPnl: 120, direction: 'Long', accountId: 'a' },
+    { symbol: 'BTCUSD', ledgerDate: '2026-08-02', ledgerPnl: -200, direction: 'Short', accountId: 'a' },
+    { symbol: 'XAUUSD', ledgerDate: '2026-08-02', ledgerPnl: -20, direction: 'Long', accountId: 'a' },
+    { symbol: 'EURUSD', ledgerDate: '2026-08-03', ledgerPnl: 0, direction: 'Short', accountId: 'a' },
+  ];
+  const closedOutcomes = [
+    { pnl: 100, direction: 'Long', accountId: 'a' },
+    { pnl: -200, direction: 'Short', accountId: 'a' },
+    { pnl: 0, direction: 'Short', accountId: 'a' },
+  ];
+  insightRenderer.renderDashboardInsights(realised, closedOutcomes, '$', false);
+  const symbolConfig = renderedInsightCharts.get('symbol-chart')?.config;
+  const outcomeConfig = renderedInsightCharts.get('outcome-chart')?.config;
+  const directionConfig = renderedInsightCharts.get('direction-chart')?.config;
+  const dayConfig = renderedInsightCharts.get('day-chart')?.config;
+  if (symbolConfig?.data?.labels?.[0] !== 'BTCUSD' || symbolConfig?.data?.datasets?.[0]?.data?.[0] !== -200 || !insightDocument.getElementById('symbol-summary').textContent.includes('net -$100')) {
+    failures.push('P&L-by-symbol insight omitted or misranked a losing symbol');
+  }
+  if (outcomeConfig?.data?.datasets?.[0]?.data?.join(',') !== '1,1,1' || insightDocument.getElementById('outcome-rate').textContent !== '33%') {
+    failures.push('Outcome-mix insight does not reconcile wins losses and break-even trades');
+  }
+  if (directionConfig?.data?.datasets?.[0]?.data?.join(',') !== '100,-200') {
+    failures.push('Direction-edge insight does not retain signed long/short P&L');
+  }
+  if (dayConfig?.data?.datasets?.[0]?.data?.join(',') !== '1,1,1' || insightDocument.getElementById('day-rate').textContent !== '33%') {
+    failures.push('Day-consistency insight does not reconcile profitable losing and flat days');
+  }
+} catch (error) {
+  failures.push(`Dashboard insight fixture failed: ${error.message}`);
 }
 const settingsSaveIndex = browserSettingsMigrationSource.indexOf('const saved=await SettingsManager.set(merged);');
 const settingsMarkerAfterSave = browserSettingsMigrationSource.indexOf("localStorage.setItem(marker,'complete');", settingsSaveIndex + 1);
