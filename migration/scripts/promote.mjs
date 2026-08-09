@@ -31,10 +31,12 @@ function usage(message) {
   if (message) process.stderr.write(`ERROR: ${message}\n\n`);
   process.stderr.write(`Usage:
   Dry-run: node scripts/promote.mjs --bundle /absolute/export [--browser-local file.json]
+    [--unreferenced-storage archive]
   Apply: EDGEBOOK_WRITES_FROZEN=true MIGRATION_DATABASE_URL=... \\
     node scripts/promote.mjs --bundle /absolute/export --batch-id UUID \\
       --upload-root /srv/edgebook-data/uploads --apply \\
       --acknowledge SINGLE_WRITER_FROZEN [--browser-local file.json]
+      [--unreferenced-storage archive]
 
 Optional policy overrides (defaults match deploy/vps/env/edgebook.env.example):
   --max-upload-bytes N --max-image-pixels N
@@ -54,6 +56,9 @@ if (args['browser-local'] && !isAbsolute(args['browser-local'])) usage('--browse
 if (args.apply && (!args['upload-root'] || !isAbsolute(args['upload-root']))) usage('--upload-root must be absolute for apply');
 if (args.apply && !args['browser-local']) usage('--browser-local is required for a cutover apply');
 if (args.apply && !/^[0-9a-f-]{36}$/i.test(String(args['batch-id'] || ''))) usage('--batch-id UUID is required for apply');
+if (args['unreferenced-storage'] && args['unreferenced-storage'] !== 'archive') {
+  usage('--unreferenced-storage must be archive when supplied');
+}
 
 function integerOption(name, fallback, minimum, maximum = Number.MAX_SAFE_INTEGER) {
   const raw = args[name] ?? fallback;
@@ -350,7 +355,9 @@ const brokerPlans = brokerDocs.map((doc) => {
   const forbidden = findForbiddenCredentialPaths(doc.data);
   if (forbidden.length) throw new Error(`staged broker credential leak at ${doc.path}: ${forbidden.join(', ')}`);
   const provider = legacyDocId.startsWith('ctrader') ? 'ctrader' : legacyDocId === 'zerodha' ? 'zerodha' : (text(doc.data.provider) || legacyDocId);
-  const mappedLegacy = text(doc.data.mapToEdgebookAccountId) || text(mergedSettingsByUid.get(uid)?.brokerAccountMap?.[legacyDocId]);
+  const brokerAccountMap = mergedSettingsByUid.get(uid)?.brokerAccountMap;
+  const mappedLegacy = text(brokerAccountMap?.[legacyDocId]) || text(brokerAccountMap?.[provider]) ||
+    text(doc.data.mapToEdgebookAccountId);
   const connectedAt = timestamp(doc.data.connectedAt);
   const lastSyncValue = doc.data.lastSyncTimestamp || doc.data.lastSync;
   const lastSyncAt = timestamp(lastSyncValue);
@@ -371,7 +378,9 @@ for (const broker of brokerPlans) {
 }
 
 const invalidTrades = [];
-const tradePlans = tradeDocs.map((doc) => {
+const unmaterializedTrades = [];
+const normalizedLegacyTimeFields = [];
+const tradePlans = tradeDocs.flatMap((doc) => {
   const [, uid, legacyDocId] = doc.path.match(/^users\/([^/]+)\/trades\/([^/]+)$/);
   const data = doc.data;
   const entryInput = data.entry ?? data.average_price;
@@ -386,6 +395,12 @@ const tradePlans = tradeDocs.map((doc) => {
   const suppliedEntryTime = text(data.entryTime);
   const suppliedExitTime = text(data.exitTime);
   const suppliedExpiry = text(data.expiry);
+  const source = sourceInfo(data);
+  const isKnownCorruptLegacyTime = value => source.sourceSystem === 'zerodha' && /^20\d{2}\s*$/.test(String(value));
+  const entryTimeKnownCorrupt = suppliedEntryTime && isKnownCorruptLegacyTime(data.entryTime);
+  const exitTimeKnownCorrupt = suppliedExitTime && isKnownCorruptLegacyTime(data.exitTime);
+  if (entryTimeKnownCorrupt) normalizedLegacyTimeFields.push({ path: doc.path, field: 'entryTime' });
+  if (exitTimeKnownCorrupt) normalizedLegacyTimeFields.push({ path: doc.path, field: 'exitTime' });
   const optionalNumericInputs = { strike:data.strike, exit:data.exit, pnl:data.pnl, sl:data.sl, tp:data.tp };
   const invalidOptionalNumbers = Object.entries(optionalNumericInputs)
     .filter(([, value]) => hasValue(value) && databaseNumber(value) === null)
@@ -393,27 +408,40 @@ const tradePlans = tradeDocs.map((doc) => {
   const deletedAt = bool(data.deleted)
     ? timestamp(data.deletedAt) || timestamp(doc.updateTime) || manifestCreatedAt
     : null;
+  const otherRequiredFieldsValid = Boolean(required.tradeDate && required.direction && required.entry !== null && required.entry > 0 &&
+    required.quantity !== null && required.quantity > 0 && !invalidOptionalNumbers.length &&
+    (!suppliedEntryTime || validTime(data.entryTime) || entryTimeKnownCorrupt) &&
+    (!suppliedExitTime || validTime(data.exitTime) || exitTimeKnownCorrupt) &&
+    (!suppliedExpiry || validDate(data.expiry)) && (!bool(data.deleted) || deletedAt));
+  const deletionTombstoneWithoutBody = bool(data.deleted) && Boolean(deletedAt) &&
+    Object.keys(data).every((key) => key === 'deleted' || key === 'deletedAt');
+  const rawOnlyReason = deletionTombstoneWithoutBody ? 'deletion-tombstone-without-body'
+    : (!required.symbol && otherRequiredFieldsValid ? 'missing-symbol' : null);
   if (!required.symbol || !required.tradeDate || !required.direction || required.entry === null || required.entry <= 0 ||
       required.quantity === null || required.quantity <= 0 ||
       invalidOptionalNumbers.length ||
-      (suppliedEntryTime && !validTime(data.entryTime)) ||
-      (suppliedExitTime && !validTime(data.exitTime)) ||
+      (suppliedEntryTime && !validTime(data.entryTime) && !entryTimeKnownCorrupt) ||
+      (suppliedExitTime && !validTime(data.exitTime) && !exitTimeKnownCorrupt) ||
       (suppliedExpiry && !validDate(data.expiry)) ||
       (bool(data.deleted) && !deletedAt)) {
+    if (rawOnlyReason) {
+      unmaterializedTrades.push({ path: doc.path, reason: rawOnlyReason });
+      return [];
+    }
     invalidTrades.push({ path: doc.path, required, invalidOptionalNumbers });
+    return [];
   }
-  const source = sourceInfo(data);
   const legacyAccountId = text(data.accountId);
   let brokerLegacyId = text(data.brokerDocId);
   if (!brokerLegacyId && source.sourceSystem === 'zerodha') brokerLegacyId = 'zerodha';
   if (!brokerLegacyId && source.sourceSystem === 'ctrader') {
     brokerLegacyId = text(data.ctraderAccountId) ? `ctrader_${text(data.ctraderAccountId)}` : 'ctrader';
   }
-  return {
+  return [{
     id: deterministicUuid(`trade:${doc.path}`), uid, legacyDocId, path: doc.path, data,
     ...required, ...source, legacyAccountId, brokerLegacyId,
     createTime: timestamp(doc.createTime), updateTime: timestamp(doc.updateTime), deletedAt,
-  };
+  }];
 });
 if (invalidTrades.length) throw new Error(`Invalid required trade fields: ${JSON.stringify(invalidTrades.slice(0, 20))}`);
 const tradeByLegacy = new Map(tradePlans.map((trade) => [`${trade.uid}:${trade.legacyDocId}`, trade]));
@@ -477,7 +505,7 @@ if (unresolvedScreenshots.length) {
   throw new Error(`Unresolved screenshots block promotion: ${JSON.stringify(unresolvedScreenshots.slice(0, 20))}`);
 }
 const unreferencedStorageObjects = [...storageIndex.keys()].filter((name) => !referencedStorageObjects.has(name));
-if (unreferencedStorageObjects.length) {
+if (unreferencedStorageObjects.length && args['unreferenced-storage'] !== 'archive') {
   throw new Error(`Unreferenced Firebase Storage screenshots require reviewed disposition: ${JSON.stringify(unreferencedStorageObjects.slice(0, 50))}`);
 }
 const screenshotBytesByUid = new Map();
@@ -528,6 +556,13 @@ for (const [uid, local] of Object.entries(browserLocal.users)) {
 const planSummary = {
   users: authUsers.size, rawFirestoreDocuments: docs.length, settings: settingsByUid.size, accounts: accountPlans.length,
   brokersDisconnected: brokerPlans.length, trades: tradePlans.length,
+  unmaterializedTrades: unmaterializedTrades.length,
+  unmaterializedTradeRecords: unmaterializedTrades,
+  normalizedLegacyTimeFields: normalizedLegacyTimeFields.length,
+  normalizedLegacyTimeRecords: normalizedLegacyTimeFields,
+  unreferencedStorageDisposition: unreferencedStorageObjects.length ? 'archive-only-in-verified-source-bundle' : 'none',
+  unreferencedStorageObjects: unreferencedStorageObjects.length,
+  unreferencedStorageRecords: unreferencedStorageObjects,
   archivedTrades: tradePlans.filter((trade) => bool(trade.data.deleted)).length,
   screenshots: screenshotPlans.length, notifications: notificationDocs.length,
   pendingDuplicates: duplicateDocs.length, orders: orderDocs.length,

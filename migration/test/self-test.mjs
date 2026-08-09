@@ -166,6 +166,58 @@ try {
   assert.equal(promotionPlan.planSummary?.accounts, 2);
   assert.equal(promotionPlan.planSummary?.browserSettings, 1);
   assert.equal(promotionPlan.planSummary?.screenshots, 5);
+
+  const brokerMappingBundle = await writeBundle('broker-mapping-precedence', [
+    {
+      path: 'users/firebase-user-1/meta/settings',
+      data: { accounts: [{ id: 'acct_1', name: 'Primary' }] },
+      createTime: null,
+      updateTime: null,
+    },
+    {
+      path: 'users/firebase-user-1/brokers/ctrader_123',
+      data: { mapToEdgebookAccountId: 'stale-missing-account' },
+      createTime: null,
+      updateTime: null,
+    },
+    {
+      path: 'users/firebase-user-1/trades/deletion-tombstone',
+      data: { deleted: true, deletedAt: '2026-08-08T10:00:00.000Z' },
+      createTime: null,
+      updateTime: null,
+    },
+    {
+      path: 'users/firebase-user-1/trades/missing-symbol',
+      data: { date: '2026-08-08', direction: 'Long', entry: 100, size: 1 },
+      createTime: null,
+      updateTime: null,
+    },
+    {
+      path: 'users/firebase-user-1/trades/known-zerodha-time-corruption',
+      data: {
+        symbol: 'NIFTY', date: '2026-08-08', direction: 'Long', entry: 100, size: 1,
+        source: 'csv', broker: 'zerodha', entryTime: '2026 ', exitTime: '2026 ',
+      },
+      createTime: null,
+      updateTime: null,
+    },
+  ]);
+  const brokerMappingBrowser = resolve(temporaryRoot, 'broker-mapping-browser.json');
+  await writeFile(brokerMappingBrowser, `${canonicalJson({ users: { 'firebase-user-1': {
+    settings: { accounts: [{ id: 'acct_1', name: 'Primary' }], brokerAccountMap: { ctrader: 'acct_1' } },
+    moods: [], dailyJournal: {},
+  } } })}\n`, { mode: 0o600 });
+  const brokerMappingPromotion = run(promote, [
+    '--bundle', brokerMappingBundle.bundle, '--browser-local', brokerMappingBrowser,
+  ]);
+  const brokerMappingPlan = JSON.parse(brokerMappingPromotion.stdout.match(/\{[\s\S]*\}/)?.[0] || '{}');
+  assert.equal(brokerMappingPlan.planSummary?.brokersDisconnected, 1,
+    'browser provider mapping must override a stale connection-document account mapping');
+  assert.equal(brokerMappingPlan.planSummary?.unmaterializedTrades, 2,
+    'irrecoverable deletion tombstones and missing-symbol rows must remain in the raw archive only');
+  assert.equal(brokerMappingPlan.planSummary?.normalizedLegacyTimeFields, 2,
+    'known Zerodha year-only time corruption must normalize to null while raw source remains archived');
+
   const missingBrowserLocal = resolve(temporaryRoot, 'missing-browser-user.json');
   await writeFile(missingBrowserLocal, `${canonicalJson({ users: {} })}\n`, { mode: 0o600 });
   run(promote, ['--bundle', valid.bundle, '--browser-local', missingBrowserLocal], { failure: true });

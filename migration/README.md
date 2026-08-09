@@ -200,7 +200,12 @@ Embedded image data URLs and checksummed Firebase Storage downloads are copied t
 deterministic private object keys. Existing objects are accepted only when their
 SHA-256 matches. Unknown external/missing/unsupported screenshot data blocks the
 promotion. Exported Storage objects with no trade reference also block for a
-reviewed disposition rather than being silently dropped. A database rollback
+reviewed disposition rather than being silently dropped. When those objects
+are confirmed abandoned uploads or belong only to raw-only corrupt trade
+records, preserve the checksum-verified source bundle in protected backup
+storage and pass `--unreferenced-storage archive`; the promotion report records
+every archive-only object name. They are not exposed as live trade files or
+deleted from the source bundle. A database rollback
 may leave checksum-addressed orphan files, which
 are safe for an idempotent retry and must be inventoried before cleanup.
 

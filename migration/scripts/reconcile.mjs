@@ -225,6 +225,31 @@ function canonicalTrade(data, deletedFallback = null) {
 function fingerprintData(data, deletedFallback = null) {
   return sha256Text(canonicalJson(canonicalTrade(data, deletedFallback)));
 }
+function classifyTradeMaterialization(data, deletedFallback = null) {
+  const canonical = canonicalTrade(data, deletedFallback);
+  const source = sourceInfo(data);
+  const supplied = field => {
+    const value = scalar(data?.[field]);
+    return value !== null && value !== undefined && !(typeof value === 'string' && value.trim() === '');
+  };
+  const optionalNumbersValid = ['strike', 'exit', 'pnl', 'sl', 'tp']
+    .every(field => !supplied(field) || numeric(data[field]) !== null);
+  const knownCorruptLegacyTime = field => source.sourceSystem === 'zerodha' &&
+    /^20\d{2}\s*$/.test(String(scalar(data?.[field])));
+  const otherRequiredFieldsValid = Boolean(canonical.date && ['Long', 'Short'].includes(canonical.direction) &&
+    canonical.entry !== null && canonical.entry > 0 && canonical.size !== null && canonical.size > 0 &&
+    optionalNumbersValid && (!supplied('entryTime') || canonical.entryTime || knownCorruptLegacyTime('entryTime')) &&
+    (!supplied('exitTime') || canonical.exitTime || knownCorruptLegacyTime('exitTime')) &&
+    (!supplied('expiry') || canonical.expiry) &&
+    (!canonical.deleted || canonical.deletedAt));
+  const valid = Boolean(canonical.symbol && otherRequiredFieldsValid);
+  if (valid) return { materialize: true, reason: null };
+  const deletionTombstoneWithoutBody = canonical.deleted && Boolean(canonical.deletedAt) &&
+    Object.keys(data).every(key => key === 'deleted' || key === 'deletedAt');
+  if (deletionTombstoneWithoutBody) return { materialize: false, reason: 'deletion-tombstone-without-body' };
+  if (!canonical.symbol && otherRequiredFieldsValid) return { materialize: false, reason: 'missing-symbol' };
+  throw new Error('source contains an invalid trade that was not eligible for raw-only preservation');
+}
 function compoundKey(...parts) {
   return canonicalJson(parts);
 }
@@ -264,6 +289,7 @@ function summarize(trades, deletedFallbacks = new Map()) {
 const sourceTrades = new Map();
 const sourceTradeDeletedFallbacks = new Map();
 const sourceTradeFiles = new Map();
+const sourceUnmaterializedTrades = new Map();
 const sourceRawDocuments = new Map();
 const sourceMaterializedDocuments = new Set();
 const sourceSettingsDocuments = new Map();
@@ -277,8 +303,14 @@ for await (const { value } of readNdjson(sourceFile)) {
     sourceMaterializedDocuments.add(value.path);
   }
   if (/^users\/[^/]+\/trades\/[^/]+$/.test(value.path)) {
-    sourceTrades.set(value.path, value.data);
-    sourceTradeDeletedFallbacks.set(value.path, normalizedTimestamp(value.updateTime) || normalizedTimestamp(manifest.createdAt));
+    const deletedFallback = normalizedTimestamp(value.updateTime) || normalizedTimestamp(manifest.createdAt);
+    const classification = classifyTradeMaterialization(value.data, deletedFallback);
+    if (classification.materialize) {
+      sourceTrades.set(value.path, value.data);
+      sourceTradeDeletedFallbacks.set(value.path, deletedFallback);
+    } else {
+      sourceUnmaterializedTrades.set(value.path, classification.reason);
+    }
   }
   const settingsMatch = value.path.match(/^users\/([^/]+)\/meta\/settings$/);
   if (settingsMatch) sourceSettingsDocuments.set(settingsMatch[1], value.data);
@@ -362,8 +394,9 @@ for (const document of sourceBrokerDocuments) {
   const provider = legacyId.startsWith('ctrader')
     ? 'ctrader'
     : legacyId === 'zerodha' ? 'zerodha' : String(first(document.data, 'provider') || legacyId);
-  const mappedLegacyAccountId = first(document.data, 'mapToEdgebookAccountId')
-    || sourceSettings.get(uid)?.brokerAccountMap?.[legacyId]
+  const mappedLegacyAccountId = sourceSettings.get(uid)?.brokerAccountMap?.[legacyId]
+    || sourceSettings.get(uid)?.brokerAccountMap?.[provider]
+    || first(document.data, 'mapToEdgebookAccountId')
     || null;
   sourceBrokers.set(compoundKey(uid, legacyId), {
     provider,
@@ -527,6 +560,10 @@ const comparisonReport = (source, target, comparison) => ({
 const report = {
   generatedAt: new Date().toISOString(),
   sourceSummary,
+  unmaterializedSourceTrades: {
+    count: sourceUnmaterializedTrades.size,
+    records: truncate([...sourceUnmaterializedTrades].map(([path, reason]) => ({ path, reason }))),
+  },
   targetSummary,
   summaryMatch,
   trades: {
