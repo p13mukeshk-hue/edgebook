@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Edge Book backup schedule
+
+[Timer]
+OnCalendar=*-*-* 02:35:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=edgebook-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -7,16 +7,6 @@ yarn-error.log*
 firebase-debug.log*
 firebase-debug.*.log*
 
-# Firebase cache
-.firebase/
-
-# Firebase config
-
-# Uncomment this if you'd like others to create their own Firebase project.
-# For a team working on the same Firebase project(s), it is recommended to leave
-# it commented so all members can deploy to the same project(s) in .firebaserc.
-# .firebaserc
-
 # Runtime data
 pids
 *.pid
@@ -65,10 +55,15 @@ node_modules/
 # dotenv environment variables file — includes secrets, NEVER commit
 .env
 .env.*
-functions/.env
-functions/.env.*
-# Allow .env.example (no secrets — documents required vars)
-!functions/.env.example
+deploy/vps/env/*.env
+!server/.env.example
+!deploy/vps/env/*.env.example
+
+# Migration exports contain private user records and must stay outside Git.
+migration/exports/
+migration/staging/
+browser-local*.json
+firebase-export*.json
 
 # dataconnect generated files
 .dataconnect

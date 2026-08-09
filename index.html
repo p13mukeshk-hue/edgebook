@@ -192,19 +192,21 @@ footer{padding:40px 48px;border-top:0.5px solid var(--border);display:grid;grid-
 .fade-up{opacity:0;transform:translateY(24px);transition:opacity .6s ease,transform .6s ease}
 .fade-up.visible{opacity:1;transform:translateY(0)}
 </style>
-<!-- Auto-redirect signed-in users straight to the app -->
-<script type="module">
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-app.js';
-import { getAuth, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.7.1/firebase-auth.js';
-const _app = initializeApp({
-  apiKey:"AIzaSyD90Rxycs1xHHWTK_8U8ZV7dH5qswtvaP4",
-  authDomain:"edgebook-2dce2.firebaseapp.com",
-  projectId:"edgebook-2dce2",
-  storageBucket:"edgebook-2dce2.firebasestorage.app",
-  messagingSenderId:"643434583515",
-  appId:"1:643434583515:web:1718b5dad6dcb5233903fe"
+<!-- Auto-redirect signed-in users through the VPS-only auth service. -->
+<script>
+window.EDGEBOOK_CONFIG = Object.freeze({
+  apiBase:'/api', googleClientId:'',
+  ...(window.EDGEBOOK_CONFIG||{})
 });
-onAuthStateChanged(getAuth(_app), user => {
+</script>
+<script type="module">
+import { createApiClient } from './client/api-client.js';
+import { createAuthAdapter } from './client/auth-adapter.js';
+const adapter=await createAuthAdapter({
+  api:createApiClient({baseUrl:window.EDGEBOOK_CONFIG.apiBase}),
+  config:window.EDGEBOOK_CONFIG
+});
+adapter.onAuthStateChanged(user => {
   if (user) window.location.replace('/app.html');
 });
 </script>
@@ -238,7 +240,7 @@ onAuthStateChanged(getAuth(_app), user => {
     <a href="/app.html" class="btn-hero btn-hero-primary">Start for free →</a>
     <a href="#features" class="btn-hero btn-hero-ghost">See features</a>
   </div>
-  <p class="hero-note">Free forever · No credit card · Works with Zerodha, Angel One, Upstox & more</p>
+  <p class="hero-note">Free forever · No credit card · Import broker CSV exports</p>
 
   <!-- HERO SCENE -->
   <div class="hero-scene" id="heroScene">
@@ -348,7 +350,7 @@ onAuthStateChanged(getAuth(_app), user => {
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><path d="M4 6h20M4 10h20" stroke="#1D9E75" stroke-width="1" stroke-linecap="round" opacity=".3"/><rect x="2" y="2" width="24" height="16" rx="3" stroke="#1D9E75" stroke-width="1.5" opacity=".6"/><path d="M9 22l3 4 3-4" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="18" x2="12" y2="26" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round"/></svg>
         </div>
         <div class="feat-title">Broker CSV import</div>
-        <div class="feat-desc">Import directly from Zerodha, Angel One, Upstox, Fyers, Groww. Auto-detects column formats. No manual entry needed.</div>
+        <div class="feat-desc">Import CSV exports from Zerodha, Angel One, Upstox, Fyers and Groww. Edgebook auto-detects supported column formats.</div>
         <span class="feat-tag">auto-detection</span>
       </div>
       <div class="feat">
@@ -356,7 +358,7 @@ onAuthStateChanged(getAuth(_app), user => {
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="2" y="8" width="14" height="17" rx="3" stroke="#1D9E75" stroke-width="1.5" opacity=".5"/><rect x="10" y="3" width="14" height="17" rx="3" stroke="#1D9E75" stroke-width="1.5" fill="#0f1420"/><line x1="14" y1="8" x2="20" y2="8" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round" opacity=".6"/><line x1="14" y1="11" x2="21" y2="11" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round" opacity=".4"/><line x1="14" y1="14" x2="19" y2="14" stroke="#1D9E75" stroke-width="1.2" stroke-linecap="round" opacity=".3"/></svg>
         </div>
         <div class="feat-title">Multi-account</div>
-        <div class="feat-desc">Track your prop firm, Zerodha and international accounts together. Live FX conversion across USD, INR, EUR and GBP.</div>
+        <div class="feat-desc">Track Indian, prop-firm and international trading accounts together, with account-level currency conversion.</div>
         <span class="feat-tag">fx conversion</span>
       </div>
       <div class="feat">
@@ -385,7 +387,7 @@ onAuthStateChanged(getAuth(_app), user => {
       <span class="built-chip accent">F&amp;O traders</span>
       <span class="built-chip">Equity intraday</span>
       <span class="built-chip">Commodity</span>
-      <span class="built-chip">Zerodha users</span>
+      <span class="built-chip">Broker CSV imports</span>
       <span class="built-chip">Angel One</span>
       <span class="built-chip">Upstox</span>
       <span class="built-chip">Prop firm traders</span>
