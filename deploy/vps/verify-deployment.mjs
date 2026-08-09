@@ -113,6 +113,7 @@ requireText(nginx, /proxy_set_header Host edgebook\.trade;/, 'canonical upstream
 requireText(nginx, /proxy_set_header X-Forwarded-Proto https;/, 'fixed HTTPS forwarded protocol');
 rejectText(nginx, /proxy_set_header Host \$host;|proxy_set_header X-Forwarded-Proto \$scheme;/, 'client-derived canonical upstream origin');
 requireText(nginx, /Content-Security-Policy/, 'production CSP');
+requireText(nginx, /Permissions-Policy\s+"camera=\(\), microphone=\(self\), geolocation=\(\)"/, 'first-party-only microphone permission for journal dictation');
 rejectText(nginx, /cloudfunctions\.net|firebaseio\.com|firebasestorage|www\.gstatic\.com\/firebasejs/, 'Firebase/Cloud Functions origin in production proxy policy');
 
 const build = read('deploy/vps/scripts/build-public.sh');

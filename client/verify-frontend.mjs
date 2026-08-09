@@ -311,6 +311,17 @@ requireMatch(app, /segment:\{borderColor:[\s\S]{0,180}?EQUITY_POS_COLOR[\s\S]{0,
 requireMatch(app, /backgroundColor:equityFillGradient/, 'zero-aware gradual equity fill');
 requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 'empty equity curve guidance');
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
+
+// Daily Journal dictation must remain a review-first, browser-native feature:
+// append to existing notes, expose live status, and never save automatically.
+const journalVoiceSource = sourceBetween('let djVoiceRecognition', 'function djStorageKey');
+requireMatch(app, /id=["']dj-voice-btn["'][\s\S]{0,180}?djToggleVoiceJournal\(\)/, 'visible Daily Journal voice control');
+requireMatch(app, /id=["']dj-voice-status["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/, 'accessible live dictation status');
+requireMatch(journalVoiceSource, /window\.SpeechRecognition\|\|window\.webkitSpeechRecognition/, 'browser speech-recognition compatibility');
+requireMatch(journalVoiceSource, /djVoiceBaseText=textarea\.value/, 'voice transcript preserves existing journal notes');
+requireMatch(journalVoiceSource, /textarea\.value=djJoinVoiceText/, 'voice transcript appends through the safe text-value boundary');
+requireMatch(journalVoiceSource, /Transcript added[^\n]*review it[^\n]*save the entry/, 'review-before-save dictation completion state');
+rejectMatch(journalVoiceSource, /djAutoSave|djSaveEntry/, 'automatic persistence from voice dictation');
 const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
 const equityProjectionContext = {};
 vm.runInNewContext(`
@@ -1265,6 +1276,7 @@ try {
       djFmtDate: value => value,
       djScoreRow: () => '',
       djYnRow: () => '',
+      djRefreshVoiceControls() {},
       cur: () => '$',
       acctCur: () => '$',
     },
@@ -1293,6 +1305,77 @@ try {
   assertInlineArgument(html, 'djOpenEntry', maliciousIdentifier, 'Daily-journal feed action');
 } catch (error) {
   failures.push(`Daily-journal XSS fixture failed: ${error.message}`);
+}
+
+try {
+  const classSet = values => {
+    const set = new Set(values);
+    return {
+      add: (...items) => items.forEach(item => set.add(item)),
+      remove: (...items) => items.forEach(item => set.delete(item)),
+      toggle: (item, force) => {
+        if (force === true) { set.add(item); return true; }
+        if (force === false) { set.delete(item); return false; }
+        if (set.has(item)) { set.delete(item); return false; }
+        set.add(item); return true;
+      },
+      contains: item => set.has(item),
+    };
+  };
+  const voiceLabel = { textContent: '' };
+  const voiceIcon = { className: '' };
+  const voiceButton = {
+    disabled: false,
+    classList: classSet(['dj-voice-btn']),
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    querySelector(selector) { return selector === 'span' ? voiceLabel : selector === 'i' ? voiceIcon : null; },
+  };
+  const voiceStatus = { textContent: '', classList: classSet(['dj-voice-status']) };
+  const voiceNotes = { value: 'Existing note.', readOnly: false };
+  const voiceElements = new Map([
+    ['dj-voice-btn', voiceButton],
+    ['dj-voice-status', voiceStatus],
+    ['dj-notes', voiceNotes],
+  ]);
+  const recognizers = [];
+  class FakeSpeechRecognition {
+    constructor() { recognizers.push(this); }
+    start() { this.started = true; }
+    stop() { this.stopped = true; }
+  }
+  const { exports: voice } = evaluateSecurityFixture(
+    journalVoiceSource,
+    {
+      document: { getElementById: id => voiceElements.get(id) || null },
+      window: { SpeechRecognition: FakeSpeechRecognition },
+      navigator: { language: 'en-IN' },
+      djDate: '2026-08-09',
+      showToast() {},
+    },
+    '{djToggleVoiceJournal,djStopVoiceJournal,djJoinVoiceText,djVoiceErrorMessage}',
+  );
+  voice.djToggleVoiceJournal();
+  const recognition = recognizers[0];
+  const finalResult = [{ transcript: 'Waited for confirmation' }];
+  finalResult.isFinal = true;
+  recognition.onresult({ resultIndex: 0, results: [finalResult] });
+  const interimResult = [{ transcript: 'while risk stayed small' }];
+  interimResult.isFinal = false;
+  recognition.onresult({ resultIndex: 0, results: [interimResult] });
+  const expectedTranscript = 'Existing note.\nWaited for confirmation while risk stayed small';
+  if (!recognition.started || !voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
+    failures.push('Daily-journal dictation did not append its live transcript without overwriting existing notes');
+  }
+  voice.djStopVoiceJournal();
+  if (!recognition.stopped || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'false' || !/review it.*save/i.test(voiceStatus.textContent)) {
+    failures.push('Daily-journal dictation did not return to an editable review-before-save state');
+  }
+  if (!/permission/i.test(voice.djVoiceErrorMessage('not-allowed'))) {
+    failures.push('Daily-journal dictation does not explain blocked microphone permission');
+  }
+} catch (error) {
+  failures.push(`Daily-journal voice fixture failed: ${error.message}`);
 }
 
 const coachingFunctions = app.match(/function coachingLabel[\s\S]*?(?=\nasync function openAIReport)/)?.[0];

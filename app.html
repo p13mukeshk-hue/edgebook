@@ -880,10 +880,21 @@ body.light .dj-ta{background:var(--bg3)}
 .dj-notes-wrap{padding:20px 22px;background:var(--bg);border-top:1px solid var(--border2)}
 body.light .dj-notes-wrap{background:#f7f0e8}
 .dj-notes-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.dj-voice-tools{display:flex;align-items:center;justify-content:flex-end;gap:9px;flex-wrap:wrap}
+.dj-voice-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:7px 12px;border-radius:9px;border:1px solid var(--border2);background:var(--bg2);color:var(--text2);font-family:var(--font-body);font-size:11px;font-weight:600;cursor:pointer;transition:.18s}
+.dj-voice-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent2);box-shadow:0 0 0 2px var(--accent-glow)}
+.dj-voice-btn.dj-listening{border-color:rgba(255,94,106,.55);background:var(--red-bg);color:var(--red)}
+.dj-voice-btn.dj-listening i{animation:djMicPulse 1.15s ease-in-out infinite}
+.dj-voice-btn:disabled{cursor:not-allowed;opacity:.48}
+.dj-voice-status{max-width:360px;font-size:10px;line-height:1.4;color:var(--text3);text-align:right}
+.dj-voice-status.dj-listening{color:var(--red);font-weight:600}
+.dj-voice-status.dj-ready{color:var(--green)}
+@keyframes djMicPulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.18);opacity:.68}}
 .dj-notes-ta{width:100%;padding:14px 16px;background:var(--bg2);border:1px solid var(--accent);border-radius:12px;color:var(--text);font-family:var(--font-body);font-size:14px;resize:none;line-height:1.8;outline:none;transition:.2s}
 body.light .dj-notes-ta{background:var(--bg3);border-color:var(--accent)}
 .dj-notes-ta:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
 .dj-notes-ta::placeholder{color:var(--text3)}
+@media(max-width:760px){.dj-notes-head{align-items:flex-start;gap:10px;flex-direction:column}.dj-voice-tools{justify-content:flex-start}.dj-voice-status{text-align:left;max-width:none}}
 
 /* feed */
 .dj-feed-head{padding:12px 20px;border-bottom:1px solid var(--border2);display:flex;align-items:center;justify-content:space-between;background:var(--bg2)}
@@ -5221,6 +5232,7 @@ function confirmResetSettings(){ showConfirm('Reset settings?','All customisatio
 ══════════════════════════════════════════════════════ */
 const PAGE_TITLES={dashboard:'Dashboard',journal:'Trade Journal',dailyjournal:'Daily Journal',analytics:'Analytics',mood:'Mood Tracker',calendar:'Calendar',heatmap:'Trade Heatmap',drawdown:'Drawdown Tracker',risk:'Risk Manager',settings:'Settings'};
 function navigate(page,el){
+  if(page!=='dailyjournal') djStopVoiceJournal({quiet:true});
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   el?.classList.add('active');
   document.querySelectorAll('.page-content').forEach(p=>p.classList.remove('active'));
@@ -9219,6 +9231,131 @@ let djDate = TODAY; // currently viewed date
 const DJ_MOODS_PRE  = ['Focused','Calm','Anxious','Tired','Excited','Stressed','Confident','Neutral'];
 const DJ_MOODS_EOD  = ['Calm','Focused','Confident','Frustrated','Anxious','Greedy','Disappointed','Satisfied'];
 
+let djVoiceRecognition = null;
+let djVoiceListening = false;
+let djVoiceTargetDate = null;
+let djVoiceBaseText = '';
+let djVoiceFinalText = '';
+let djVoiceInterimText = '';
+
+function djSpeechRecognitionCtor(){
+  return window.SpeechRecognition||window.webkitSpeechRecognition||null;
+}
+function djJoinVoiceText(base, transcript){
+  const existing=String(base||'');
+  const spoken=String(transcript||'').replace(/\s+/g,' ').trim();
+  if(!spoken) return existing;
+  if(!existing) return spoken;
+  return existing+(/\s$/.test(existing)?'':'\n')+spoken;
+}
+function djSetVoiceStatus(message,state=''){
+  const status=document.getElementById('dj-voice-status');
+  if(!status) return;
+  status.textContent=message;
+  status.classList.remove('dj-listening','dj-ready');
+  if(state) status.classList.add(state);
+}
+function djRefreshVoiceControls(){
+  const button=document.getElementById('dj-voice-btn');
+  if(!button) return;
+  const supported=!!djSpeechRecognitionCtor();
+  const active=djVoiceListening&&djVoiceTargetDate===djDate;
+  button.disabled=!supported;
+  button.classList.toggle('dj-listening',active);
+  button.setAttribute('aria-pressed',String(active));
+  button.setAttribute('aria-label',active?'Stop voice journal':'Start voice journal');
+  const label=button.querySelector('span');
+  if(label) label.textContent=active?'Stop listening':'Start voice journal';
+  const icon=button.querySelector('i');
+  if(icon) icon.className=active?'fa-solid fa-stop':'fa-solid fa-microphone';
+  if(!supported){
+    djSetVoiceStatus('Voice dictation is not supported in this browser. You can still type your entry.');
+  }else if(active){
+    djSetVoiceStatus('Listening… speak naturally. Your existing notes are safe.','dj-listening');
+  }
+}
+function djRenderVoiceTranscript(){
+  if(djVoiceTargetDate!==djDate) return;
+  const textarea=document.getElementById('dj-notes');
+  if(!textarea) return;
+  textarea.value=djJoinVoiceText(djVoiceBaseText,`${djVoiceFinalText} ${djVoiceInterimText}`);
+}
+function djVoiceErrorMessage(code){
+  if(code==='not-allowed'||code==='service-not-allowed') return 'Microphone permission was blocked. Allow it for Edgebook and try again.';
+  if(code==='audio-capture') return 'No microphone was detected. Check your microphone and try again.';
+  if(code==='network') return 'Speech recognition could not connect. Your existing notes are unchanged.';
+  if(code==='no-speech') return 'No speech was detected. Tap the microphone when you are ready.';
+  return 'Dictation stopped unexpectedly. Any captured transcript is still available to review.';
+}
+function djFinishVoiceJournal(message,state='dj-ready'){
+  djVoiceListening=false;
+  djVoiceRecognition=null;
+  const textarea=document.getElementById('dj-notes');
+  if(textarea) textarea.readOnly=false;
+  djRefreshVoiceControls();
+  djSetVoiceStatus(message,state);
+}
+function djStopVoiceJournal({quiet=false}={}){
+  const recognition=djVoiceRecognition;
+  const hadTranscript=!!(`${djVoiceFinalText} ${djVoiceInterimText}`.trim());
+  djVoiceListening=false;
+  djVoiceRecognition=null;
+  try{recognition?.stop();}catch{}
+  const textarea=document.getElementById('dj-notes');
+  if(textarea) textarea.readOnly=false;
+  djRefreshVoiceControls();
+  if(!quiet){
+    djSetVoiceStatus(hadTranscript?'Transcript added — review it, then save the entry.':'Listening stopped. No transcript was added.',hadTranscript?'dj-ready':'');
+  }
+}
+function djToggleVoiceJournal(){
+  if(djVoiceListening){djStopVoiceJournal();return;}
+  const Recognition=djSpeechRecognitionCtor();
+  const textarea=document.getElementById('dj-notes');
+  if(!Recognition||!textarea){
+    djRefreshVoiceControls();
+    showToast('Voice dictation is not available in this browser','info');
+    return;
+  }
+  const recognition=new Recognition();
+  djVoiceRecognition=recognition;
+  djVoiceListening=true;
+  djVoiceTargetDate=djDate;
+  djVoiceBaseText=textarea.value;
+  djVoiceFinalText='';
+  djVoiceInterimText='';
+  textarea.readOnly=true;
+  recognition.continuous=true;
+  recognition.interimResults=true;
+  recognition.maxAlternatives=1;
+  recognition.lang=navigator.language||'en-IN';
+  recognition.onresult=event=>{
+    if(djVoiceRecognition!==recognition||djVoiceTargetDate!==djDate) return;
+    let interim='';
+    for(let i=event.resultIndex;i<event.results.length;i++){
+      const text=event.results[i]?.[0]?.transcript||'';
+      if(event.results[i].isFinal) djVoiceFinalText+=text+' ';
+      else interim+=text+' ';
+    }
+    djVoiceInterimText=interim;
+    djRenderVoiceTranscript();
+  };
+  recognition.onerror=event=>{
+    if(djVoiceRecognition!==recognition) return;
+    djFinishVoiceJournal(djVoiceErrorMessage(event.error),event.error==='no-speech'?'':'dj-ready');
+  };
+  recognition.onend=()=>{
+    if(djVoiceRecognition!==recognition) return;
+    const hadTranscript=!!(`${djVoiceFinalText} ${djVoiceInterimText}`.trim());
+    djFinishVoiceJournal(hadTranscript?'Transcript added — review it, then save the entry.':'Listening ended. No transcript was added.',hadTranscript?'dj-ready':'');
+  };
+  djRefreshVoiceControls();
+  try{recognition.start();}
+  catch{
+    djFinishVoiceJournal('Could not start dictation. Please try again.','');
+  }
+}
+
 function djStorageKey(){ return `tradedesk_dailyjournal_${DataStore._uid||'guest'}`; }
 function djDirtyStorageKey(){ return `edgebook_dailyjournal_dirty_${DataStore._uid||'guest'}`; }
 function djConflictStorageKey(){ return `edgebook_dailyjournal_conflicts_${DataStore._uid||'guest'}`; }
@@ -9369,12 +9506,13 @@ function renderDailyJournal(){
 }
 
 function djNavDate(dir){
+  djStopVoiceJournal({quiet:true});
   const d = new Date(djDate);
   d.setDate(d.getDate()+dir);
   djDate = d.toISOString().split('T')[0];
   renderDailyJournal();
 }
-function djGoToday(){ djDate=TODAY; renderDailyJournal(); }
+function djGoToday(){ djStopVoiceJournal({quiet:true}); djDate=TODAY; renderDailyJournal(); }
 
 /* Auto P&L stats for a given date */
 function djDayStats(date){
@@ -9490,10 +9628,17 @@ function renderDjEntry(){
     <div class="dj-notes-wrap">
       <div class="dj-notes-head">
         <div class="dj-sec-label" style="margin-bottom:0"><i class="fa-solid fa-notebook" style="font-size:11px"></i> Notes &amp; thoughts</div>
+        <div class="dj-voice-tools">
+          <span class="dj-voice-status" id="dj-voice-status" role="status" aria-live="polite">Your browser handles speech; Edgebook stores only text you save.</span>
+          <button type="button" class="dj-voice-btn" id="dj-voice-btn" onclick="djToggleVoiceJournal()" aria-pressed="false" aria-label="Start voice journal" title="Audio is handled by your browser's speech service and is not stored by Edgebook.">
+            <i class="fa-solid fa-microphone"></i><span>Start voice journal</span>
+          </button>
+        </div>
       </div>
       <textarea class="dj-notes-ta" id="dj-notes" rows="6" placeholder="Write freely — thoughts about the market, your mindset, anything on your mind today…">${escapeHtml(entry.notes||'')}</textarea>
     </div>
   `;
+  djRefreshVoiceControls();
 }
 
 function djScoreRow(id, label, current){
@@ -9657,6 +9802,7 @@ function renderDjFeed(){
 }
 
 function djOpenEntry(date){
+  djStopVoiceJournal({quiet:true});
   djDate = date;
   // clear in-memory state fully so previous session data doesn't bleed
   Object.keys(djState).forEach(k=>delete djState[k]);
