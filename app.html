@@ -268,6 +268,12 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 .chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
 .chart-title{font-size:14px;font-weight:500}
 .chart-sub{font-size:12px;color:var(--text3)}
+.equity-chart-wrap{position:relative;height:clamp(300px,25vw,420px)}
+.equity-axis-toggle{display:flex;align-items:center;gap:4px}
+.equity-axis-btn{padding:4px 9px;border-radius:7px;border:1px solid var(--border);background:none;color:var(--text3);font-size:11px;font-family:var(--font-body);cursor:pointer;transition:.15s}
+.equity-axis-btn:hover{background:var(--bg3);color:var(--text)}
+.equity-axis-btn.active{background:var(--text);border-color:var(--text);color:var(--bg2)}
+@media(max-width:560px){.equity-chart-wrap{height:300px}.chart-header.equity-chart-header{align-items:flex-start;gap:10px;flex-direction:column}}
 .donut-legend{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .legend-item{display:flex;align-items:center;justify-content:space-between;font-size:12px}
 .legend-dot{width:8px;height:8px;border-radius:50%;margin-right:8px;flex-shrink:0}
@@ -1094,8 +1100,14 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
         </div>
         <div class="charts-row">
           <div class="chart-card" id="widget-equity">
-            <div class="chart-header"><div><div class="chart-title">Equity Curve</div><div class="chart-sub" id="equity-sub">Cumulative P&amp;L</div></div></div>
-            <div style="position:relative;height:200px"><canvas id="equity-chart"></canvas></div>
+            <div class="chart-header equity-chart-header">
+              <div><div class="chart-title">Equity Curve</div><div class="chart-sub" id="equity-sub">Cumulative P&amp;L</div></div>
+              <div class="equity-axis-toggle" role="group" aria-label="Equity curve horizontal axis">
+                <button type="button" class="equity-axis-btn active" id="equity-axis-date" aria-pressed="true" onclick="setEquityAxisMode('date')">By date</button>
+                <button type="button" class="equity-axis-btn" id="equity-axis-trade" aria-pressed="false" onclick="setEquityAxisMode('trade')">By trade #</button>
+              </div>
+            </div>
+            <div class="equity-chart-wrap"><canvas id="equity-chart" role="img" aria-label="Cumulative profit and loss equity curve"></canvas></div>
           </div>
           <div class="chart-card" id="widget-assetdist">
             <div class="chart-header"><div><div class="chart-title">By Asset Class</div><div class="chart-sub">P&amp;L distribution</div></div></div>
@@ -6715,6 +6727,7 @@ function calcPos(){
 ══════════════════════════════════════════════════════ */
 const CBO={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}};
 const GC='rgba(255,255,255,0.04)', TC='#5a6382';
+let equityAxisMode='date';
 
 function tradeChronologyKey(trade){
   const exact=trade?.exitAt||trade?.entryAt;
@@ -6724,6 +6737,46 @@ function tradeChronologyKey(trade){
   return `${date}T${time}|${trade?.recordId||trade?.id||trade?.externalTradeKey||''}`;
 }
 function compareTradeChronology(left,right){return tradeChronologyKey(left).localeCompare(tradeChronologyKey(right));}
+function equityTradeTimestamp(trade){
+  const exact=trade?.exitAt||trade?.entryAt;
+  const exactMs=exact?Date.parse(exact):NaN;
+  if(Number.isFinite(exactMs))return exactMs;
+  const date=trade?.exitDate||trade?.brokerData?.csvExitDate||trade?.date||'';
+  if(!isRealIsoDate(date))return null;
+  const [year,month,day]=date.split('-').map(Number);
+  const rawTime=trade?.exitTime||trade?.entryTime||trade?.time||'00:00';
+  const match=String(rawTime).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  const hour=match?Number(match[1]):0,minute=match?Number(match[2]):0,second=match?Number(match[3]||0):0;
+  const timestamp=new Date(year,month-1,day,hour,minute,second).getTime();
+  return Number.isFinite(timestamp)?timestamp:null;
+}
+function equityDateTick(timestamp,rangeMs){
+  const date=new Date(Number(timestamp));
+  if(!Number.isFinite(date.getTime()))return '';
+  if(rangeMs<=2*86400000)return date.toLocaleString(undefined,{day:'numeric',month:'short',hour:'numeric',minute:'2-digit'});
+  if(rangeMs>370*86400000)return date.toLocaleDateString(undefined,{month:'short',year:'2-digit'});
+  return date.toLocaleDateString(undefined,{day:'numeric',month:'short'});
+}
+function equityDateTooltip(timestamp){
+  const date=new Date(Number(timestamp));
+  return Number.isFinite(date.getTime())?date.toLocaleString(undefined,{day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit'}):'Date unavailable';
+}
+function equityMoneyTick(value,symbol){
+  const number=Number(value);if(!Number.isFinite(number))return '';
+  const absolute=Math.abs(number),compact=absolute>=1000?`${(absolute/1000).toFixed(absolute%1000?1:0)}k`:Math.round(absolute).toLocaleString();
+  return `${number<0?'-':''}${symbol}${compact}`;
+}
+function updateEquityAxisButtons(mode,dateAvailable=true){
+  ['date','trade'].forEach(value=>{
+    const button=document.getElementById(`equity-axis-${value}`);if(!button)return;
+    const active=value===mode;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));
+    if(value==='date'){button.disabled=!dateAvailable;button.title=dateAvailable?'Plot trades at their actual close time':'Trade dates are unavailable';}
+  });
+}
+function setEquityAxisMode(mode){
+  if(mode!=='date'&&mode!=='trade')return;
+  equityAxisMode=mode;updateEquityAxisButtons(mode);renderCharts();
+}
 function signedMoney(amount,symbol='$',digits=0){
   const value=Number(amount);
   if(!Number.isFinite(value))return '—';
@@ -6822,7 +6875,66 @@ function renderCharts(){
   const pnlSeq=closed.map(t=>{run+=toPnlDisplay(t);return parseFloat(run.toFixed(2));});
   if(CH.equity) CH.equity.destroy();
   const pos=run>=0;
-  CH.equity=new Chart(document.getElementById('equity-chart'),{type:'line',data:{labels:closed.map((_,i)=>'T'+(i+1)),datasets:[{data:pnlSeq,borderColor:pos?'#22c987':'#ff5e6a',backgroundColor:pos?'rgba(34,201,135,0.07)':'rgba(255,94,106,0.07)',tension:.4,fill:true,pointRadius:3}]},options:{...CBO,scales:{x:{grid:{color:GC},ticks:{color:TC,font:{size:10}}},y:{grid:{color:GC},ticks:{color:TC,font:{size:10},callback:v=>displayC+v}}}}});
+  const timestampCount=closed.reduce((count,trade)=>count+(Number.isFinite(equityTradeTimestamp(trade))?1:0),0);
+  const chartAxisMode=equityAxisMode==='date'&&timestampCount?'date':'trade';
+  updateEquityAxisButtons(chartAxisMode,Boolean(timestampCount));
+  let priorTimestamp=null;
+  const equityPoints=closed.map((trade,index)=>{
+    const timestamp=equityTradeTimestamp(trade);
+    let plotTimestamp=timestamp;
+    if(!Number.isFinite(plotTimestamp))plotTimestamp=priorTimestamp===null?Date.now()+index:priorTimestamp+1;
+    if(priorTimestamp!==null&&plotTimestamp<=priorTimestamp)plotTimestamp=priorTimestamp+1;
+    priorTimestamp=plotTimestamp;
+    return {x:chartAxisMode==='date'?plotTimestamp:index+1,y:pnlSeq[index],tradeNumber:index+1,trade,timestamp};
+  });
+  const datedValues=equityPoints.map(point=>point.x),xRange=datedValues.length>1?Math.max(1,datedValues[datedValues.length-1]-datedValues[0]):1;
+  const yMin=Math.min(0,...pnlSeq),yMax=Math.max(0,...pnlSeq),yRange=Math.max(1,yMax-yMin),yPadding=Math.max(1,yRange*.08);
+  CH.equity=new Chart(document.getElementById('equity-chart'),{
+    type:'line',
+    data:{datasets:[{
+      data:equityPoints,
+      parsing:false,
+      borderColor:pos?'#22c987':'#ff5e6a',
+      backgroundColor:pos?'rgba(34,201,135,0.08)':'rgba(255,94,106,0.08)',
+      borderWidth:2.25,
+      cubicInterpolationMode:'monotone',
+      tension:.18,
+      fill:'origin',
+      pointRadius:0,
+      pointHoverRadius:4,
+      pointHitRadius:16
+    }]},
+    options:{
+      ...CBO,
+      normalized:true,
+      interaction:{mode:'nearest',axis:'x',intersect:false},
+      plugins:{
+        ...CBO.plugins,
+        tooltip:{
+          callbacks:{
+            title:items=>{const point=items[0]?.raw;return chartAxisMode==='date'?equityDateTooltip(point?.timestamp):`Trade #${point?.tradeNumber||''}`;},
+            label:context=>{const point=context.raw,trade=point.trade||{},tradePnl=toPnlDisplay(trade);return [`Trade #${point.tradeNumber}${trade.symbol?` · ${trade.symbol}`:''}`,`Trade P&L: ${signedMoney(tradePnl,displayC,2)}`,`Cumulative P&L: ${signedMoney(point.y,displayC,2)}`];}
+          }
+        }
+      },
+      scales:{
+        x:{
+          type:'linear',
+          bounds:'data',
+          grid:{color:GC},
+          title:{display:true,text:chartAxisMode==='date'?'Close date':'Completed trade number',color:TC,font:{size:10,weight:'normal'}},
+          ticks:{color:TC,font:{size:10},autoSkip:true,maxTicksLimit:7,maxRotation:0,callback:value=>chartAxisMode==='date'?equityDateTick(value,xRange):`#${Math.round(value)}`}
+        },
+        y:{
+          suggestedMin:yMin-yPadding,
+          suggestedMax:yMax+yPadding,
+          grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,0.42)':GC,lineWidth:context=>Number(context.tick?.value)===0?1.25:1},
+          title:{display:true,text:`Cumulative P&L (${isAll?'USD':displayC})`,color:TC,font:{size:10,weight:'normal'}},
+          ticks:{color:TC,font:{size:10},maxTicksLimit:7,callback:value=>equityMoneyTick(value,displayC)}
+        }
+      }
+    }
+  });
 
   // Donut: also convert to USD for all-accounts
   const apnl={};
