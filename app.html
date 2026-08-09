@@ -273,6 +273,8 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 .equity-axis-btn{padding:4px 9px;border-radius:7px;border:1px solid var(--border);background:none;color:var(--text3);font-size:11px;font-family:var(--font-body);cursor:pointer;transition:.15s}
 .equity-axis-btn:hover{background:var(--bg3);color:var(--text)}
 .equity-axis-btn.active{background:var(--text);border-color:var(--text);color:var(--bg2)}
+.equity-empty{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;color:var(--text3);font-size:12px;pointer-events:none}
+.equity-empty.visible{display:flex}
 @media(max-width:560px){.equity-chart-wrap{height:300px}.chart-header.equity-chart-header{align-items:flex-start;gap:10px;flex-direction:column}}
 .donut-legend{display:flex;flex-direction:column;gap:8px;margin-top:12px}
 .legend-item{display:flex;align-items:center;justify-content:space-between;font-size:12px}
@@ -1107,7 +1109,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
                 <button type="button" class="equity-axis-btn" id="equity-axis-trade" aria-pressed="false" onclick="setEquityAxisMode('trade')">By trade #</button>
               </div>
             </div>
-            <div class="equity-chart-wrap"><canvas id="equity-chart" role="img" aria-label="Cumulative profit and loss equity curve"></canvas></div>
+            <div class="equity-chart-wrap"><canvas id="equity-chart" role="img" aria-label="Cumulative profit and loss equity curve"></canvas><div class="equity-empty" id="equity-empty">Log a completed trade to start your equity curve.</div></div>
           </div>
           <div class="chart-card" id="widget-assetdist">
             <div class="chart-header"><div><div class="chart-title">By Asset Class</div><div class="chart-sub">P&amp;L distribution</div></div></div>
@@ -6727,6 +6729,7 @@ function calcPos(){
 ══════════════════════════════════════════════════════ */
 const CBO={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}};
 const GC='rgba(255,255,255,0.04)', TC='#5a6382';
+const EQUITY_POS_COLOR='#22c987', EQUITY_NEG_COLOR='#ff5e6a';
 let equityAxisMode='date';
 
 function tradeChronologyKey(trade){
@@ -6777,6 +6780,48 @@ function updateEquityAxisButtons(mode,dateAvailable=true){
 function setEquityAxisMode(mode){
   if(mode!=='date'&&mode!=='trade')return;
   equityAxisMode=mode;updateEquityAxisButtons(mode);renderCharts();
+}
+function equityDayKey(timestamp){
+  const date=new Date(Number(timestamp));
+  if(!Number.isFinite(date.getTime()))return '';
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+}
+function aggregateEquityDaily(points){
+  const daily=[];
+  points.forEach(point=>{
+    const key=equityDayKey(point.timestamp),previous=daily[daily.length-1];
+    if(previous&&previous.dayKey===key){
+      previous.x=point.x;previous.y=point.y;previous.timestamp=point.timestamp;previous.tradeNumber=point.tradeNumber;
+      previous.lastTradeNumber=point.tradeNumber;previous.tradeCount+=1;previous.dayPnl+=point.tradePnl;previous.trade=point.trade;
+    }else{
+      daily.push({...point,dayKey:key,firstTradeNumber:point.tradeNumber,lastTradeNumber:point.tradeNumber,tradeCount:1,dayPnl:point.tradePnl});
+    }
+  });
+  return daily;
+}
+function insertEquityZeroCrossings(points){
+  const result=[];
+  points.forEach((point,index)=>{
+    const previous=points[index-1];
+    if(previous&&previous.y!==0&&point.y!==0&&Math.sign(previous.y)!==Math.sign(point.y)){
+      const ratio=Math.abs(previous.y)/(Math.abs(previous.y)+Math.abs(point.y));
+      const x=previous.x+(point.x-previous.x)*ratio;
+      result.push({x,y:0,timestamp:Number.isFinite(previous.timestamp)&&Number.isFinite(point.timestamp)?previous.timestamp+(point.timestamp-previous.timestamp)*ratio:null,synthetic:true});
+    }
+    result.push(point);
+  });
+  return result;
+}
+function equityFillGradient(context){
+  const chart=context.chart,area=chart.chartArea,scale=chart.scales?.y;
+  if(!area||!scale)return 'rgba(255,94,106,0.08)';
+  const height=Math.max(1,area.bottom-area.top),zeroY=Math.max(area.top,Math.min(area.bottom,scale.getPixelForValue(0))),split=(zeroY-area.top)/height;
+  const gradient=chart.ctx.createLinearGradient(0,area.top,0,area.bottom);
+  gradient.addColorStop(0,'rgba(34,201,135,0.18)');
+  gradient.addColorStop(Math.max(0,split-.001),'rgba(34,201,135,0.015)');
+  gradient.addColorStop(Math.min(1,split+.001),'rgba(255,94,106,0.015)');
+  gradient.addColorStop(1,'rgba(255,94,106,0.18)');
+  return gradient;
 }
 function signedMoney(amount,symbol='$',digits=0){
   const value=Number(amount);
@@ -6875,35 +6920,43 @@ function renderCharts(){
   let run=0;
   const pnlSeq=closed.map(t=>{run+=toPnlDisplay(t);return parseFloat(run.toFixed(2));});
   if(CH.equity) CH.equity.destroy();
-  const pos=run>=0;
+  const equityCanvas=document.getElementById('equity-chart'),emptyState=document.getElementById('equity-empty');
+  const hasEquityData=closed.length>0;
+  emptyState.classList.toggle('visible',!hasEquityData);equityCanvas.style.visibility=hasEquityData?'visible':'hidden';
   const timestampCount=closed.reduce((count,trade)=>count+(Number.isFinite(equityTradeTimestamp(trade))?1:0),0);
   const chartAxisMode=equityAxisMode==='date'&&timestampCount?'date':'trade';
-  updateEquityAxisButtons(chartAxisMode,Boolean(timestampCount));
+  updateEquityAxisButtons(hasEquityData?chartAxisMode:equityAxisMode,hasEquityData?Boolean(timestampCount):true);
+  const equityBaseNote=isAll?(FxRates.loaded?'All accounts · USD converted':'All accounts · est. USD'):`P&L — ${acctName(pid)}`;
+  document.getElementById('equity-sub').textContent=hasEquityData?`${equityBaseNote} · ${chartAxisMode==='date'?'daily close':'per trade'}`:'No completed trades yet';
   let priorTimestamp=null;
-  const equityPoints=closed.map((trade,index)=>{
+  const rawEquityPoints=closed.map((trade,index)=>{
     const timestamp=equityTradeTimestamp(trade);
     let plotTimestamp=timestamp;
     if(!Number.isFinite(plotTimestamp))plotTimestamp=priorTimestamp===null?Date.now()+index:priorTimestamp+1;
     if(priorTimestamp!==null&&plotTimestamp<=priorTimestamp)plotTimestamp=priorTimestamp+1;
     priorTimestamp=plotTimestamp;
-    return {x:chartAxisMode==='date'?plotTimestamp:index+1,y:pnlSeq[index],tradeNumber:index+1,trade,timestamp};
+    return {x:chartAxisMode==='date'?plotTimestamp:index+1,y:pnlSeq[index],tradeNumber:index+1,trade,timestamp:plotTimestamp,tradePnl:Number(toPnlDisplay(trade))};
   });
-  const datedValues=equityPoints.map(point=>point.x),xRange=datedValues.length>1?Math.max(1,datedValues[datedValues.length-1]-datedValues[0]):1;
-  const yMin=Math.min(0,...pnlSeq),yMax=Math.max(0,...pnlSeq),yRange=Math.max(1,yMax-yMin),yPadding=Math.max(1,yRange*.08);
-  CH.equity=new Chart(document.getElementById('equity-chart'),{
+  const displayedEquityPoints=chartAxisMode==='date'?aggregateEquityDaily(rawEquityPoints):rawEquityPoints;
+  const equityPoints=insertEquityZeroCrossings(displayedEquityPoints);
+  const datedValues=displayedEquityPoints.map(point=>point.x),xRange=datedValues.length>1?Math.max(1,datedValues[datedValues.length-1]-datedValues[0]):1;
+  const visibleEquityValues=displayedEquityPoints.map(point=>point.y),yMin=Math.min(0,...visibleEquityValues),yMax=Math.max(0,...visibleEquityValues),yRange=Math.max(1,yMax-yMin),yPadding=Math.max(1,yRange*.08);
+  CH.equity=new Chart(equityCanvas,{
     type:'line',
     data:{datasets:[{
       data:equityPoints,
       parsing:false,
-      borderColor:pos?'#22c987':'#ff5e6a',
-      backgroundColor:pos?'rgba(34,201,135,0.08)':'rgba(255,94,106,0.08)',
-      borderWidth:2.25,
+      borderColor:EQUITY_NEG_COLOR,
+      backgroundColor:equityFillGradient,
+      borderWidth:2.35,
       cubicInterpolationMode:'monotone',
-      tension:.18,
+      tension:.38,
+      spanGaps:false,
       fill:'origin',
       pointRadius:0,
       pointHoverRadius:4,
-      pointHitRadius:16
+      pointHitRadius:16,
+      segment:{borderColor:context=>((context.p0.parsed.y+context.p1.parsed.y)/2)>=0?EQUITY_POS_COLOR:EQUITY_NEG_COLOR}
     }]},
     options:{
       ...CBO,
@@ -6912,9 +6965,10 @@ function renderCharts(){
       plugins:{
         ...CBO.plugins,
         tooltip:{
+          filter:item=>!item.raw?.synthetic,
           callbacks:{
             title:items=>{const point=items[0]?.raw;return chartAxisMode==='date'?equityDateTooltip(point?.timestamp):`Trade #${point?.tradeNumber||''}`;},
-            label:context=>{const point=context.raw,trade=point.trade||{},tradePnl=toPnlDisplay(trade);return [`Trade #${point.tradeNumber}${trade.symbol?` · ${trade.symbol}`:''}`,`Trade P&L: ${signedMoney(tradePnl,displayC,2)}`,`Cumulative P&L: ${signedMoney(point.y,displayC,2)}`];}
+            label:context=>{const point=context.raw,trade=point.trade||{};return chartAxisMode==='date'?[`${point.tradeCount} completed trade${point.tradeCount===1?'':'s'} · #${point.firstTradeNumber}${point.lastTradeNumber!==point.firstTradeNumber?`–#${point.lastTradeNumber}`:''}`,`Day P&L: ${signedMoney(point.dayPnl,displayC,2)}`,`Closing equity: ${signedMoney(point.y,displayC,2)}`]:[`Trade #${point.tradeNumber}${trade.symbol?` · ${trade.symbol}`:''}`,`Trade P&L: ${signedMoney(point.tradePnl,displayC,2)}`,`Cumulative P&L: ${signedMoney(point.y,displayC,2)}`];}
           }
         }
       },
@@ -6922,6 +6976,7 @@ function renderCharts(){
         x:{
           type:'linear',
           bounds:'data',
+          grace:'2%',
           grid:{color:GC},
           title:{display:true,text:chartAxisMode==='date'?'Close date':'Completed trade number',color:TC,font:{size:10,weight:'normal'}},
           ticks:{color:TC,font:{size:10},autoSkip:true,maxTicksLimit:7,maxRotation:0,callback:value=>chartAxisMode==='date'?equityDateTick(value,xRange):`#${Math.round(value)}`}

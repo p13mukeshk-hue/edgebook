@@ -304,6 +304,12 @@ requireMatch(app, /cubicInterpolationMode:['"]monotone['"]/, 'monotone equity li
 requireMatch(app, /pointRadius:0[\s\S]{0,100}?pointHoverRadius:4/, 'decluttered equity points with hover target');
 requireMatch(app, /maxTicksLimit:7[\s\S]{0,180}?equityDateTick/, 'bounded date ticks on equity curve');
 requireMatch(app, /Cumulative P&L:\s*\$\{signedMoney\(point\.y/, 'cumulative P&L equity tooltip');
+requireMatch(app, /aggregateEquityDaily\(rawEquityPoints\)/, 'daily-close smoothing for date equity view');
+requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,220}?yPadding/, 'dynamic equity Y-domain from visible points');
+requireMatch(app, /insertEquityZeroCrossings\(displayedEquityPoints\)/, 'exact zero crossing projection');
+requireMatch(app, /segment:\{borderColor:[\s\S]{0,180}?EQUITY_POS_COLOR[\s\S]{0,80}?EQUITY_NEG_COLOR/, 'zero-aware equity line colors');
+requireMatch(app, /backgroundColor:equityFillGradient/, 'zero-aware gradual equity fill');
+requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 'empty equity curve guidance');
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
 const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
 const equityProjectionContext = {};
@@ -318,9 +324,28 @@ vm.runInNewContext(`
   ${equityProjectionSource}
   const projected=new Date(equityTradeTimestamp({date:'2026-06-02T00:00:00.000Z',exitTime:'09:15'}));
   globalThis.result=[projected.getFullYear(),projected.getMonth()+1,projected.getDate(),projected.getHours(),projected.getMinutes()];
+  const dayOne=new Date(2026,5,2,9,15).getTime(),dayTwo=new Date(2026,5,3,10,0).getTime();
+  globalThis.daily=aggregateEquityDaily([
+    {x:dayOne,y:10,timestamp:dayOne,tradeNumber:1,tradePnl:10,trade:{}},
+    {x:dayOne+3600000,y:20,timestamp:dayOne+3600000,tradeNumber:2,tradePnl:10,trade:{}},
+    {x:dayTwo,y:-10,timestamp:dayTwo,tradeNumber:3,tradePnl:-30,trade:{}}
+  ]);
+  globalThis.crossings=insertEquityZeroCrossings([{x:0,y:20,timestamp:0},{x:10,y:-20,timestamp:10}]);
+  const stops=[];
+  equityFillGradient({chart:{chartArea:{top:0,bottom:100},scales:{y:{getPixelForValue:()=>40}},ctx:{createLinearGradient:()=>({addColorStop:(offset,color)=>stops.push([offset,color])})}}});
+  globalThis.gradientStops=stops;
 `, equityProjectionContext);
 if (equityProjectionContext.result?.join('-') !== '2026-6-2-9-15') {
   failures.push('Equity date projection rejected the VPS ISO timestamp shape');
+}
+if (equityProjectionContext.daily?.length !== 2 || equityProjectionContext.daily[0]?.tradeCount !== 2 || equityProjectionContext.daily[0]?.y !== 20 || equityProjectionContext.daily[0]?.dayPnl !== 20) {
+  failures.push('Equity date view did not aggregate to one closing point per day');
+}
+if (equityProjectionContext.crossings?.length !== 3 || equityProjectionContext.crossings[1]?.y !== 0 || equityProjectionContext.crossings[1]?.x !== 5 || !equityProjectionContext.crossings[1]?.synthetic) {
+  failures.push('Equity color boundary is not projected at the exact zero crossing');
+}
+if (equityProjectionContext.gradientStops?.length !== 4 || !equityProjectionContext.gradientStops[0]?.[1]?.includes('34,201,135') || !equityProjectionContext.gradientStops[3]?.[1]?.includes('255,94,106')) {
+  failures.push('Equity area gradient does not transition from positive green to negative red');
 }
 const settingsSaveIndex = browserSettingsMigrationSource.indexOf('const saved=await SettingsManager.set(merged);');
 const settingsMarkerAfterSave = browserSettingsMigrationSource.indexOf("localStorage.setItem(marker,'complete');", settingsSaveIndex + 1);
