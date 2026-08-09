@@ -318,6 +318,9 @@ for (const insightCanvas of ['symbol-chart', 'outcome-chart', 'direction-chart',
 requireMatch(app, /function renderDashboardInsights[\s\S]*?realizedLedgerForTrades\(src\)/, 'dashboard insights use the actual-date realised-event ledger');
 requireMatch(app, /const day=String\(event\.ledgerDate\|\|''\)\.slice\(0,10\)/, 'day consistency canonicalizes timestamp dates');
 requireMatch(app, /\.insight-ring-wrap canvas\{width:100%!important;height:100%!important\}/, 'dashboard ring canvases have bounded empty-state dimensions');
+requireMatch(app, /\.insight-ring-wrap\{[^}]*width:118px;height:118px/, 'prominent dashboard outcome rings');
+requireMatch(app, /class=["']insight-mini-card insight-ring-card["'][\s\S]{0,220}?Outcome Mix/, 'outcome card visual treatment');
+requireMatch(app, /class=["']insight-mini-card insight-ring-card["'][\s\S]{0,220}?Day Consistency/, 'day-consistency card visual treatment');
 requireMatch(app, /bySymbol[\s\S]{0,500}?Math\.abs\(b\.pnl\)-Math\.abs\(a\.pnl\)/, 'signed symbol P&L ranking retains gains and losses');
 requireMatch(app, /outcomeCounts=\[outcomes\.filter\(value=>value>0\)[\s\S]{0,160}?value===0/, 'outcome mix includes break-even trades');
 requireMatch(app, /dayCounts=\[dayValues\.filter\(value=>value>\.005\)[\s\S]{0,180}?Math\.abs\(value\)<=\.005/, 'day consistency includes profitable losing and flat days');
