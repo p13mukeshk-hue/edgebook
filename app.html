@@ -6741,7 +6741,8 @@ function equityTradeTimestamp(trade){
   const exact=trade?.exitAt||trade?.entryAt;
   const exactMs=exact?Date.parse(exact):NaN;
   if(Number.isFinite(exactMs))return exactMs;
-  const date=trade?.exitDate||trade?.brokerData?.csvExitDate||trade?.date||'';
+  const dateValue=trade?.exitDate||trade?.brokerData?.csvExitDate||trade?.date||'';
+  const date=dateValue instanceof Date?dateValue.toISOString().slice(0,10):String(dateValue).slice(0,10);
   if(!isRealIsoDate(date))return null;
   const [year,month,day]=date.split('-').map(Number);
   const rawTime=trade?.exitTime||trade?.entryTime||trade?.time||'00:00';

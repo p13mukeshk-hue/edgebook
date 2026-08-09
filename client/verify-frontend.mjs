@@ -305,6 +305,23 @@ requireMatch(app, /pointRadius:0[\s\S]{0,100}?pointHoverRadius:4/, 'decluttered 
 requireMatch(app, /maxTicksLimit:7[\s\S]{0,180}?equityDateTick/, 'bounded date ticks on equity curve');
 requireMatch(app, /Cumulative P&L:\s*\$\{signedMoney\(point\.y/, 'cumulative P&L equity tooltip');
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
+const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
+const equityProjectionContext = {};
+vm.runInNewContext(`
+  function isRealIsoDate(value){
+    const match=/^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(value??''));
+    if(!match)return false;
+    const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+    const parsed=new Date(Date.UTC(year,month-1,day));
+    return parsed.getUTCFullYear()===year&&parsed.getUTCMonth()===month-1&&parsed.getUTCDate()===day;
+  }
+  ${equityProjectionSource}
+  const projected=new Date(equityTradeTimestamp({date:'2026-06-02T00:00:00.000Z',exitTime:'09:15'}));
+  globalThis.result=[projected.getFullYear(),projected.getMonth()+1,projected.getDate(),projected.getHours(),projected.getMinutes()];
+`, equityProjectionContext);
+if (equityProjectionContext.result?.join('-') !== '2026-6-2-9-15') {
+  failures.push('Equity date projection rejected the VPS ISO timestamp shape');
+}
 const settingsSaveIndex = browserSettingsMigrationSource.indexOf('const saved=await SettingsManager.set(merged);');
 const settingsMarkerAfterSave = browserSettingsMigrationSource.indexOf("localStorage.setItem(marker,'complete');", settingsSaveIndex + 1);
 if (settingsSaveIndex < 0 || settingsMarkerAfterSave < settingsSaveIndex) {
