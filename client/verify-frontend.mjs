@@ -279,6 +279,11 @@ requireMatch(migrationExportSource, /const bundle=\{users:\{\[legacyUid\]:\{[\s\
 requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]vps['"][\s\S]*?return this\._syncVpsTrades\(t\);[\s\S]*?return false;/, 'trade save returns false without a selected provider');
 requireMatch(dataStoreSource, /async _syncVpsTrades\(items\)[\s\S]*?const results=await Promise\.allSettled\(pending\);[\s\S]*?return failed\.length===0;/, 'trade save awaits every VPS mutation');
 requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(['"]Trade (?:updated|logged)/, 'manual trade success waits for persistence');
+requireMatch(tradeSaveSource, /if\(_tradeSaveInFlight\)return;[\s\S]*?_tradeSaveInFlight=true;[\s\S]*?finally[\s\S]*?_tradeSaveInFlight=false/, 'manual trade submit has an in-flight double-click lock');
+requireMatch(tradeSaveSource, /id:editId\|\|_tradeDraftId\|\|\(_tradeDraftId=Date\.now\(\)\)/, 'manual trade retries retain a stable idempotency ID');
+requireMatch(tradeSaveSource, /await loadManualDuplicateCandidates\(\)[\s\S]*?findLocalDuplicate\(trade,duplicateCandidates\)/, 'manual trade duplicate check uses the authoritative VPS list');
+requireMatch(duplicateResolutionSource, /duplicateNumericClose\(existing\.entry,incoming\.entry,\.005\)[\s\S]*?duplicateNumericClose\(existing\.exit,incoming\.exit,\.005\)[\s\S]*?duplicateNumericClose\(existing\.size,incoming\.size,\.02\)/, 'manual duplicate check covers near entry exit and size values');
+requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousWriteError\(error\)[\s\S]*?api\.get\(`\/trades\/\$\{encodeURIComponent\(trade\.id\)\}`\)/, 'lost trade-create response reconciliation');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
 requireMatch(csvImportCommitSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite[\s\S]*?return;[\s\S]*?closeModal/, 'CSV import waits for persistence before closing');
@@ -301,13 +306,14 @@ requireMatch(app, /setEquityAxisMode\(['"]date['"]\)[\s\S]{0,260}?By date/, 'dat
 requireMatch(app, /setEquityAxisMode\(['"]trade['"]\)[\s\S]{0,260}?By trade #/, 'explicit trade-number equity axis control');
 requireMatch(app, /function equityTradeTimestamp\b/, 'equity close timestamp projection');
 requireMatch(app, /cubicInterpolationMode:['"]monotone['"]/, 'monotone equity line interpolation');
-requireMatch(app, /pointRadius:0[\s\S]{0,100}?pointHoverRadius:4/, 'decluttered equity points with hover target');
+requireMatch(app, /pointRadius:context=>context\.raw\?\.synthetic\?0:\(displayedEquityPoints\.length===1\?4:0\)[\s\S]{0,220}?pointHoverRadius:4/, 'visible first equity point with decluttered multi-point curve');
 requireMatch(app, /maxTicksLimit:7[\s\S]{0,180}?equityDateTick/, 'bounded date ticks on equity curve');
 requireMatch(app, /Cumulative P&L:\s*\$\{signedMoney\(point\.y/, 'cumulative P&L equity tooltip');
 requireMatch(app, /aggregateEquityDaily\(rawEquityPoints\)/, 'daily-close smoothing for date equity view');
+requireMatch(app, /ensureEquityStartAnchor\(displayedEquityPoints,chartAxisMode\)/, 'zero baseline anchor for the first equity close');
 requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,160}?equityAxisDomain\(visibleEquityValues\)/, 'dynamic equity Y-domain from visible points');
 requireMatch(app, /y:\{[\s\S]{0,100}?min:yDomain\.min,[\s\S]{0,60}?max:yDomain\.max/, 'exact equity Y-domain without library tick expansion');
-requireMatch(app, /insertEquityZeroCrossings\(displayedEquityPoints\)/, 'exact zero crossing projection');
+requireMatch(app, /insertEquityZeroCrossings\(plotEquityPoints\)/, 'exact zero crossing projection');
 requireMatch(app, /segment:\{borderColor:[\s\S]{0,180}?EQUITY_POS_COLOR[\s\S]{0,80}?EQUITY_NEG_COLOR/, 'zero-aware equity line colors');
 requireMatch(app, /backgroundColor:equityFillGradient/, 'zero-aware gradual equity fill');
 requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 'empty equity curve guidance');
@@ -357,6 +363,7 @@ vm.runInNewContext(`
     {x:dayOne+3600000,y:20,timestamp:dayOne+3600000,tradeNumber:2,tradePnl:10,trade:{}},
     {x:dayTwo,y:-10,timestamp:dayTwo,tradeNumber:3,tradePnl:-30,trade:{}}
   ]);
+  globalThis.firstClose=ensureEquityStartAnchor([{x:dayOne,y:60,timestamp:dayOne,tradeNumber:1,tradePnl:60,trade:{}}],'date');
   globalThis.crossings=insertEquityZeroCrossings([{x:0,y:20,timestamp:0},{x:10,y:-20,timestamp:10}]);
   const stops=[];
   equityFillGradient({chart:{chartArea:{top:0,bottom:100},scales:{y:{getPixelForValue:()=>40}},ctx:{createLinearGradient:()=>({addColorStop:(offset,color)=>stops.push([offset,color])})}}});
@@ -369,6 +376,9 @@ if (equityProjectionContext.result?.join('-') !== '2026-6-2-9-15') {
 if (equityProjectionContext.daily?.length !== 2 || equityProjectionContext.daily[0]?.tradeCount !== 2 || equityProjectionContext.daily[0]?.y !== 20 || equityProjectionContext.daily[0]?.dayPnl !== 20) {
   failures.push('Equity date view did not aggregate to one closing point per day');
 }
+if (equityProjectionContext.firstClose?.length !== 2 || equityProjectionContext.firstClose[0]?.y !== 0 || !equityProjectionContext.firstClose[0]?.synthetic || equityProjectionContext.firstClose[1]?.y !== 60) {
+  failures.push('First equity close has no zero baseline segment');
+}
 if (equityProjectionContext.crossings?.length !== 3 || equityProjectionContext.crossings[1]?.y !== 0 || equityProjectionContext.crossings[1]?.x !== 5 || !equityProjectionContext.crossings[1]?.synthetic) {
   failures.push('Equity color boundary is not projected at the exact zero crossing');
 }
@@ -377,6 +387,35 @@ if (equityProjectionContext.gradientStops?.length !== 4 || !equityProjectionCont
 }
 if (equityProjectionContext.axisDomain?.min !== -3348 || equityProjectionContext.axisDomain?.max !== 3148) {
   failures.push('Equity axis does not stay close to the actual visible P&L range');
+}
+
+try {
+  const { exports: duplicateFixture } = evaluateSecurityFixture(
+    duplicateResolutionSource,
+    {},
+    '{findLocalDuplicate}',
+  );
+  const existing = {
+    id: 'existing', date: '2026-08-09', symbol: 'GOLD', direction: 'Long',
+    accountId: 'acct-1', instrument: null, optionType: null,
+    entry: 4144, exit: 4150, size: 0.1,
+  };
+  const nearCopy = {
+    ...existing, id: 'new',
+    entry: 4144.5, exit: 4150.5, size: 0.101,
+  };
+  const separateTrade = { ...nearCopy, id: 'separate', size: 0.2 };
+  if (duplicateFixture.findLocalDuplicate(nearCopy, [existing])?.id !== 'existing') {
+    failures.push('Near-identical manual trade was not flagged as a possible duplicate');
+  }
+  if (duplicateFixture.findLocalDuplicate(separateTrade, [existing]) !== null) {
+    failures.push('Materially different trade was incorrectly flagged as a duplicate');
+  }
+  if (duplicateFixture.findLocalDuplicate(existing, [existing]) !== null) {
+    failures.push('Idempotent retry of the same browser trade ID was flagged as a new duplicate');
+  }
+} catch (error) {
+  failures.push(`Manual duplicate fixture failed: ${error.message}`);
 }
 
 try {
@@ -1668,6 +1707,35 @@ if (versionedMutations.some(call => call.options?.headers?.['if-match'] !== '"7"
 const permanentDelete = contractCalls.find(call => call.path.endsWith('/permanent'));
 if (permanentDelete?.options?.headers?.['x-confirm-permanent-delete'] !== 'trade-1') {
   failures.push('Permanent-delete confirmation header is missing');
+}
+
+// A create response can disappear after commit. The adapter must reconcile by
+// the stable browser ID instead of telling the user to submit a new trade.
+let tradeCreatePosts = 0;
+let tradeCreateRecoveryReads = 0;
+let tradeCreateHeader = null;
+const lostResponseTrade = {
+  id: 'browser-draft-1', date: '2026-08-09', symbol: 'GOLD', asset: 'cm',
+  direction: 'Long', entry: 4144, exit: 4150, size: 0.1,
+  accountId: null, instrument: null, optionType: null,
+};
+const recoveredTradeCreate = createVpsDataAdapter({
+  async post(requestPath, body, options) {
+    tradeCreatePosts += 1;
+    tradeCreateHeader = options?.headers?.['idempotency-key'];
+    const error = new Error('response lost after commit');
+    error.code = 'NETWORK_ERROR';
+    throw error;
+  },
+  async get(requestPath) {
+    if (requestPath !== '/trades/browser-draft-1') return {};
+    tradeCreateRecoveryReads += 1;
+    return { trade: { ...lostResponseTrade, version: 1 } };
+  },
+});
+const recoveredTrade = await recoveredTradeCreate.trades.create(lostResponseTrade);
+if (recoveredTrade?.trade?.id !== 'browser-draft-1' || tradeCreatePosts !== 1 || tradeCreateRecoveryReads !== 1 || tradeCreateHeader !== 'trade:browser-draft-1') {
+  failures.push('Lost trade-create response was not reconciled with the stable idempotency ID');
 }
 
 // A network error after commit is reconciled by reading the authoritative

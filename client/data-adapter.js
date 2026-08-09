@@ -15,6 +15,31 @@ const serverManagedTradeFields = new Set([
 const patchMatchesCurrentTrade = (current, fields) => Object.entries(fields || {}).every(([key, value]) =>
   serverManagedTradeFields.has(key) || stableJson(current?.[key]) === stableJson(value));
 
+const tradeCreateFingerprint = trade => {
+  const numberOrNull = value => value == null || value === '' ? null : Number(value);
+  return stableJson({
+    id: trade?.id == null ? null : String(trade.id),
+    date: String(trade?.date || '').slice(0, 10),
+    symbol: String(trade?.symbol || '').trim().toUpperCase(),
+    asset: trade?.asset || null,
+    direction: trade?.direction || null,
+    entry: numberOrNull(trade?.entry),
+    exit: numberOrNull(trade?.exit),
+    size: numberOrNull(trade?.size),
+    sl: numberOrNull(trade?.sl),
+    tp: numberOrNull(trade?.tp),
+    strike: numberOrNull(trade?.strike),
+    accountId: trade?.accountId == null ? null : String(trade.accountId),
+    instrument: trade?.instrument || null,
+    optionType: trade?.optionType || null,
+    strategy: trade?.strategy || '',
+    emotion: trade?.emotion || '',
+    notes: trade?.notes || '',
+    custom: trade?.custom || {},
+    psychology: trade?.psychology || {},
+  });
+};
+
 const isAmbiguousWriteError = error => error?.code === 'NETWORK_ERROR' ||
   error?.status === 409 || Number(error?.status) >= 500;
 
@@ -109,9 +134,29 @@ export function createVpsDataAdapter(api) {
 
         throw new Error('The Edgebook trade list exceeded the pagination safety limit');
       },
-      create: trade => api.post('/trades', { trade }, {
-        headers: trade?.id != null ? { 'idempotency-key': `trade:${trade.id}` } : {},
-      }),
+      async create(trade) {
+        const options = { headers: trade?.id != null ? { 'idempotency-key': `trade:${trade.id}` } : {} };
+        try {
+          return await api.post('/trades', { trade }, options);
+        } catch (error) {
+          // A response can be lost after PostgreSQL committed. Re-read by the
+          // stable browser trade ID so the UI reports the committed write as a
+          // success and a retry keeps the same Idempotency-Key.
+          if (trade?.id != null && isAmbiguousWriteError(error)) {
+            try {
+              const latest = await api.get(`/trades/${encodeURIComponent(trade.id)}`);
+              const current = latest?.trade ?? latest;
+              if (current && tradeCreateFingerprint(current) === tradeCreateFingerprint(trade)) {
+                return { trade: current };
+              }
+              error.latestTrade = current ?? null;
+            } catch {
+              // Preserve the original create error if reconciliation fails.
+            }
+          }
+          throw error;
+        }
+      },
       async patch(id, fields) {
         const path = `/trades/${encodeURIComponent(id)}`;
         try {

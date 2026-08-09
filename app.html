@@ -1015,6 +1015,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .dup-field-value.differs{color:var(--amber);font-weight:700}
 .dup-nav{font-size:12px;color:var(--text3);text-align:center;margin-bottom:12px}
 .dup-actions{display:flex;gap:10px;justify-content:center;width:100%}
+.dup-warning-copy{margin:0 0 14px;padding:10px 12px;border:1px solid rgba(245,166,35,.25);border-radius:9px;background:rgba(245,166,35,.07);color:var(--text2);font-size:12px;line-height:1.45}
 /* ── Source badges ───────────────────────────────────────────────────── */
 .badge-src-manual{background:var(--bg4);color:var(--text3)}
 .badge-src-zerodha{background:var(--blue-bg);color:var(--blue)}
@@ -1985,7 +1986,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
       </div>
     </div>
     <input type="hidden" id="t-edit-id">
-    <div class="modal-footer"><button class="btn-ghost" onclick="closeModal('trade-modal')">Cancel</button><button class="btn-primary" onclick="saveTrade()"><i class="fa-solid fa-floppy-disk"></i> Save trade</button></div>
+    <div class="modal-footer"><button class="btn-ghost" onclick="closeModal('trade-modal')">Cancel</button><button class="btn-primary" id="trade-save-btn" onclick="saveTrade()"><i class="fa-solid fa-floppy-disk"></i> Save trade</button></div>
   </div>
 </div>
 
@@ -2091,6 +2092,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
     </div>
     <div class="modal-body">
       <div class="dup-nav" id="dup-nav"></div>
+      <div class="dup-warning-copy" id="dup-warning-copy">A very similar trade already exists. Compare the details below before deciding whether to save another copy.</div>
       <div class="dup-modal-grid">
         <div class="dup-card">
           <div class="dup-card-title">📋 Existing trade (in journal)</div>
@@ -2105,9 +2107,9 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
     <div class="modal-footer" style="justify-content:space-between;align-items:center">
       <span class="dup-nav" id="dup-nav-footer" style="margin:0;font-size:12px"></span>
       <div class="dup-actions">
-        <button class="btn-ghost" onclick="resolveDup('keep_existing')">Keep existing</button>
-        <button class="btn-ghost" onclick="resolveDup('keep_both')">Keep both</button>
-        <button class="btn-primary" onclick="resolveDup('replace_prices')"><i class="fa-solid fa-rotate"></i> Replace prices</button>
+        <button class="btn-ghost" id="dup-keep-existing" onclick="resolveDup('keep_existing')">Keep existing</button>
+        <button class="btn-ghost" id="dup-keep-both" onclick="resolveDup('keep_both')">Keep both</button>
+        <button class="btn-primary" id="dup-replace" onclick="resolveDup('replace_prices')"><i class="fa-solid fa-rotate"></i> Replace prices</button>
       </div>
     </div>
   </div>
@@ -2992,6 +2994,7 @@ async function migrateBrowserLocalData(user){
 ══════════════════════════════════════════════════════ */
 let S={}, trades=[], moods=[], CH={};
 let editId=null, moodEmoji='', modalEmoji='';
+let _tradeDraftId=null, _tradeSaveInFlight=false, _dupResolutionInFlight=false;
 let activeAcctId='all';   // 'all' or account id string
 let activeSymbolTab='eq'; // symbol manager tab
 let selectedNewAcctColor=ACCT_COLORS[0];
@@ -3699,8 +3702,21 @@ function renderDupModal(){
   if(navF) navF.textContent = label;
 
   // Find existing trade — check both numeric and string id match
-  const existing = trades.find(t=>String(t.id)===String(dup.existingTradeId));
+  const existing = trades.find(t=>String(t.id)===String(dup.existingTradeId))
+    || (dup.id==='__manual__'?_pendingManualTrade?.existingTrade:null);
   const incoming = dup.incomingTrade;
+
+  const isManual=dup.id==='__manual__';
+  const warning=document.getElementById('dup-warning-copy');
+  if(warning)warning.textContent=isManual
+    ? 'A trade with the same symbol, date, direction, account and nearly identical prices and size already exists. Save another copy only if these are genuinely separate executions.'
+    : 'A very similar broker trade already exists. Compare both records before resolving it.';
+  const keepExisting=document.getElementById('dup-keep-existing');
+  const keepBoth=document.getElementById('dup-keep-both');
+  const replace=document.getElementById('dup-replace');
+  if(keepExisting)keepExisting.textContent=isManual?'Cancel new trade':'Keep existing';
+  if(keepBoth)keepBoth.textContent=isManual?'Save anyway':'Keep both';
+  if(replace)replace.innerHTML=isManual?'<i class="fa-solid fa-rotate"></i> Update existing':'<i class="fa-solid fa-rotate"></i> Replace prices';
 
   document.getElementById('dup-existing-content').innerHTML = dupTradeCard(existing, null);
   document.getElementById('dup-incoming-content').innerHTML = dupTradeCard(incoming, existing);
@@ -3766,6 +3782,10 @@ async function recoverTradesAfterFailedWrite(previous){
 async function resolveDup(action){
   const dup = _pendingDups[_dupIdx];
   if(!dup) return;
+  if(_dupResolutionInFlight)return;
+  _dupResolutionInFlight=true;
+  document.querySelectorAll('#dup-modal button').forEach(button=>{button.disabled=true;});
+  try{
   const isManual = dup.id === '__manual__';
   const uid = DataStore._uid;
 
@@ -3775,7 +3795,7 @@ async function resolveDup(action){
   } else if(action==='keep_both'){
     const previous=[...trades];
     const newTrade = isManual
-      ? {..._pendingManualTrade.incomingTrade, id:Date.now()}
+      ? {..._pendingManualTrade.incomingTrade}
       : normaliseIncomingTrade(dup.incomingTrade);
     if(!newTrade.id) newTrade.id = Date.now();
     trades.unshift(newTrade);
@@ -3813,6 +3833,12 @@ async function resolveDup(action){
     showToast('Trade updated with broker data','success');
   }
 
+  if(isManual){
+    _tradeDraftId=null;
+    editId=null;
+    closeModal('trade-modal');
+  }
+
   // Remove current dup (optimistic) and show next or close
   _pendingDups.splice(_dupIdx, 1);
   _pendingManualTrade = null;
@@ -3821,6 +3847,10 @@ async function resolveDup(action){
   } else {
     _dupIdx = Math.min(_dupIdx, _pendingDups.length-1);
     renderDupModal();
+  }
+  }finally{
+    _dupResolutionInFlight=false;
+    document.querySelectorAll('#dup-modal button').forEach(button=>{button.disabled=false;});
   }
 }
 
@@ -3845,17 +3875,43 @@ function normaliseIncomingTrade(t){
   };
 }
 
-function findLocalDuplicate(sym, date, entry){
-  if(!sym||!date||!entry||isNaN(entry)) return null;
-  for(const t of trades){
-    const tSym = (t.symbol||'').toUpperCase();
-    if(tSym!==sym || t.date!==date) continue;
-    const tEntry = t.entry;
-    if(!tEntry||tEntry<=0) continue;
-    const pctDiff = Math.abs(tEntry-entry)/tEntry;
-    if(pctDiff<=0.005) return t;
+function duplicateNumericClose(left,right,relativeTolerance){
+  if(left==null||left==='')return right==null||right==='';
+  if(right==null||right==='')return false;
+  const a=Number(left),b=Number(right);
+  if(!Number.isFinite(a)||!Number.isFinite(b))return false;
+  return Math.abs(a-b)<=Math.max(1e-8,Math.max(Math.abs(a),Math.abs(b))*relativeTolerance);
+}
+
+function findLocalDuplicate(incoming,candidates=trades){
+  const symbol=String(incoming?.symbol||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const date=String(incoming?.date||'').slice(0,10);
+  if(!symbol||!date||!Number.isFinite(Number(incoming?.entry)))return null;
+  return candidates.find(existing=>{
+    if(String(existing?.id??'')===String(incoming?.id??''))return false;
+    if(String(existing?.symbol||'').toUpperCase().replace(/[^A-Z0-9]/g,'')!==symbol)return false;
+    if(String(existing?.date||'').slice(0,10)!==date)return false;
+    if(String(existing?.direction||'')!==String(incoming?.direction||''))return false;
+    if(String(existing?.accountId||'')!==String(incoming?.accountId||''))return false;
+    if(String(existing?.instrument||'')!==String(incoming?.instrument||''))return false;
+    if(String(existing?.optionType||'')!==String(incoming?.optionType||''))return false;
+    return duplicateNumericClose(existing.entry,incoming.entry,.005)
+      && duplicateNumericClose(existing.exit,incoming.exit,.005)
+      && duplicateNumericClose(existing.size,incoming.size,.02);
+  })||null;
+}
+
+async function loadManualDuplicateCandidates(){
+  if(window._dataMode!=='vps'||!window._vpsData)return trades;
+  try{
+    const remote=await window._vpsData.trades.list();
+    return remote.map(normaliseFsTrade).filter(trade=>trade?.symbol&&trade?.entry!=null&&!trade?.deleted);
+  }catch(error){
+    console.warn('Duplicate safety check failed:',error.message);
+    const failure=new Error('Existing trades could not be checked safely');
+    failure.code='DUPLICATE_CHECK_UNAVAILABLE';
+    throw failure;
   }
-  return null;
 }
 
 function showManualDupModal(incomingTrade, existingTrade){
@@ -5323,8 +5379,21 @@ function showSPanel(id,el){
 /* ══════════════════════════════════════════════════════
    MODALS
 ══════════════════════════════════════════════════════ */
+function updateTradeSaveButton(){
+  const btn=document.getElementById('trade-save-btn');
+  if(!btn)return;
+  btn.disabled=_tradeSaveInFlight||_uploadingCount>0;
+  btn.style.opacity=btn.disabled?'0.58':'';
+  btn.innerHTML=_tradeSaveInFlight
+    ? '<i class="fa-solid fa-circle-notch fa-spin"></i> Saving…'
+    : '<i class="fa-solid fa-floppy-disk"></i> Save trade';
+}
+
 function openTradeModal(id=null){
   editId=id;
+  _tradeDraftId=id?null:Date.now();
+  _tradeSaveInFlight=false;
+  updateTradeSaveButton();
   document.getElementById('trade-modal-title').textContent=id?'Edit trade':'Log a trade';
   document.getElementById('t-edit-id').value=id||'';
   updateAccountSelect();
@@ -5397,7 +5466,10 @@ function openTradeModal(id=null){
   }
 }
 function openMoodModal(){ document.getElementById('mood-modal').classList.add('open'); }
-function closeModal(id){ document.getElementById(id).classList.remove('open'); }
+function closeModal(id){
+  document.getElementById(id).classList.remove('open');
+  if(id==='trade-modal'&&!_tradeSaveInFlight)_tradeDraftId=null;
+}
 function showConfirm(title,sub,fn){ document.getElementById('confirm-title').textContent=title; document.getElementById('confirm-sub').textContent=sub; document.getElementById('confirm-ok').onclick=()=>{closeModal('confirm-overlay');fn();}; document.getElementById('confirm-overlay').classList.add('open'); }
 
 /* ══════════════════════════════════════════════════════
@@ -5704,6 +5776,10 @@ function validateTrade(sym, entry, exit, size, date, dir){
 }
 
 async function saveTrade(){
+  if(_tradeSaveInFlight)return;
+  _tradeSaveInFlight=true;
+  updateTradeSaveButton();
+  try{
   const selEl=document.getElementById('t-sym-select'); const inpEl=document.getElementById('t-sym');
   const sym=(selEl.style.display!=='none'&&selEl.value?selEl.value:inpEl.value).trim().toUpperCase();
   const entry=parseFloat(document.getElementById('t-entry').value);
@@ -5730,7 +5806,7 @@ async function saveTrade(){
   const accountId=document.getElementById('t-account').value||null;
   const entryTime = document.getElementById('t-time').value || null;
   const trade={
-    id:editId||Date.now(), date,
+    id:editId||_tradeDraftId||(_tradeDraftId=Date.now()), date,
     entryTime,
     symbol:sym, asset,
     direction:dir, entry, exit, size,
@@ -5773,6 +5849,7 @@ async function saveTrade(){
       showToast('Trade was not saved. Check your connection and retry.','error');
       return;
     }
+    _tradeDraftId=null;
     closeModal('trade-modal');
     editId=null;
     refreshAll();
@@ -5781,7 +5858,13 @@ async function saveTrade(){
   }
 
   // New trade — check for local duplicates first
-  const localDup = findLocalDuplicate(sym, date, entry);
+  let duplicateCandidates;
+  try{duplicateCandidates=await loadManualDuplicateCandidates();}
+  catch{
+    showToast('Could not check existing trades for duplicates. Check your connection and retry.','error');
+    return;
+  }
+  const localDup = findLocalDuplicate(trade,duplicateCandidates);
   if(localDup){ showManualDupModal(trade, localDup); return; }
   trades.unshift(trade);
   const synced=await DataStore.saveTrades(trades);
@@ -5791,10 +5874,15 @@ async function saveTrade(){
     showToast('Trade was not saved. Check your connection and retry.','error');
     return;
   }
+  _tradeDraftId=null;
   closeModal('trade-modal');
   editId=null;
   refreshAll();
   showToast('Trade logged','success');
+  }finally{
+    _tradeSaveInFlight=false;
+    updateTradeSaveButton();
+  }
 }
 /* ═══ END TRADE FORM ═══ */
 
@@ -6856,6 +6944,19 @@ function aggregateEquityDaily(points){
   });
   return daily;
 }
+function ensureEquityStartAnchor(points,axisMode){
+  if(points.length!==1)return points;
+  const point=points[0];
+  const step=axisMode==='date'?86400000:1;
+  return [{
+    x:point.x-step,
+    y:0,
+    timestamp:Number.isFinite(point.timestamp)?point.timestamp-step:null,
+    tradeNumber:0,
+    synthetic:true,
+    baseline:true,
+  },point];
+}
 function insertEquityZeroCrossings(points){
   const result=[];
   points.forEach((point,index)=>{
@@ -7078,8 +7179,9 @@ function renderCharts(){
     return {x:chartAxisMode==='date'?plotTimestamp:index+1,y:pnlSeq[index],tradeNumber:index+1,trade,timestamp:plotTimestamp,tradePnl:Number(toPnlDisplay(trade))};
   });
   const displayedEquityPoints=chartAxisMode==='date'?aggregateEquityDaily(rawEquityPoints):rawEquityPoints;
-  const equityPoints=insertEquityZeroCrossings(displayedEquityPoints);
-  const datedValues=displayedEquityPoints.map(point=>point.x),xRange=datedValues.length>1?Math.max(1,datedValues[datedValues.length-1]-datedValues[0]):1;
+  const plotEquityPoints=ensureEquityStartAnchor(displayedEquityPoints,chartAxisMode);
+  const equityPoints=insertEquityZeroCrossings(plotEquityPoints);
+  const datedValues=plotEquityPoints.map(point=>point.x),xRange=datedValues.length>1?Math.max(1,datedValues[datedValues.length-1]-datedValues[0]):1;
   const visibleEquityValues=displayedEquityPoints.map(point=>point.y),yDomain=equityAxisDomain(visibleEquityValues);
   CH.equity=new Chart(equityCanvas,{
     type:'line',
@@ -7093,7 +7195,9 @@ function renderCharts(){
       tension:.38,
       spanGaps:false,
       fill:'origin',
-      pointRadius:0,
+      pointRadius:context=>context.raw?.synthetic?0:(displayedEquityPoints.length===1?4:0),
+      pointBackgroundColor:context=>Number(context.raw?.y)>=0?EQUITY_POS_COLOR:EQUITY_NEG_COLOR,
+      pointBorderColor:context=>Number(context.raw?.y)>=0?EQUITY_POS_COLOR:EQUITY_NEG_COLOR,
       pointHoverRadius:4,
       pointHitRadius:16,
       segment:{borderColor:context=>((context.p0.parsed.y+context.p1.parsed.y)/2)>=0?EQUITY_POS_COLOR:EQUITY_NEG_COLOR}
@@ -7472,15 +7576,7 @@ function isSupportedScreenshotFile(file){return file instanceof File&&SCREENSHOT
 
 function _setUploadingCount(n){
   _uploadingCount = Math.max(0, n);
-  const btn = document.querySelector('#trade-modal .btn-primary');
-  if(!btn) return;
-  if(_uploadingCount > 0){
-    btn.disabled = true;
-    btn.style.opacity = '0.5';
-  } else {
-    btn.disabled = false;
-    btn.style.opacity = '';
-  }
+  updateTradeSaveButton();
 }
 
 // Compress image to JPEG via canvas (max 1200px wide, quality 0.82)
