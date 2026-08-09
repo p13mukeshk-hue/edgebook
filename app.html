@@ -201,6 +201,17 @@ body.light .acct-dd-item.active-acct{background:rgba(196,125,10,0.08)}
 .page-content.active{display:block;animation:fadeIn .25s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
+/* Dashboard text sits on the darkest, most data-dense surface. Keep its
+   secondary hierarchy distinct while lifting small labels above AA contrast. */
+#page-dashboard{--text2:#adb6cd;--text3:#8d98b6}
+body.light #page-dashboard{--text2:#4a4438;--text3:#6f6658}
+#page-dashboard .mc-change,#page-dashboard .chart-sub,#page-dashboard .equity-axis-btn,
+#page-dashboard .insight-mini-sub,#page-dashboard .insight-mini-footer,
+#page-dashboard .insight-ring-label,#page-dashboard .insight-legend-row{font-weight:500}
+#page-dashboard .insight-mini-sub,#page-dashboard .insight-mini-footer,
+#page-dashboard .insight-legend-row{font-size:10px}
+#page-dashboard .insight-ring-label{font-size:9px}
+
 /* ACCOUNT TABS (for cumulative vs individual) */
 .acct-tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;align-items:center}
 .ai-report-btn{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:8px 14px;border-radius:8px;border:0.5px solid rgba(29,158,117,0.4);background:rgba(29,158,117,0.06);color:var(--green);font-size:12px;font-weight:500;cursor:pointer;font-family:var(--font-body);transition:.15s;margin-top:10px}
@@ -6873,7 +6884,7 @@ function calcPos(){
    CHARTS
 ══════════════════════════════════════════════════════ */
 const CBO={responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}}};
-const GC='rgba(255,255,255,0.04)', TC='#5a6382';
+const GC='rgba(255,255,255,0.04)', TC='#5a6382', DASH_TC='#8d98b6';
 const EQUITY_POS_COLOR='#22c987', EQUITY_NEG_COLOR='#ff5e6a';
 let equityAxisMode='date';
 
@@ -7098,7 +7109,7 @@ function renderDashboardInsights(src,closed,displayC,isAll){
   setDashboardInsightEmpty('symbol',!symbolRows.length);
   document.getElementById('symbol-summary').textContent=symbolRows.length?`${bySymbol.size} symbol${bySymbol.size===1?'':'s'} · net ${signedMoney(ledger.reduce((sum,event)=>sum+event.displayPnl,0),displayC,0)}`:'';
   if(symbolRows.length){
-    CH.symbol=new Chart(document.getElementById('symbol-chart'),{type:'bar',data:{labels:symbolRows.map(row=>row.symbol),datasets:[{data:symbolRows.map(row=>Number(row.pnl.toFixed(2))),backgroundColor:symbolRows.map(row=>row.pnl>=0?'rgba(34,201,135,.78)':'rgba(255,94,106,.78)'),borderRadius:4,barThickness:9}]},options:{...CBO,indexAxis:'y',animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)}`}}},scales:{x:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,.35)':GC},ticks:{color:TC,font:{size:8},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}},y:{grid:{display:false},ticks:{color:TC,font:{size:8},autoSkip:false}}}}});
+    CH.symbol=new Chart(document.getElementById('symbol-chart'),{type:'bar',data:{labels:symbolRows.map(row=>row.symbol),datasets:[{data:symbolRows.map(row=>Number(row.pnl.toFixed(2))),backgroundColor:symbolRows.map(row=>row.pnl>=0?'rgba(34,201,135,.78)':'rgba(255,94,106,.78)'),borderRadius:4,barThickness:9}]},options:{...CBO,indexAxis:'y',animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)}`}}},scales:{x:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,.35)':GC},ticks:{color:DASH_TC,font:{size:9,weight:500},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}},y:{grid:{display:false},ticks:{color:DASH_TC,font:{size:9,weight:500},autoSkip:false}}}}});
   }
 
   // Completed-trade outcomes; a doughnut is appropriate because these are counts.
@@ -7125,7 +7136,7 @@ function renderDashboardInsights(src,closed,displayC,isAll){
   setDashboardInsightEmpty('direction',!hasDirection);
   document.getElementById('direction-summary').textContent=hasDirection?directionNames.map(name=>`${name} ${directionStats[name].count?Math.round(directionStats[name].wins/directionStats[name].count*100):0}% WR`).join(' · '):'';
   if(hasDirection){
-    CH.direction=new Chart(document.getElementById('direction-chart'),{type:'bar',data:{labels:directionNames,datasets:[{data:directionNames.map(name=>Number(directionStats[name].pnl.toFixed(2))),backgroundColor:directionNames.map(name=>directionStats[name].pnl>=0?'rgba(34,201,135,.78)':'rgba(255,94,106,.78)'),borderRadius:5,maxBarThickness:38}]},options:{...CBO,animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)} realised`}}},scales:{x:{grid:{display:false},ticks:{color:TC,font:{size:9}}},y:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,.35)':GC},ticks:{color:TC,font:{size:8},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}}}}});
+    CH.direction=new Chart(document.getElementById('direction-chart'),{type:'bar',data:{labels:directionNames,datasets:[{data:directionNames.map(name=>Number(directionStats[name].pnl.toFixed(2))),backgroundColor:directionNames.map(name=>directionStats[name].pnl>=0?'rgba(34,201,135,.78)':'rgba(255,94,106,.78)'),borderRadius:5,maxBarThickness:38}]},options:{...CBO,animation:{duration:320},plugins:{legend:{display:false},tooltip:{callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)} realised`}}},scales:{x:{grid:{display:false},ticks:{color:DASH_TC,font:{size:9,weight:500}}},y:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,.35)':GC},ticks:{color:DASH_TC,font:{size:9,weight:500},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}}}}});
   }
 
   // Realised-event ledger keeps partial closes on their actual trading day.
@@ -7222,15 +7233,15 @@ function renderCharts(){
           bounds:'data',
           grace:'2%',
           grid:{color:GC},
-          title:{display:true,text:chartAxisMode==='date'?'Close date':'Completed trade number',color:TC,font:{size:10,weight:'normal'}},
-          ticks:{color:TC,font:{size:10},autoSkip:true,maxTicksLimit:7,maxRotation:0,callback:value=>chartAxisMode==='date'?equityDateTick(value,xRange):`#${Math.round(value)}`}
+          title:{display:true,text:chartAxisMode==='date'?'Close date':'Completed trade number',color:DASH_TC,font:{size:10,weight:500}},
+          ticks:{color:DASH_TC,font:{size:10,weight:500},autoSkip:true,maxTicksLimit:7,maxRotation:0,callback:value=>chartAxisMode==='date'?equityDateTick(value,xRange):`#${Math.round(value)}`}
         },
         y:{
           min:yDomain.min,
           max:yDomain.max,
           grid:{color:context=>Number(context.tick?.value)===0?'rgba(140,149,176,0.42)':GC,lineWidth:context=>Number(context.tick?.value)===0?1.25:1},
-          title:{display:true,text:`Cumulative P&L (${isAll?'USD':displayC})`,color:TC,font:{size:10,weight:'normal'}},
-          ticks:{color:TC,font:{size:10},maxTicksLimit:7,callback:value=>equityMoneyTick(value,displayC)}
+          title:{display:true,text:`Cumulative P&L (${isAll?'USD':displayC})`,color:DASH_TC,font:{size:10,weight:500}},
+          ticks:{color:DASH_TC,font:{size:10,weight:500},maxTicksLimit:7,callback:value=>equityMoneyTick(value,displayC)}
         }
       }
     }

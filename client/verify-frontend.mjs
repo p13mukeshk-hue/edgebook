@@ -302,6 +302,9 @@ requireMatch(app, /function clearSymbolsForTab\b[\s\S]{0,800}?async\(\)=>\{[\s\S
 // presenting them on a proportionate, intelligible horizontal axis.
 requireMatch(app, /class=["']equity-chart-wrap["'][\s\S]{0,120}?canvas id=["']equity-chart["']/, 'responsive equity chart wrapper');
 requireMatch(app, /\.equity-chart-wrap\{[^}]*height:clamp\(300px,25vw,420px\)/, 'proportional equity chart height');
+requireMatch(app, /#page-dashboard\{--text2:#adb6cd;--text3:#8d98b6\}/, 'dashboard-scoped dark text contrast');
+requireMatch(app, /body\.light #page-dashboard\{--text2:#4a4438;--text3:#6f6658\}/, 'dashboard light-theme text hierarchy');
+requireMatch(app, /DASH_TC='#8d98b6'/, 'readable dashboard canvas labels');
 requireMatch(app, /setEquityAxisMode\(['"]date['"]\)[\s\S]{0,260}?By date/, 'date-based equity axis control');
 requireMatch(app, /setEquityAxisMode\(['"]trade['"]\)[\s\S]{0,260}?By trade #/, 'explicit trade-number equity axis control');
 requireMatch(app, /function equityTradeTimestamp\b/, 'equity close timestamp projection');
@@ -438,6 +441,7 @@ try {
       CBO: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
       GC: 'grid',
       TC: 'text',
+      DASH_TC: 'dashboard-text',
       FxRates: { toUSD: value => Number(value) },
       acctCur: () => '$',
       realizedLedgerForTrades: source => source,
