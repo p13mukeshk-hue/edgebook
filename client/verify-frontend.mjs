@@ -298,6 +298,48 @@ for (const mutation of ['saveBrokerMapping','addAccount','saveEditAccount','togg
 requireMatch(app, /function removeAccount\b[\s\S]{0,800}?async\(\)=>\{[\s\S]*?await SettingsManager\.set\(S\)/, 'removeAccount awaits settings persistence');
 requireMatch(app, /function clearSymbolsForTab\b[\s\S]{0,800}?async\(\)=>\{[\s\S]*?await commitSettings\(/, 'clearSymbolsForTab awaits settings persistence');
 
+// Trading Playbook: recommended defaults remain a low-friction starting point,
+// while user terminology, nested setups, ordered fields, and option libraries
+// stay fully editable without mutating historical snapshots.
+requireMatch(app, /id=["']sn-playbook["'][\s\S]{0,180}?showSPanel\(['"]playbook['"]/, 'Trading Playbook settings navigation');
+requireMatch(app, /id=["']sp-playbook["'][\s\S]*?Edgebook recommended[\s\S]*?My custom playbook/, 'recommended and custom playbook choices');
+requireMatch(app, /function playbookRecommendedSettings\b[\s\S]*?strategy:\{label:'Strategy',enabled:true[\s\S]*?execution:\{label:'Execution quality',enabled:false/, 'low-friction recommended playbook defaults');
+requireMatch(app, /function normalizePlaybookSettings\b[\s\S]*?fields\[key\]\.required=false/, 'hidden playbook fields cannot remain required');
+requireMatch(app, /function buildPlaybookStrategyList\b[\s\S]*?addPlaybookSetup/, 'nested strategy and setup management');
+requireMatch(app, /function buildTradePlaybookForm\b[\s\S]*?updateTradeSetupOptions/, 'dependent playbook trade-form dropdowns');
+requireMatch(app, /function readTradePlaybook\b[\s\S]*?playbookTradeSnapshot\(existingTrade\)/, 'historical playbook snapshot preservation');
+requireMatch(app, /const playbookSnapshot=readTradePlaybook\(existingTrade\);cfVals\.playbook=playbookSnapshot/, 'manual trades persist playbook snapshots');
+requireMatch(app, /validateTradePlaybook\(\)/, 'required playbook field validation');
+requireMatch(app, /Setup Grade['"],[\s\S]*?Execution Quality/, 'playbook fields included in CSV backup');
+rejectMatch(app, /id=["']t-strat["']/, 'obsolete free-text strategy field');
+
+try {
+  const playbookSource = sourceBetween('const PLAYBOOK_FIELD_META=', 'function settingsSnapshot');
+  const { exports: playbook } = evaluateSecurityFixture(
+    playbookSource,
+    {},
+    '{playbookRecommendedSettings,normalizePlaybookSettings}',
+  );
+  const recommended = playbook.playbookRecommendedSettings();
+  if (!recommended.fields.strategy.enabled || !recommended.fields.setup.enabled || recommended.fields.probability.enabled || recommended.fields.execution.enabled) {
+    failures.push('Recommended playbook no longer starts with the intended low-friction field set');
+  }
+  const custom = playbook.normalizePlaybookSettings({
+    mode: 'custom',
+    fields: { strategy: { label: 'Trading System', enabled: false, required: true, order: 4 } },
+    strategies: [{ id: 'fib', name: 'Fibonacci', setups: [{ id: 'golden', name: 'Golden pocket' }] }],
+    grades: [{ id: 'prime', label: 'Prime', description: 'Every criterion present' }],
+  });
+  if (custom.mode !== 'custom' || custom.fields.strategy.label !== 'Trading System' || custom.fields.strategy.enabled || custom.fields.strategy.required ||
+      custom.strategies[0]?.name !== 'Fibonacci' || custom.strategies[0]?.setups?.[0]?.name !== 'Golden pocket' || custom.grades[0]?.label !== 'Prime') {
+    failures.push('Custom playbook normalization lost terminology, hierarchy, or hidden-field safety');
+  }
+  const blank = playbook.normalizePlaybookSettings({ mode: 'custom', strategies: [], grades: [] });
+  if (blank.strategies.length !== 0 || blank.grades.length !== 0) failures.push('Custom blank playbook was repopulated unexpectedly');
+} catch (error) {
+  failures.push(`Trading Playbook fixture failed: ${error.message}`);
+}
+
 // The dashboard equity curve must retain the underlying per-trade values while
 // presenting them on a proportionate, intelligible horizontal axis.
 requireMatch(app, /class=["']equity-chart-wrap["'][\s\S]{0,120}?canvas id=["']equity-chart["']/, 'responsive equity chart wrapper');
@@ -883,11 +925,11 @@ try {
   if (!unterminatedRejected) failures.push('CSV parser accepted an unterminated quoted field');
   const journalCsv = csvExport.tradeJournalCsv([{
     date: '2026-01-01', symbol: '=CMD()', asset: 'eq', direction: 'Long', entry: 10, exit: 8, size: 1,
-    pnl: -2, strategy: '+SUM(1,1)', emotion: 'Calm', accountId: 'acct-a', notes: 'line 1, "quoted"\nline 2', isOpen: false,
+    pnl: -2, strategy: '+SUM(1,1)', custom: { playbook: { setup: '=HYPERLINK("bad")', grade: 'A' } }, emotion: 'Calm', accountId: 'acct-a', notes: 'line 1, "quoted"\nline 2', isOpen: false,
   }]);
   const journalRows = JSON.parse(JSON.stringify(parser.parseCSV(journalCsv)));
-  if (!journalCsv.includes('\r\n') || journalRows.length !== 2 || journalRows[1].length !== 14 || journalRows[1][1] !== "'=CMD()" ||
-      journalRows[1][9] !== '-2.00' || journalRows[1][10] !== "'+SUM(1,1)" || journalRows[1][12] !== "'@Desk" || journalRows[1][13] !== 'line 1, "quoted"\nline 2') {
+  if (!journalCsv.includes('\r\n') || journalRows.length !== 2 || journalRows[1].length !== 21 || journalRows[1][1] !== "'=CMD()" ||
+      journalRows[1][9] !== '-2.00' || journalRows[1][10] !== "'+SUM(1,1)" || journalRows[1][11] !== "'=HYPERLINK(\"bad\")" || journalRows[1][19] !== "'@Desk" || journalRows[1][20] !== 'line 1, "quoted"\nline 2') {
     failures.push('RFC 4180 journal export or spreadsheet-injection protection regressed');
   }
 } catch (error) {

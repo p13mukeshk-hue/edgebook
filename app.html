@@ -557,6 +557,46 @@ body.light .theme-toggle-btn .theme-icon{transform:rotate(180deg)}
 .btn-sm{padding:7px 14px;background:var(--accent);border:none;border-radius:8px;color:#fff;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font-body);transition:.2s;display:inline-flex;align-items:center;gap:5px}
 .btn-sm:hover{background:var(--accent2)}
 
+/* TRADING PLAYBOOK */
+.pb-preset-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:16px 20px}
+.pb-preset{padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--bg3);cursor:pointer;text-align:left;color:var(--text);font-family:var(--font-body);transition:.15s}
+.pb-preset:hover{border-color:var(--border2);transform:translateY(-1px)}
+.pb-preset.active{border-color:var(--accent);background:var(--accent-glow)}
+.pb-preset-title{font-size:13px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.pb-preset-copy{font-size:11px;color:var(--text2);line-height:1.45}
+.pb-field-row{display:grid;grid-template-columns:minmax(170px,1fr) minmax(150px,.8fr) auto;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)}
+.pb-field-row:last-child{border-bottom:none}
+.pb-field-label{font-size:12px;font-weight:600;margin-bottom:2px}
+.pb-field-desc{font-size:11px;color:var(--text3);line-height:1.35}
+.pb-field-alias{width:100%;padding:6px 9px;font-size:11px}
+.pb-field-actions{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.pb-required-check{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text2);cursor:pointer}
+.pb-order-buttons{display:flex;gap:3px}
+.pb-icon-btn{width:25px;height:25px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:6px;background:var(--bg4);color:var(--text2);cursor:pointer;font-size:10px}
+.pb-icon-btn:hover{color:var(--text);border-color:var(--border2)}
+.pb-library-wrap{padding:14px 16px}
+.pb-strategy-card{border:1px solid var(--border);background:var(--bg3);border-radius:10px;margin-bottom:8px;overflow:hidden}
+.pb-strategy-head{display:flex;align-items:flex-start;gap:10px;padding:11px 12px}
+.pb-strategy-info{flex:1;min-width:0}
+.pb-strategy-name{font-size:12px;font-weight:600}
+.pb-strategy-desc{font-size:10px;color:var(--text3);margin-top:2px}
+.pb-setup-list{display:flex;flex-wrap:wrap;gap:5px;padding:0 12px 10px}
+.pb-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 7px;border:1px solid var(--border);background:var(--bg2);border-radius:14px;font-size:10px;color:var(--text2)}
+.pb-chip button{border:none;background:none;color:var(--text3);cursor:pointer;padding:0;font-size:9px}
+.pb-inline-add{display:flex;gap:7px;align-items:center;padding:10px 12px;border-top:1px solid var(--border)}
+.pb-inline-add input{flex:1;min-width:0;padding:6px 9px;font-size:11px}
+.pb-add-grid{display:grid;grid-template-columns:minmax(130px,.7fr) minmax(170px,1fr) auto;gap:8px;padding:12px 0 0}
+.pb-add-grid input{padding:7px 10px;font-size:11px}
+.pb-option-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.pb-option-list{display:flex;flex-wrap:wrap;gap:6px}
+.pb-option-chip{display:inline-flex;align-items:center;gap:7px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg3);font-size:11px}
+.pb-option-chip.archived{opacity:.5}
+.pb-option-chip button{border:none;background:none;color:var(--text3);cursor:pointer;padding:0}
+.pb-form-section.trade-field-hidden{display:none!important}
+.pb-trade-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-bottom:14px}
+@media(max-width:900px){.pb-field-row{grid-template-columns:1fr}.pb-field-actions{justify-content:space-between}.pb-add-grid{grid-template-columns:1fr}.pb-trade-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:560px){.pb-preset-grid{grid-template-columns:1fr}.pb-trade-grid{grid-template-columns:1fr}}
+
 /* color dot selector */
 .color-dots{display:flex;gap:6px}
 .color-dot-opt{width:22px;height:22px;border-radius:50%;cursor:pointer;transition:.15s;flex-shrink:0;box-shadow:0 0 0 2px transparent,0 0 0 4px transparent}
@@ -1366,7 +1406,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
           <div class="chart-card">
             <div class="chart-header" style="display:flex;align-items:flex-start;justify-content:space-between">
               <div style="display:flex;align-items:center;gap:6px">
-                <div><div class="chart-title">Setup quality</div><div class="chart-sub">Performance by strategy</div></div>
+                <div><div class="chart-title">Setup quality</div><div class="chart-sub">Performance by logged setup</div></div>
                 <div class="a-tooltip-wrap">
                   <button class="a-info-btn" aria-label="What is Setup quality">?</button>
                   <div class="a-tooltip">
@@ -1636,6 +1676,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
             <div class="s-nav-group">
               <div class="s-nav-group-label">Trade log</div>
               <div class="s-nav-item" id="sn-form-fields" onclick="showSPanel('form-fields',this)"><i class="fa-solid fa-table-columns"></i> Form fields</div>
+              <div class="s-nav-item" id="sn-playbook" onclick="showSPanel('playbook',this)"><i class="fa-solid fa-diagram-project"></i> Trading playbook</div>
             </div>
             <div class="s-nav-group">
               <div class="s-nav-group-label">Dashboard</div>
@@ -1740,6 +1781,58 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
                     <input id="cf-opts" placeholder="Dropdown options (comma-sep)">
                     <button class="btn-sm" onclick="addCustomField()" style="align-self:flex-end;padding:5px 14px;font-size:11px"><i class="fa-solid fa-plus"></i> Add field</button>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- TRADING PLAYBOOK -->
+            <div id="sp-playbook" class="settings-panel">
+              <div class="s-panel-head">
+                <div class="s-panel-head-left"><div class="s-panel-title">Trading playbook</div><div class="s-panel-sub">Start with Edgebook's recommended structure or build your own terminology and classifications.</div></div>
+                <div class="help-wrap"><div class="help-icon help-lg" onclick="toggleHelp('ht-playbook',event)">?</div><div class="help-tooltip ht-below ht-right" id="ht-playbook"><div class="ht-title"><i class="fa-solid fa-diagram-project"></i> Trading playbook</div><div class="ht-body">Strategies contain setups. Every playbook field can be shown, hidden, renamed, reordered, or made required. Archived values remain attached to historical trades.</div></div></div>
+              </div>
+
+              <div class="s-section">
+                <div class="s-section-head"><div class="s-section-title">Starting structure</div><div class="s-section-sub">The recommended preset is editable. Custom mode can retain it or begin empty.</div></div>
+                <div class="pb-preset-grid">
+                  <button type="button" class="pb-preset" id="pb-preset-recommended" onclick="choosePlaybookMode('recommended')"><div class="pb-preset-title"><i class="fa-solid fa-wand-magic-sparkles"></i> Edgebook recommended</div><div class="pb-preset-copy">A practical, low-friction structure with four fields visible and additional context ready to enable.</div></button>
+                  <button type="button" class="pb-preset" id="pb-preset-custom" onclick="choosePlaybookMode('custom')"><div class="pb-preset-title"><i class="fa-solid fa-sliders"></i> My custom playbook</div><div class="pb-preset-copy">Use your own field names, strategies, setups, grades and classification options.</div></button>
+                </div>
+              </div>
+
+              <div class="s-section">
+                <div class="s-section-head"><div class="s-section-title">Trade classification fields</div><div class="s-section-sub">Only enabled fields appear while logging a trade. Required can be applied independently.</div></div>
+                <div id="pb-field-list"></div>
+              </div>
+
+              <div class="s-section">
+                <div class="s-section-head"><div class="s-section-title">Strategy &amp; setup library</div><div class="s-section-sub">Setups are organised inside a strategy and filtered automatically in the trade form.</div></div>
+                <div class="pb-library-wrap">
+                  <div id="pb-strategy-list"></div>
+                  <div class="pb-add-grid">
+                    <input id="pb-new-strategy-name" maxlength="80" placeholder="Strategy name, e.g. Fibonacci">
+                    <input id="pb-new-strategy-desc" maxlength="240" placeholder="Short description (optional)">
+                    <button type="button" class="btn-sm" onclick="addPlaybookStrategy()"><i class="fa-solid fa-plus"></i> Add strategy</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="s-section">
+                <div class="s-section-head"><div class="s-section-title">Classification option libraries</div><div class="s-section-sub">Customize grades, probability bands, horizons, overnight exposure, market conditions and execution quality.</div></div>
+                <div class="pb-library-wrap">
+                  <div class="pb-option-toolbar">
+                    <select id="pb-option-kind" class="s-select" onchange="buildPlaybookOptionLibrary()">
+                      <option value="grades">Setup grades</option>
+                      <option value="probabilities">Estimated probability</option>
+                      <option value="horizons">Trade horizons</option>
+                      <option value="overnight">Overnight exposure</option>
+                      <option value="conditions">Market conditions</option>
+                      <option value="execution">Execution quality</option>
+                    </select>
+                    <input id="pb-new-option" maxlength="80" placeholder="Add an option" style="padding:7px 10px;min-width:180px">
+                    <button type="button" class="btn-sm" onclick="addPlaybookOption()"><i class="fa-solid fa-plus"></i> Add</button>
+                  </div>
+                  <div class="pb-option-list" id="pb-option-list"></div>
                 </div>
               </div>
             </div>
@@ -1968,8 +2061,11 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
       <div class="form-grid" style="margin-bottom:14px">
         <div class="field" id="tf-date"><label>Date</label><input id="t-date" type="date"></div>
         <div class="field" id="tf-time"><label>Entry time</label><input id="t-time" type="time"></div>
-        <div class="field" id="tf-strategy"><label>Strategy / Setup</label><input id="t-strat" placeholder="Breakout, Trend follow…"></div>
         <div id="custom-fields-trade" class="form-grid" style="display:contents"></div>
+      </div>
+      <div id="trade-playbook-section" class="pb-form-section">
+        <div class="section-divider">Playbook classification</div>
+        <div id="trade-playbook-fields" class="pb-trade-grid"></div>
       </div>
       <div class="section-divider">Psychology</div>
       <div class="form-grid" style="margin-bottom:14px">
@@ -2302,6 +2398,9 @@ const SettingsManager = {
     // second click can mutate nested preferences while the first request is
     // still queued, making the acknowledged value differ from what was sent.
     const normalized = this._normalizeArrayFields(JSON.parse(JSON.stringify(d)));
+    normalized.playbook=normalizePlaybookSettings(normalized.playbook);
+    if(normalized.formFields)delete normalized.formFields.strategy;
+    normalized.version=5;
     if(window._dataMode==='vps' && window._vpsData && this._uid !== 'guest'){
       if(this._blockedByConflict){
         showToast('Settings changed in another tab. Reload before making more changes.','error');
@@ -2339,7 +2438,7 @@ const SettingsManager = {
   setUser(uid){ this._uid=uid||'guest'; this._blockedByConflict=false; },
   defaults(){
     return {
-      version:4,
+      version:5,
       formFields:{
         asset:{label:'Asset class',enabled:true,required:true},
         symbol:{label:'Symbol',enabled:true,required:true},
@@ -2351,12 +2450,12 @@ const SettingsManager = {
         stoploss:{label:'Stop loss',enabled:true,required:false},
         takeprofit:{label:'Take profit',enabled:true,required:false},
         date:{label:'Date',enabled:true,required:false},
-        strategy:{label:'Strategy',enabled:true,required:false},
         emotion:{label:'Pre-trade emotion',enabled:true,required:false},
         notes:{label:'Notes',enabled:true,required:false},
         screenshot:{label:'Screenshot URL',enabled:true,required:false},
       },
       customFields:[],
+      playbook:playbookRecommendedSettings(),
       symbols: JSON.parse(JSON.stringify(DEFAULT_SYMBOLS)),
       accounts:[],
       widgets:{
@@ -2390,7 +2489,7 @@ const SettingsManager = {
   get(){
     const saved=this._load(); if(!saved) return this.defaults();
     const d=this.defaults();
-    return {
+    const merged={
       ...d,...saved,
       formFields:{...d.formFields,...(saved.formFields||{})},
       symbols:{...d.symbols,...(saved.symbols||{})},
@@ -2399,12 +2498,120 @@ const SettingsManager = {
       sidebarSections:{...d.sidebarSections,...(saved.sidebarSections||{})},
       prefs:{...d.prefs,...(saved.prefs||{})},
       customFields:Array.isArray(saved.customFields)?saved.customFields:saved.customFields?Object.values(saved.customFields):[],
+      playbook:normalizePlaybookSettings(saved.playbook),
       brokerAccountMap:saved.brokerAccountMap||{},
     };
+    delete merged.formFields.strategy;
+    merged.version=5;
+    return merged;
   },
   set(s){ return this._save(s); },
   reset(){ this._clear(); return this.defaults(); },
 };
+
+const PLAYBOOK_FIELD_META={
+  strategy:{defaultLabel:'Strategy',description:'Your broader playbook approach'},
+  setup:{defaultLabel:'Setup',description:'A specific entry pattern inside a strategy'},
+  grade:{defaultLabel:'Setup grade',description:'Quality of the opportunity before entry'},
+  probability:{defaultLabel:'Estimated probability',description:'Your pre-trade success estimate'},
+  horizon:{defaultLabel:'Trade horizon',description:'Scalp, intraday, swing or position'},
+  overnight:{defaultLabel:'Overnight exposure',description:'Whether holding beyond the session was intended'},
+  condition:{defaultLabel:'Market condition',description:'The environment in which the trade was taken'},
+  execution:{defaultLabel:'Execution quality',description:'How faithfully the trade followed the plan'},
+};
+const PLAYBOOK_OPTION_COLLECTIONS={
+  grade:'grades',probability:'probabilities',horizon:'horizons',overnight:'overnight',condition:'conditions',execution:'execution',
+};
+function playbookRecommendedSettings(){
+  return {
+    version:1,mode:'recommended',
+    fields:{
+      strategy:{label:'Strategy',enabled:true,required:false,order:0},
+      setup:{label:'Setup',enabled:true,required:false,order:1},
+      grade:{label:'Setup grade',enabled:true,required:false,order:2},
+      horizon:{label:'Trade horizon',enabled:true,required:false,order:3},
+      probability:{label:'Estimated probability',enabled:false,required:false,order:4},
+      overnight:{label:'Overnight exposure',enabled:false,required:false,order:5},
+      condition:{label:'Market condition',enabled:false,required:false,order:6},
+      execution:{label:'Execution quality',enabled:false,required:false,order:7},
+    },
+    strategies:[
+      {id:'strategy-breakout',name:'Breakout',description:'Expansion beyond a defined range or level',archived:false,setups:[
+        {id:'setup-opening-range',name:'Opening range breakout',archived:false},
+        {id:'setup-breakout-retest',name:'Breakout & retest',archived:false},
+        {id:'setup-range-expansion',name:'Range expansion',archived:false},
+      ]},
+      {id:'strategy-trend-continuation',name:'Trend continuation',description:'Continuation entries aligned with the prevailing trend',archived:false,setups:[
+        {id:'setup-first-pullback',name:'First pullback',archived:false},
+        {id:'setup-flag-continuation',name:'Flag continuation',archived:false},
+      ]},
+      {id:'strategy-mean-reversion',name:'Mean reversion',description:'Reversion toward value after an extension',archived:false,setups:[
+        {id:'setup-vwap-reclaim',name:'VWAP reclaim',archived:false},
+        {id:'setup-exhaustion-reversal',name:'Exhaustion reversal',archived:false},
+      ]},
+    ],
+    grades:[
+      {id:'grade-a-plus',label:'A+',description:'Exceptional: every required condition is present',archived:false},
+      {id:'grade-a',label:'A',description:'High-quality valid setup',archived:false},
+      {id:'grade-b',label:'B',description:'Valid setup with one meaningful weakness',archived:false},
+      {id:'grade-c',label:'C',description:'Marginal or speculative setup',archived:false},
+      {id:'grade-d',label:'D',description:'Outside the playbook or rule-breaking',archived:false,ruleViolation:true},
+    ],
+    probabilities:['Below 40%','40–49%','50–59%','60–69%','70–79%','80%+'].map((label,index)=>({id:`probability-${index+1}`,label,archived:false})),
+    horizons:['Scalp','Intraday','Swing','Position'].map((label,index)=>({id:`horizon-${index+1}`,label,archived:false})),
+    overnight:['Same-day exit intended','Overnight holding allowed','Overnight hold unplanned'].map((label,index)=>({id:`overnight-${index+1}`,label,archived:false})),
+    conditions:['Trending','Ranging','Volatile','Quiet','News-driven'].map((label,index)=>({id:`condition-${index+1}`,label,archived:false})),
+    execution:['Clean','Acceptable','Poor','Rule violation'].map((label,index)=>({id:`execution-${index+1}`,label,archived:false})),
+  };
+}
+function cleanPlaybookText(value,max=120){return String(value??'').trim().slice(0,max);}
+function playbookSafeId(value,prefix='item'){
+  const clean=String(value??'').trim().replace(/[^a-zA-Z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'').slice(0,80);
+  return clean||`${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+}
+function normalizePlaybookOptions(value,fallback,prefix){
+  const input=Array.isArray(value)?value:fallback;
+  const seen=new Set();
+  return input.map((entry,index)=>{
+    const object=entry&&typeof entry==='object'?entry:{label:entry};
+    const label=cleanPlaybookText(object.label||object.name,80);if(!label)return null;
+    let id=playbookSafeId(object.id||`${prefix}-${index+1}`,prefix);
+    if(seen.has(id))id=`${id}-${index+1}`;seen.add(id);
+    return {id,label,description:cleanPlaybookText(object.description,240),archived:object.archived===true,...(object.ruleViolation===true?{ruleViolation:true}:{})};
+  }).filter(Boolean).slice(0,100);
+}
+function normalizePlaybookSettings(value){
+  const base=playbookRecommendedSettings(),input=value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+  const fields={};
+  Object.entries(PLAYBOOK_FIELD_META).forEach(([key,meta],index)=>{
+    const supplied=input.fields?.[key]&&typeof input.fields[key]==='object'?input.fields[key]:{};
+    const fallback=base.fields[key];
+    fields[key]={
+      label:cleanPlaybookText(supplied.label||fallback.label||meta.defaultLabel,60),
+      enabled:typeof supplied.enabled==='boolean'?supplied.enabled:fallback.enabled,
+      required:typeof supplied.required==='boolean'?supplied.required:fallback.required,
+      order:Number.isInteger(supplied.order)?Math.max(0,Math.min(50,supplied.order)):index,
+    };
+    if(!fields[key].enabled)fields[key].required=false;
+  });
+  const strategyInput=Array.isArray(input.strategies)?input.strategies:base.strategies;
+  const strategyIds=new Set();
+  const strategies=strategyInput.map((entry,index)=>{
+    if(!entry||typeof entry!=='object')return null;
+    const name=cleanPlaybookText(entry.name,80);if(!name)return null;
+    let id=playbookSafeId(entry.id||`strategy-${index+1}`,'strategy');if(strategyIds.has(id))id=`${id}-${index+1}`;strategyIds.add(id);
+    return {id,name,description:cleanPlaybookText(entry.description,240),archived:entry.archived===true,setups:normalizePlaybookOptions(entry.setups,[],'setup').map(option=>({id:option.id,name:option.label,archived:option.archived}))};
+  }).filter(Boolean).slice(0,100);
+  return {
+    version:1,mode:input.mode==='custom'?'custom':'recommended',fields,strategies,
+    grades:normalizePlaybookOptions(input.grades,base.grades,'grade'),
+    probabilities:normalizePlaybookOptions(input.probabilities,base.probabilities,'probability'),
+    horizons:normalizePlaybookOptions(input.horizons,base.horizons,'horizon'),
+    overnight:normalizePlaybookOptions(input.overnight,base.overnight,'overnight'),
+    conditions:normalizePlaybookOptions(input.conditions,base.conditions,'condition'),
+    execution:normalizePlaybookOptions(input.execution,base.execution,'execution'),
+  };
+}
 function settingsSnapshot(){
   return JSON.parse(JSON.stringify(S));
 }
@@ -2775,6 +2982,8 @@ function mergeBrowserSettings(remoteInput,localInput){
     widgets:nestedRemoteWins('widgets'),
     sidebarSections:nestedRemoteWins('sidebarSections'),
     customFields:remoteCustom.length?remoteCustom:localCustom,
+    playbook:remote.playbook||local.playbook||null,
+    version:5,
   };
 }
 async function migrateBrowserLocalSettings(user,remoteSettings){
@@ -3290,8 +3499,11 @@ function bootApp(user){
             sidebarSections:{...d.sidebarSections,...(remote.sidebarSections||{})},
             prefs:{...d.prefs,...(remote.prefs||{})},
             customFields:Array.isArray(remote.customFields)?remote.customFields:[],
+            playbook:normalizePlaybookSettings(remote.playbook),
             brokerAccountMap:remote.brokerAccountMap||{},
           };
+          delete S.formFields.strategy;
+          S.version=5;
           S=await migrateBrowserLocalSettings(user,S);
           try{ localStorage.setItem(SettingsManager._key(),JSON.stringify(S)); }catch(e){}
         }
@@ -3357,6 +3569,9 @@ function bootApp(user){
           if(fs.widgets    && Object.keys(fs.widgets).length    > 0) S.widgets    = {...S.widgets,    ...fs.widgets};
           if(fs.sidebarSections && Object.keys(fs.sidebarSections).length > 0) S.sidebarSections = {...S.sidebarSections, ...fs.sidebarSections};
           if(fs.customFields?.length > 0) S.customFields = fs.customFields;
+          if(fs.playbook) S.playbook=normalizePlaybookSettings(fs.playbook);
+          delete S.formFields.strategy;
+          S.version=5;
           SettingsManager._normalizeArrayFields(S);
           // Persist merged result to localStorage only — do NOT write back to Firestore here.
           // Writing back would overwrite any pending Firestore write the user triggered
@@ -5041,10 +5256,11 @@ function updateSizeLabel(){
    APPLY SETTINGS
 ══════════════════════════════════════════════════════ */
 function applySettings(){
+  S.playbook=normalizePlaybookSettings(S.playbook);
   Object.entries(S.sidebarSections).forEach(([k,v])=>{ document.getElementById('nav-'+k)?.classList.toggle('hidden-nav',!v.enabled); });
   Object.entries(S.widgets).forEach(([k,v])=>{ document.getElementById('widget-'+k)?.classList.toggle('widget-hidden',!v.enabled); });
   Object.entries(S.formFields).forEach(([k,v])=>{ document.getElementById('tf-'+k)?.classList.toggle('trade-field-hidden',!v.enabled); });
-  applyCompact(); buildCustomFieldsForm(); updateAccountSelect();
+  applyCompact(); buildCustomFieldsForm(); buildTradePlaybookForm(); updateAccountSelect();
 }
 function applyCompact(){
   const c=S.prefs.compactTable;
@@ -5055,7 +5271,7 @@ function applyCompact(){
    SETTINGS UI BUILDERS
 ══════════════════════════════════════════════════════ */
 function buildSettingsUI(){
-  buildFieldToggles(); buildCFList(); buildWidgetToggles(); buildSidebarToggles();
+  buildFieldToggles(); buildCFList(); buildPlaybookUI(); buildWidgetToggles(); buildSidebarToggles();
   buildSymbolUI(); buildAcctList(); syncPrefUI();
   buildColorRow('new-acct-color-row','new',selectedNewAcctColor);
   document.getElementById('trade-count-label').textContent=trades.length;
@@ -5131,6 +5347,48 @@ function editCustomField(id){
   document.querySelectorAll('.cf-edit-inline').forEach(r=>r.style.display='none');
   const row=document.getElementById(`cf-edit-row-${safeDomId(id)}`);
   if(row) row.style.display='flex';
+}
+function orderedPlaybookFields(){
+  return Object.keys(PLAYBOOK_FIELD_META).sort((a,b)=>(S.playbook.fields[a]?.order??0)-(S.playbook.fields[b]?.order??0));
+}
+function buildPlaybookUI(){
+  S.playbook=normalizePlaybookSettings(S.playbook);
+  document.getElementById('pb-preset-recommended')?.classList.toggle('active',S.playbook.mode==='recommended');
+  document.getElementById('pb-preset-custom')?.classList.toggle('active',S.playbook.mode==='custom');
+  const fields=document.getElementById('pb-field-list');
+  if(fields)fields.innerHTML=orderedPlaybookFields().map((key,index)=>{
+    const field=S.playbook.fields[key],meta=PLAYBOOK_FIELD_META[key];
+    return `<div class="pb-field-row">
+      <div><div class="pb-field-label">${escapeHtml(meta.defaultLabel)}</div><div class="pb-field-desc">${escapeHtml(meta.description)}</div></div>
+      <input class="pb-field-alias" maxlength="60" aria-label="${escapeHtml(meta.defaultLabel)} field label" value="${escapeHtml(field.label)}" onchange="renamePlaybookField(${inlineStringArg(key)},this.value)">
+      <div class="pb-field-actions">
+        <label class="pb-required-check"><input type="checkbox" ${field.required?'checked':''} ${field.enabled?'':'disabled'} onchange="setPlaybookFieldRequired(${inlineStringArg(key)},this.checked)"> Required</label>
+        <label class="toggle" title="Show ${escapeHtml(field.label)} in Log trade"><input type="checkbox" ${field.enabled?'checked':''} onchange="setPlaybookFieldEnabled(${inlineStringArg(key)},this.checked)"><div class="toggle-track"></div><div class="toggle-thumb"></div></label>
+        <div class="pb-order-buttons"><button class="pb-icon-btn" type="button" aria-label="Move ${escapeHtml(field.label)} up" onclick="movePlaybookField(${inlineStringArg(key)},-1)" ${index===0?'disabled':''}><i class="fa-solid fa-chevron-up"></i></button><button class="pb-icon-btn" type="button" aria-label="Move ${escapeHtml(field.label)} down" onclick="movePlaybookField(${inlineStringArg(key)},1)" ${index===Object.keys(PLAYBOOK_FIELD_META).length-1?'disabled':''}><i class="fa-solid fa-chevron-down"></i></button></div>
+      </div>
+    </div>`;
+  }).join('');
+  buildPlaybookStrategyList();buildPlaybookOptionLibrary();
+}
+function buildPlaybookStrategyList(){
+  const el=document.getElementById('pb-strategy-list');if(!el)return;
+  if(!S.playbook.strategies.length){el.innerHTML='<div style="font-size:12px;color:var(--text3);padding:4px 0 10px">No strategies yet. Add your first strategy below.</div>';return;}
+  el.innerHTML=S.playbook.strategies.map(strategy=>{
+    const strategyArg=inlineStringArg(strategy.id),domId=safeDomId(strategy.id);
+    const setups=(strategy.setups||[]).map(setup=>`<span class="pb-chip" style="${setup.archived?'opacity:.5':''}">${escapeHtml(setup.name)}${setup.archived?' · archived':''}<button type="button" aria-label="Edit ${escapeHtml(setup.name)}" onclick="renamePlaybookSetup(${strategyArg},${inlineStringArg(setup.id)})"><i class="fa-solid fa-pen"></i></button><button type="button" aria-label="${setup.archived?'Restore':'Archive'} ${escapeHtml(setup.name)}" onclick="togglePlaybookSetupArchive(${strategyArg},${inlineStringArg(setup.id)})"><i class="fa-solid ${setup.archived?'fa-rotate-left':'fa-box-archive'}"></i></button></span>`).join('');
+    return `<div class="pb-strategy-card" style="${strategy.archived?'opacity:.58':''}">
+      <div class="pb-strategy-head"><div class="pb-strategy-info"><div class="pb-strategy-name">${escapeHtml(strategy.name)}${strategy.archived?' · archived':''}</div><div class="pb-strategy-desc">${escapeHtml(strategy.description||'No description')}</div></div><button class="pb-icon-btn" type="button" aria-label="Edit ${escapeHtml(strategy.name)}" onclick="renamePlaybookStrategy(${strategyArg})"><i class="fa-solid fa-pen"></i></button><button class="pb-icon-btn" type="button" aria-label="${strategy.archived?'Restore':'Archive'} ${escapeHtml(strategy.name)}" onclick="togglePlaybookStrategyArchive(${strategyArg})"><i class="fa-solid ${strategy.archived?'fa-rotate-left':'fa-box-archive'}"></i></button></div>
+      <div class="pb-setup-list">${setups||'<span style="font-size:10px;color:var(--text3)">No setups yet</span>'}</div>
+      ${strategy.archived?'':`<div class="pb-inline-add"><input id="pb-setup-${domId}" maxlength="80" placeholder="Add a setup under ${escapeHtml(strategy.name)}" onkeydown="if(event.key==='Enter')addPlaybookSetup(${strategyArg})"><button type="button" class="btn-ghost" onclick="addPlaybookSetup(${strategyArg})">+ Add setup</button></div>`}
+    </div>`;
+  }).join('');
+}
+const PLAYBOOK_OPTION_LABELS={grades:'Setup grades',probabilities:'Estimated probability',horizons:'Trade horizons',overnight:'Overnight exposure',conditions:'Market conditions',execution:'Execution quality'};
+function buildPlaybookOptionLibrary(){
+  const el=document.getElementById('pb-option-list'),select=document.getElementById('pb-option-kind');if(!el||!select)return;
+  const kind=PLAYBOOK_OPTION_LABELS[select.value]?select.value:'grades',items=S.playbook[kind]||[];
+  document.getElementById('pb-new-option')?.setAttribute('placeholder',`Add to ${PLAYBOOK_OPTION_LABELS[kind].toLowerCase()}`);
+  el.innerHTML=items.length?items.map(item=>`<span class="pb-option-chip${item.archived?' archived':''}" title="${escapeHtml(item.description||'')}"><span>${escapeHtml(item.label)}${item.archived?' · archived':''}</span><button type="button" aria-label="Edit ${escapeHtml(item.label)}" onclick="renamePlaybookOption(${inlineStringArg(kind)},${inlineStringArg(item.id)})"><i class="fa-solid fa-pen"></i></button><button type="button" aria-label="${item.archived?'Restore':'Archive'} ${escapeHtml(item.label)}" onclick="togglePlaybookOptionArchive(${inlineStringArg(kind)},${inlineStringArg(item.id)})"><i class="fa-solid ${item.archived?'fa-rotate-left':'fa-box-archive'}"></i></button></span>`).join(''):'<span style="font-size:11px;color:var(--text3)">No options. Add one above.</span>';
 }
 function cancelEditCF(id){ const r=document.getElementById(`cf-edit-row-${safeDomId(id)}`); if(r) r.style.display='none'; }
 function buildWidgetToggles(){
@@ -5240,6 +5498,151 @@ function buildCustomFieldsForm(){
    SETTINGS MUTATIONS
 ══════════════════════════════════════════════════════ */
 async function toggleFormField(k,v){ const previous=settingsSnapshot(); S.formFields[k].enabled=v; if(!(await commitSettings(previous))) return; document.getElementById('tf-'+k)?.classList.toggle('trade-field-hidden',!v); showToast('Field '+(v?'shown':'hidden'),'success'); }
+async function commitPlaybookChange(previous,message='Playbook updated'){
+  S.playbook=normalizePlaybookSettings(S.playbook);S.playbook.mode='custom';
+  if(!(await commitSettings(previous)))return false;
+  buildPlaybookUI();buildTradePlaybookForm();showToast(message,'success');return true;
+}
+async function choosePlaybookMode(mode){
+  if(mode==='custom'){
+    if(S.playbook.mode==='custom')return;
+    const previous=settingsSnapshot();S.playbook.mode='custom';
+    if(!(await commitSettings(previous)))return;buildPlaybookUI();showToast('Custom playbook enabled','success');return;
+  }
+  showConfirm('Use Edgebook recommended?','This replaces the current playbook configuration. Historical trade classifications will not change.',async()=>{
+    const previous=settingsSnapshot();S.playbook=playbookRecommendedSettings();
+    if(!(await commitSettings(previous)))return;buildPlaybookUI();buildTradePlaybookForm();showToast('Recommended playbook applied','success');
+  });
+}
+function playbookTradeSnapshot(trade){
+  const stored=trade?.custom?.playbook;
+  if(stored&&typeof stored==='object'&&!Array.isArray(stored))return {...stored};
+  return trade?.strategy?{version:1,strategyId:null,strategy:String(trade.strategy)}:{version:1};
+}
+function playbookSelectOptions(items,selectedId,fallbackLabel='',extraAttributes=()=>'' ){
+  const active=(items||[]).filter(item=>!item.archived),known=active.some(item=>String(item.id)===String(selectedId));
+  const options=['<option value="">— Select —</option>',...active.map(item=>`<option value="${escapeHtml(item.id)}" ${String(item.id)===String(selectedId)?'selected':''} ${extraAttributes(item)}>${escapeHtml(item.label||item.name)}</option>` )];
+  if(selectedId&&!known&&fallbackLabel)options.push(`<option value="${escapeHtml(selectedId)}" selected data-history="true">${escapeHtml(fallbackLabel)} · archived</option>`);
+  else if(!selectedId&&fallbackLabel&&!active.some(item=>String(item.label||item.name).toLowerCase()===String(fallbackLabel).toLowerCase()))options.push(`<option value="legacy:${escapeHtml(fallbackLabel)}" selected data-history="true">${escapeHtml(fallbackLabel)} · historical</option>`);
+  return options.join('');
+}
+function buildTradePlaybookForm(trade=null){
+  const container=document.getElementById('trade-playbook-fields'),section=document.getElementById('trade-playbook-section');if(!container||!section||!S?.playbook)return;
+  const current=trade||(editId?trades.find(item=>String(item.id)===String(editId)):null),snapshot=playbookTradeSnapshot(current);
+  const enabled=orderedPlaybookFields().filter(key=>S.playbook.fields[key]?.enabled);
+  section.classList.toggle('trade-field-hidden',enabled.length===0);
+  if(!enabled.length){container.innerHTML='';return;}
+  const strategyItems=S.playbook.strategies.filter(item=>!item.archived).map(item=>({...item,label:item.name}));
+  container.innerHTML=enabled.map(key=>{
+    const config=S.playbook.fields[key],required=config.required?'<span style="color:var(--red)">*</span>':'';let options='';
+    if(key==='strategy')options=playbookSelectOptions(strategyItems,snapshot.strategyId,snapshot.strategy,item=>`data-label="${escapeHtml(item.name)}"`);
+    else if(key==='setup')options='<option value="">— Select —</option>';
+    else{const collection=PLAYBOOK_OPTION_COLLECTIONS[key];options=playbookSelectOptions(S.playbook[collection],snapshot[`${key}Id`],snapshot[key]);}
+    return `<div class="field" id="tf-pb-${key}"><label>${escapeHtml(config.label)} ${required}</label><select id="t-pb-${key}" ${config.required?'aria-required="true"':''} ${key==='strategy'?'onchange="updateTradeSetupOptions()"':''}>${options}</select></div>`;
+  }).join('');
+  updateTradeSetupOptions(snapshot.setupId,snapshot.setup,snapshot.setupStrategyId||snapshot.strategyId);
+}
+function updateTradeSetupOptions(selectedSetupId=null,fallbackLabel='',fallbackStrategyId=null){
+  const setupSelect=document.getElementById('t-pb-setup');if(!setupSelect)return;
+  const strategySelect=document.getElementById('t-pb-strategy'),strategyId=strategySelect?.value||fallbackStrategyId||'';
+  const strategies=S.playbook.strategies.filter(item=>!item.archived);
+  let items=[];
+  if(strategyId&&!String(strategyId).startsWith('legacy:')){
+    const strategy=strategies.find(item=>item.id===strategyId)||S.playbook.strategies.find(item=>item.id===strategyId);
+    items=(strategy?.setups||[]).map(item=>({...item,label:item.name,strategyId:strategy?.id||strategyId}));
+  }else{
+    items=strategies.flatMap(strategy=>(strategy.setups||[]).map(item=>({...item,label:item.name,strategyId:strategy.id,strategyName:strategy.name})));
+  }
+  const previous=selectedSetupId??setupSelect.value;
+  setupSelect.innerHTML=playbookSelectOptions(items,previous,fallbackLabel,item=>`data-strategy-id="${escapeHtml(item.strategyId||'')}" data-label="${escapeHtml(item.name)}"`);
+  if(!strategySelect){
+    [...setupSelect.options].forEach(option=>{
+      if(!option.value)return;const item=items.find(entry=>entry.id===option.value),strategy=strategies.find(entry=>entry.id===item?.strategyId);if(item&&strategy)option.textContent=`${item.name} — ${strategy.name}`;
+    });
+  }
+}
+function validateTradePlaybook(){
+  const errors=[];
+  orderedPlaybookFields().forEach(key=>{const field=S.playbook.fields[key];if(field?.enabled&&field.required&&!document.getElementById(`t-pb-${key}`)?.value)errors.push(`${field.label} is required`);});
+  return errors;
+}
+function readTradePlaybook(existingTrade=null){
+  const snapshot=playbookTradeSnapshot(existingTrade);snapshot.version=1;
+  orderedPlaybookFields().forEach(key=>{
+    const config=S.playbook.fields[key];if(!config?.enabled)return;
+    const select=document.getElementById(`t-pb-${key}`),value=select?.value||'',option=select?.options?.[select.selectedIndex];
+    if(!value){delete snapshot[key];delete snapshot[`${key}Id`];if(key==='setup')delete snapshot.setupStrategyId;return;}
+    snapshot[`${key}Id`]=value.startsWith('legacy:')?null:value;
+    snapshot[key]=cleanPlaybookText(option?.dataset?.label||option?.textContent?.replace(/ · (archived|historical)$/,'')||'',80);
+    if(key==='setup')snapshot.setupStrategyId=option?.dataset?.strategyId||snapshot.strategyId||null;
+  });
+  if(!S.playbook.fields.strategy.enabled&&snapshot.setupStrategyId){
+    const parent=S.playbook.strategies.find(item=>item.id===snapshot.setupStrategyId);if(parent){snapshot.strategyId=parent.id;snapshot.strategy=parent.name;}
+  }
+  return snapshot;
+}
+function tradeSetupLabel(trade){return cleanPlaybookText(trade?.custom?.playbook?.setup||trade?.strategy||'',80);}
+async function setPlaybookFieldEnabled(key,enabled){
+  if(!S.playbook.fields[key])return;const previous=settingsSnapshot();S.playbook.fields[key].enabled=enabled;if(!enabled)S.playbook.fields[key].required=false;await commitPlaybookChange(previous,`${S.playbook.fields[key].label} ${enabled?'shown':'hidden'}`);
+}
+async function setPlaybookFieldRequired(key,required){
+  if(!S.playbook.fields[key]?.enabled)return;const previous=settingsSnapshot();S.playbook.fields[key].required=required;await commitPlaybookChange(previous,`${S.playbook.fields[key].label} is ${required?'required':'optional'}`);
+}
+async function renamePlaybookField(key,value){
+  const label=cleanPlaybookText(value,60);if(!label){buildPlaybookUI();showToast('Field label cannot be empty','error');return;}
+  if(label===S.playbook.fields[key]?.label)return;const previous=settingsSnapshot();S.playbook.fields[key].label=label;await commitPlaybookChange(previous,'Field label updated');
+}
+async function movePlaybookField(key,direction){
+  const ordered=orderedPlaybookFields(),index=ordered.indexOf(key),target=index+direction;if(index<0||target<0||target>=ordered.length)return;
+  const previous=settingsSnapshot(),other=ordered[target],order=S.playbook.fields[key].order;S.playbook.fields[key].order=S.playbook.fields[other].order;S.playbook.fields[other].order=order;await commitPlaybookChange(previous,'Field order updated');
+}
+async function addPlaybookStrategy(){
+  const nameEl=document.getElementById('pb-new-strategy-name'),descEl=document.getElementById('pb-new-strategy-desc'),name=cleanPlaybookText(nameEl?.value,80),description=cleanPlaybookText(descEl?.value,240);
+  if(!name){showToast('Enter a strategy name','error');return;}
+  if(S.playbook.strategies.some(item=>item.name.toLowerCase()===name.toLowerCase()&&!item.archived)){showToast('That strategy already exists','error');return;}
+  const previous=settingsSnapshot();S.playbook.strategies.push({id:playbookSafeId(`strategy-${name}-${Date.now()}`,'strategy'),name,description,archived:false,setups:[]});
+  if(await commitPlaybookChange(previous,'Strategy added')){nameEl.value='';descEl.value='';}
+}
+async function renamePlaybookStrategy(id){
+  const strategy=S.playbook.strategies.find(item=>item.id===id);if(!strategy)return;
+  const value=prompt('Strategy name',strategy.name);if(value===null)return;const name=cleanPlaybookText(value,80);if(!name){showToast('Strategy name cannot be empty','error');return;}
+  if(S.playbook.strategies.some(item=>item.id!==id&&item.name.toLowerCase()===name.toLowerCase()&&!item.archived)){showToast('That strategy already exists','error');return;}
+  const description=prompt('Strategy description',strategy.description||'');if(description===null)return;
+  const previous=settingsSnapshot();strategy.name=name;strategy.description=cleanPlaybookText(description,240);await commitPlaybookChange(previous,'Strategy updated');
+}
+async function togglePlaybookStrategyArchive(id){
+  const strategy=S.playbook.strategies.find(item=>item.id===id);if(!strategy)return;const previous=settingsSnapshot();strategy.archived=!strategy.archived;await commitPlaybookChange(previous,strategy.archived?'Strategy archived':'Strategy restored');
+}
+async function addPlaybookSetup(strategyId){
+  const strategy=S.playbook.strategies.find(item=>item.id===strategyId);if(!strategy||strategy.archived)return;
+  const input=document.getElementById(`pb-setup-${safeDomId(strategyId)}`),name=cleanPlaybookText(input?.value,80);if(!name){showToast('Enter a setup name','error');return;}
+  if(strategy.setups.some(item=>item.name.toLowerCase()===name.toLowerCase()&&!item.archived)){showToast('That setup already exists in this strategy','error');return;}
+  const previous=settingsSnapshot();strategy.setups.push({id:playbookSafeId(`setup-${name}-${Date.now()}`,'setup'),name,archived:false});if(await commitPlaybookChange(previous,'Setup added'))input.value='';
+}
+async function renamePlaybookSetup(strategyId,setupId){
+  const strategy=S.playbook.strategies.find(item=>item.id===strategyId),setup=strategy?.setups.find(item=>item.id===setupId);if(!setup)return;
+  const value=prompt('Setup name',setup.name);if(value===null)return;const name=cleanPlaybookText(value,80);if(!name){showToast('Setup name cannot be empty','error');return;}
+  if(strategy.setups.some(item=>item.id!==setupId&&item.name.toLowerCase()===name.toLowerCase()&&!item.archived)){showToast('That setup already exists in this strategy','error');return;}
+  const previous=settingsSnapshot();setup.name=name;await commitPlaybookChange(previous,'Setup renamed');
+}
+async function togglePlaybookSetupArchive(strategyId,setupId){
+  const strategy=S.playbook.strategies.find(item=>item.id===strategyId),setup=strategy?.setups.find(item=>item.id===setupId);if(!setup)return;const previous=settingsSnapshot();setup.archived=!setup.archived;await commitPlaybookChange(previous,setup.archived?'Setup archived':'Setup restored');
+}
+async function addPlaybookOption(){
+  const kind=document.getElementById('pb-option-kind')?.value,input=document.getElementById('pb-new-option'),label=cleanPlaybookText(input?.value,80);if(!PLAYBOOK_OPTION_LABELS[kind]||!label){showToast('Enter an option','error');return;}
+  if(S.playbook[kind].some(item=>item.label.toLowerCase()===label.toLowerCase()&&!item.archived)){showToast('That option already exists','error');return;}
+  const previous=settingsSnapshot();S.playbook[kind].push({id:playbookSafeId(`${kind}-${label}-${Date.now()}`,kind),label,description:'',archived:false});if(await commitPlaybookChange(previous,'Option added')){input.value='';document.getElementById('pb-option-kind').value=kind;buildPlaybookOptionLibrary();}
+}
+async function renamePlaybookOption(kind,id){
+  const option=S.playbook[kind]?.find(item=>item.id===id);if(!option)return;const value=prompt('Option label',option.label);if(value===null)return;const label=cleanPlaybookText(value,80);if(!label){showToast('Option label cannot be empty','error');return;}
+  if(S.playbook[kind].some(item=>item.id!==id&&item.label.toLowerCase()===label.toLowerCase()&&!item.archived)){showToast('That option already exists','error');return;}
+  const descriptionValue=kind==='grades'?prompt('Grade definition',option.description||''):option.description;
+  if(descriptionValue===null)return;
+  const previous=settingsSnapshot();option.label=label;option.description=cleanPlaybookText(descriptionValue,240);await commitPlaybookChange(previous,'Option renamed');document.getElementById('pb-option-kind').value=kind;buildPlaybookOptionLibrary();
+}
+async function togglePlaybookOptionArchive(kind,id){
+  const option=S.playbook[kind]?.find(item=>item.id===id);if(!option)return;const previous=settingsSnapshot();option.archived=!option.archived;await commitPlaybookChange(previous,option.archived?'Option archived':'Option restored');document.getElementById('pb-option-kind').value=kind;buildPlaybookOptionLibrary();
+}
 async function toggleWidget(k,v){ const previous=settingsSnapshot(); S.widgets[k].enabled=v; if(!(await commitSettings(previous))) return; document.getElementById('widget-'+k)?.classList.toggle('widget-hidden',!v); showToast('Widget updated','success'); }
 async function toggleSidebar(k,v){ const previous=settingsSnapshot(); S.sidebarSections[k].enabled=v; if(!(await commitSettings(previous))) return; document.getElementById('nav-'+k)?.classList.toggle('hidden-nav',!v); showToast('Sidebar updated','success'); }
 async function savePref(k,v){ const previous=settingsSnapshot(); S.prefs[k]=v; if(!(await commitSettings(previous))) return; applySettings(); updateMetrics(); renderTradeTable(); showToast('Saved','success'); }
@@ -5327,7 +5730,7 @@ function exportMigrationBundle(){
   setTimeout(()=>URL.revokeObjectURL(url),0);
   showToast('Complete migration backup exported','success');
 }
-function importSettings(input){ const f=input.files[0]; if(!f) return; const r=new FileReader(); r.onload=async e=>{ try{ const previous=settingsSnapshot(); const imp=JSON.parse(e.target.result); if(!imp||typeof imp!=='object'||Array.isArray(imp)) throw new Error('Invalid settings object'); S={...SettingsManager.defaults(),...imp,prefs:{...SettingsManager.defaults().prefs,...(imp.prefs||{})}}; if(!(await commitSettings(previous))) return; applySettings(); buildSettingsUI(); showToast('Settings imported','success'); }catch{ showToast('Invalid file','error'); } }; r.readAsText(f); input.value=''; }
+function importSettings(input){ const f=input.files[0]; if(!f) return; const r=new FileReader(); r.onload=async e=>{ try{ const previous=settingsSnapshot(),d=SettingsManager.defaults(); const imp=JSON.parse(e.target.result); if(!imp||typeof imp!=='object'||Array.isArray(imp)) throw new Error('Invalid settings object'); S={...d,...imp,version:5,prefs:{...d.prefs,...(imp.prefs||{})},formFields:{...d.formFields,...(imp.formFields||{})},widgets:{...d.widgets,...(imp.widgets||{})},sidebarSections:{...d.sidebarSections,...(imp.sidebarSections||{})},playbook:normalizePlaybookSettings(imp.playbook)};delete S.formFields.strategy;if(!(await commitSettings(previous))) return; applySettings(); buildSettingsUI(); showToast('Settings imported','success'); }catch{ showToast('Invalid file','error'); } }; r.readAsText(f); input.value=''; }
 function confirmClearTrades(){ showConfirm('Clear all trades?',`Permanently delete all ${trades.length} trades.`,async()=>{
   const cleared=await DataStore.clearTrades();
   if(!cleared){
@@ -5376,6 +5779,7 @@ function showSPanel(id,el){
   el?.classList.add('active');
   document.querySelectorAll('.settings-panel').forEach(p=>p.classList.remove('active'));
   document.getElementById('sp-'+id)?.classList.add('active');
+  if(id==='playbook') buildPlaybookUI();
   // Always re-fetch broker docs from Firestore when the Broker Connections panel is shown,
   // so manually-created docs (e.g. ctrader_5043464) appear immediately without a page reload.
   if(id === 'data') loadCtraderConnections();
@@ -5433,7 +5837,7 @@ function openTradeModal(id=null){
     document.getElementById('t-tp').value=t.tp??'';
     document.getElementById('t-date').value=t.date||todayIST();
     document.getElementById('t-time').value=t.entryTime||'';
-    document.getElementById('t-strat').value=t.strategy||'';
+    buildTradePlaybookForm(t);
     document.getElementById('t-emo').value=t.emotion||'😌 Calm';
     document.getElementById('t-psych-prethought').value=t.psychology?.preThought||'';
     document.getElementById('t-psych-execution').value=t.psychology?.executionNote||'';
@@ -5459,13 +5863,14 @@ function openTradeModal(id=null){
     currentScreenshots = t.screenshots ? [...t.screenshots] : [];
     renderScreenshotPreviews();
   } else {
-    ['t-entry','t-exit','t-size','t-sl','t-tp','t-time','t-strat','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
+    ['t-entry','t-exit','t-size','t-sl','t-tp','t-time','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('t-sym').value='';
     document.getElementById('t-asset').value=S.prefs.defaultAsset||'eq';
     if(activeAcctId!=='all') document.getElementById('t-account').value=activeAcctId;
     currentScreenshots=[];
     renderScreenshotPreviews();
     S.customFields.forEach(cf=>{const el=document.getElementById('cf-v-'+safeDomId(cf.id));if(!el)return;if(cf.type==='checkbox')el.checked=false;else el.value='';});
+    buildTradePlaybookForm();
     updateSymbolDropdown();
   }
   document.getElementById('trade-modal').classList.add('open');
@@ -5807,13 +6212,15 @@ async function saveTrade(){
     : document.getElementById('t-dir').value;
 
   // Validate
-  const errors = validateTrade(sym, entry, exit, size, date, dir);
+  const errors = [...validateTrade(sym, entry, exit, size, date, dir),...validateTradePlaybook()];
   if(errors.length){ showToast(errors[0], 'error'); return; }
 
   const asset=document.getElementById('t-asset').value;
   const pnl = calculatePnL(asset,sym,dir,entry,exit,size,position,instrument);
-  const cfVals={};
+  const existingTrade=editId?trades.find(item=>String(item.id)===String(editId)):null;
+  const cfVals={...(existingTrade?.custom||{})};
   S.customFields.forEach(cf=>{ const el=document.getElementById('cf-v-'+safeDomId(cf.id)); if(el) cfVals[cf.id]=cf.type==='checkbox'?el.checked:el.value; });
+  const playbookSnapshot=readTradePlaybook(existingTrade);cfVals.playbook=playbookSnapshot;
   const accountId=document.getElementById('t-account').value||null;
   const entryTime = document.getElementById('t-time').value || null;
   const trade={
@@ -5823,7 +6230,7 @@ async function saveTrade(){
     direction:dir, entry, exit, size,
     sl:parseFloat(document.getElementById('t-sl').value)||null,
     tp:parseFloat(document.getElementById('t-tp').value)||null,
-    strategy:document.getElementById('t-strat').value,
+    strategy:(S.playbook.fields.strategy.enabled||S.playbook.fields.setup.enabled)?(playbookSnapshot.strategy||''):(existingTrade?.strategy||''),
     emotion:document.getElementById('t-emo').value,
     psychology:{
       preThought:   document.getElementById('t-psych-prethought').value,
@@ -6822,13 +7229,13 @@ function csvEncodeRow(cells,textColumns=new Set()){
   return cells.map((value,index)=>csvEncodeCell(value,{text:textColumns.has(index)})).join(',');
 }
 function tradeJournalCsv(source){
-  const header=['Date','Symbol','Asset','Dir','Entry','Exit','Size','SL','TP','PnL','Strategy','Emotion','Account','Notes'];
-  const textColumns=new Set([1,2,3,10,11,12,13]);
-  const body=source.map(t=>csvEncodeRow([
+  const header=['Date','Symbol','Asset','Dir','Entry','Exit','Size','SL','TP','PnL','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
+  const textColumns=new Set([1,2,3,10,11,12,13,14,15,16,17,18,19,20]);
+  const body=source.map(t=>{const pb=t.custom?.playbook||{};return csvEncodeRow([
     t.date,t.symbol,ASSET_LABELS[t.asset]||t.asset||'',t.direction,t.entry,t.exit??'',t.size,t.sl??'',t.tp??'',
     tradeIsOpen(t)?(tradeHasPnl(t)?`Open · realized ${Number(t.pnl).toFixed(2)}`:'Open'):(tradeHasPnl(t)?Number(t.pnl).toFixed(2):''),
-    t.strategy||'',t.emotion||'',acctName(t.accountId||''),t.notes||'',
-  ],textColumns));
+    t.strategy||'',pb.setup||'',pb.grade||'',pb.probability||'',pb.horizon||'',pb.overnight||'',pb.condition||'',pb.execution||'',t.emotion||'',acctName(t.accountId||''),t.notes||'',
+  ],textColumns)});
   return [csvEncodeRow(header),...body].join('\r\n');
 }
 function exportCSV(){
@@ -7410,13 +7817,13 @@ function renderAnalyticsCharts(){
   const setupWrap=document.getElementById('setup-table-wrap');
   if(setupWrap){
     const sm={},sc={},sw={};
-    closed.filter(t=>t.strategy).forEach(t=>{
-      const s=t.strategy;
+    closed.filter(t=>tradeSetupLabel(t)).forEach(t=>{
+      const s=tradeSetupLabel(t);
       sm[s]=(sm[s]||0)+toPnl(t); sc[s]=(sc[s]||0)+1;
       if(toPnl(t)>0) sw[s]=(sw[s]||0)+1;
     });
     const sk=Object.keys(sm).sort((a,b)=>(sm[b]/sc[b])-(sm[a]/sc[a]));
-    if(!sk.length){ setupWrap.innerHTML='<div class="empty-state" style="padding:16px"><p>Add strategy tags to trades.</p></div>'; }
+    if(!sk.length){ setupWrap.innerHTML='<div class="empty-state" style="padding:16px"><p>Add setup classifications to trades.</p></div>'; }
     else {
       setupWrap.innerHTML=`<table class="a-setup-table"><thead><tr><th>Setup</th><th>Trades</th><th>Win rate</th><th>Expectancy</th></tr></thead><tbody>${sk.map(s=>{
         const wr=sc[s]?Math.round((sw[s]||0)/sc[s]*100):0;
@@ -8529,6 +8936,13 @@ const TRADE_FIELDS = [
   {key:'date',     label:'Date',       required:false},
   {key:'asset',    label:'Asset class',required:false},
   {key:'strategy', label:'Strategy',   required:false},
+  {key:'setup',    label:'Setup',      required:false},
+  {key:'grade',    label:'Setup grade',required:false},
+  {key:'probability',label:'Estimated probability',required:false},
+  {key:'horizon',  label:'Trade horizon',required:false},
+  {key:'overnight',label:'Overnight exposure',required:false},
+  {key:'condition',label:'Market condition',required:false},
+  {key:'execution',label:'Execution quality',required:false},
   {key:'notes',    label:'Notes',      required:false},
   {key:'sl',       label:'Stop loss',  required:false},
   {key:'tp',       label:'Take profit',required:false},
@@ -8963,6 +9377,7 @@ function csvBuildPreview(){
       strike:foData.strike??null,expiry:foData.expiry||null,underlying:foData.underlying||null,
       exchange:foData.exchange||rowObj.exchange||null,product:foData.product||rowObj.product||rowObj.product_type||null,
       strategy:getField('strategy'), notes:getField('notes'),
+      playbook:{setup:getField('setup'),grade:getField('grade'),probability:getField('probability'),horizon:getField('horizon'),overnight:getField('overnight'),condition:getField('condition'),execution:getField('execution')},
       sl:parseFloat(getField('sl').toString().replace(/[,₹$£€]/g,''))||null,
       tp:parseFloat(getField('tp').toString().replace(/[,₹$£€]/g,''))||null,
       pnl,_isDupe:false,_row:ri,_sourceFingerprint:sourceFingerprint,_openingFingerprint:sourceFingerprint,_openSliceIndex:0,
@@ -8998,7 +9413,14 @@ function autoGuessMapping(headers){
     exit:      ['exit','sell_price','exit_price','close_price'],
     size:      ['size','quantity','qty','shares','units','tradedqty','lot'],
     date:      ['date','trade_date','order_date','time','datetime','order_execution_time','orderdate'],
-    strategy:  ['strategy','setup','tag'],
+    strategy:  ['strategy','system','playbook','tag'],
+    setup:     ['setup','entry_model','pattern'],
+    grade:     ['setup_grade','grade','opportunity_quality'],
+    probability:['estimated_probability','probability','confidence_band'],
+    horizon:   ['trade_horizon','horizon','holding_period'],
+    overnight: ['overnight_exposure','overnight'],
+    condition: ['market_condition','market_regime','regime'],
+    execution: ['execution_quality','execution'],
     notes:     ['notes','remarks','comment'],
     sl:        ['sl','stoploss','stop_loss','stop'],
     tp:        ['tp','target','take_profit','takeprofit'],
@@ -9127,7 +9549,7 @@ async function csvImportTrades(){
       screenshots: [],
       psychology:  {},
       tags:        [],
-      custom:      {},
+      custom:      {playbook:Object.fromEntries(Object.entries({version:1,strategy:t.strategy||'',...(t.playbook||{})}).filter(([,value])=>value!==''&&value!=null))},
       deleted:     false,
     };
     }));
