@@ -63,11 +63,13 @@ services:
       TOTAL_STORAGE_QUOTA_BYTES: ${TOTAL_STORAGE_QUOTA_BYTES:-10737418240}
       MIN_DISK_FREE_BYTES: ${MIN_DISK_FREE_BYTES:-10737418240}
       SSE_HEARTBEAT_MS: ${SSE_HEARTBEAT_MS:-20000}
-      # A complete all-blank set disables cTrader for credentialless staging.
-      # Any partial non-blank set is rejected by the API config validator.
+      # OAuth credentials and the encryption keyring are independently
+      # blank-safe. MCP compatibility is an explicit opt-in and requires the
+      # keyring pair; official OAuth additionally requires its complete trio.
       CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
       CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
       CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-}
+      CTRADER_MCP_ENABLED: ${CTRADER_MCP_ENABLED:-false}
       CTRADER_ENCRYPTION_KEYS: ${CTRADER_ENCRYPTION_KEYS:-}
       CTRADER_ACTIVE_KEY_VERSION: ${CTRADER_ACTIVE_KEY_VERSION:-}
       CTRADER_OAUTH_STATE_TTL_SECONDS: ${CTRADER_OAUTH_STATE_TTL_SECONDS:-300}
@@ -152,12 +154,13 @@ services:
       TOTAL_STORAGE_QUOTA_BYTES: ${TOTAL_STORAGE_QUOTA_BYTES:-10737418240}
       MIN_DISK_FREE_BYTES: ${MIN_DISK_FREE_BYTES:-10737418240}
       SSE_HEARTBEAT_MS: ${SSE_HEARTBEAT_MS:-20000}
-      # Compose interpolates even inactive profiles. These therefore stay
-      # blank-safe; worker.ts fails closed at process startup unless the entire
-      # cTrader configuration is complete.
+      # Compose interpolates even inactive profiles. These stay blank-safe;
+      # worker.ts fails closed unless encryption and at least one connection
+      # mode (official OAuth or MCP compatibility) are enabled.
       CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
       CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
       CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-}
+      CTRADER_MCP_ENABLED: ${CTRADER_MCP_ENABLED:-false}
       CTRADER_ENCRYPTION_KEYS: ${CTRADER_ENCRYPTION_KEYS:-}
       CTRADER_ACTIVE_KEY_VERSION: ${CTRADER_ACTIVE_KEY_VERSION:-}
       CTRADER_OAUTH_STATE_TTL_SECONDS: ${CTRADER_OAUTH_STATE_TTL_SECONDS:-300}

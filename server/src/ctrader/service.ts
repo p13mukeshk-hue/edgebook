@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { QueryResultRow } from "pg";
+import type { PoolClient, QueryResultRow } from "pg";
 import type { AppConfig } from "../config.js";
 import type { Database } from "../db/database.js";
 import { withTransaction } from "../db/database.js";
@@ -19,6 +19,14 @@ import type { CTraderAuthorizedAccount, CTraderEnvironment } from "./protocol.js
 
 type OAuthTransactionRow = QueryResultRow & { id: string };
 
+type ConnectionIdentityRow = QueryResultRow & {
+  id: string;
+  connected: boolean;
+  connection_mode: "official" | "mcp_read";
+  provider_environment: CTraderEnvironment | null;
+  provider_metadata: unknown;
+};
+
 type GrantRow = QueryResultRow & {
   id: string;
   user_id: string;
@@ -35,6 +43,7 @@ type GrantRow = QueryResultRow & {
 type ConnectionRow = QueryResultRow & {
   id: string;
   connected: boolean;
+  connection_mode: "official" | "mcp_read";
   external_account_id: string;
   provider_environment: CTraderEnvironment;
   account_label: string | null;
@@ -58,6 +67,7 @@ type ConnectionRow = QueryResultRow & {
 export type CTraderPublicConnection = {
   id: string;
   connected: boolean;
+  mode: "official" | "mcp_read";
   ctidTraderAccountId: string;
   environment: CTraderEnvironment;
   label: string | null;
@@ -74,6 +84,7 @@ export type CTraderPublicConnection = {
   reauthRequired: boolean;
   lastSyncStatus: string;
   lastError: { code: string | null; message: string } | null;
+  lastWarning: { code: string | null; message: string } | null;
 };
 
 export type CTraderPublicSyncRun = {
@@ -86,11 +97,31 @@ export type CTraderPublicSyncRun = {
   finishedAt: string | null;
 };
 
+export type CTraderMcpValidation = {
+  bearerToken: string;
+  balance: unknown;
+  symbols: unknown;
+  historyProbe: unknown;
+  accountInfo?: unknown;
+};
+
+export interface CTraderMcpConnector {
+  validateConfiguration(configuration: string): Promise<CTraderMcpValidation>;
+}
+
 export interface CTraderBrokerService {
   startOAuth(auth: AuthContext): Promise<{ authorizationUrl: string; expiresAt: string }>;
   rejectOAuth(state: string, auth: AuthContext): Promise<void>;
   completeOAuth(state: string, code: string, auth: AuthContext): Promise<void>;
   pendingOAuth(auth: AuthContext): Promise<{ grantId: string; expiresAt: string; accounts: CTraderAuthorizedAccount[] }>;
+  connectMcp(input: {
+    auth: AuthContext;
+    configuration: string;
+    environment: CTraderEnvironment;
+    accountId: string | null;
+    mappedLegacyAccountId: string | null;
+    label: string | null;
+  }): Promise<CTraderPublicConnection>;
   listConnections(userId: string): Promise<CTraderPublicConnection[]>;
   createConnection(input: {
     auth: AuthContext;
@@ -121,13 +152,67 @@ function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function firstText(objects: readonly Record<string, unknown>[], keys: readonly string[]): string | null {
+  for (const object of objects) {
+    for (const key of keys) {
+      const value = object[key];
+      if (typeof value === "string" && value.trim().length > 0) return value.trim();
+      if (typeof value === "number" && Number.isFinite(value)) return String(value);
+    }
+  }
+  return null;
+}
+
+function unwrapFirstObject(value: unknown): Record<string, unknown> {
+  if (Array.isArray(value)) return objectValue(value[0]);
+  const root = objectValue(value);
+  for (const key of ["account", "balance", "data", "result"] as const) {
+    const nested = root[key];
+    if (Array.isArray(nested) && nested.length > 0) return objectValue(nested[0]);
+    if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) return objectValue(nested);
+  }
+  return root;
+}
+
+function arrayLength(value: unknown): number {
+  if (Array.isArray(value)) return value.length;
+  const object = objectValue(value);
+  for (const key of ["symbols", "data", "result", "items"] as const) {
+    if (Array.isArray(object[key])) return object[key].length;
+  }
+  return 0;
+}
+
+function firstTimestamp(objects: readonly Record<string, unknown>[], keys: readonly string[]): number | null {
+  for (const object of objects) {
+    for (const key of keys) {
+      const value = object[key];
+      const parsed = typeof value === "number"
+        ? value
+        : typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())
+          ? Number(value)
+          : typeof value === "string"
+            ? Date.parse(value)
+            : Number.NaN;
+      if (Number.isFinite(parsed) && parsed > 0) {
+        const milliseconds = parsed < 1_000_000_000_000 ? parsed * 1_000 : parsed;
+        if (Number.isSafeInteger(milliseconds) && milliseconds <= Date.now()) return milliseconds;
+      }
+    }
+  }
+  return null;
+}
+
 function mapConnection(row: ConnectionRow): CTraderPublicConnection {
   const metadata = objectValue(row.provider_metadata);
   const errorMessage = row.latest_sync_error_message ?? stringOrNull(metadata.lastErrorMessage);
   const errorCode = row.latest_sync_error_code ?? stringOrNull(metadata.lastErrorCode);
+  const warningMessage = stringOrNull(metadata.lastWarningMessage);
+  const warningCode = stringOrNull(metadata.lastWarningCode);
   return {
     id: row.id,
     connected: row.connected,
+    mode: row.connection_mode,
     ctidTraderAccountId: row.external_account_id,
     environment: row.provider_environment,
     label: row.account_label,
@@ -144,6 +229,7 @@ function mapConnection(row: ConnectionRow): CTraderPublicConnection {
     reauthRequired: metadata.reauthRequired === true,
     lastSyncStatus: row.latest_sync_status ?? (row.last_sync_at === null ? "never" : "succeeded"),
     lastError: errorMessage === null ? null : { code: errorCode, message: errorMessage },
+    lastWarning: warningMessage === null ? null : { code: warningCode, message: warningMessage },
   };
 }
 
@@ -182,8 +268,52 @@ function parseAuthorizedAccounts(value: unknown): CTraderAuthorizedAccount[] {
   });
 }
 
+async function resolveConnectionIdentity(
+  client: PoolClient,
+  userId: string,
+  environment: CTraderEnvironment,
+  accountId: string,
+  requestedMode: "official" | "mcp_read",
+): Promise<{ row: ConnectionIdentityRow | null; adoptsLegacyEnvironment: boolean }> {
+  const candidates = await client.query<ConnectionIdentityRow>(
+    `SELECT id, connected, connection_mode, provider_environment, provider_metadata
+     FROM broker_connections
+     WHERE user_id=$1 AND provider='ctrader' AND external_account_id=$2
+       AND (provider_environment=$3 OR provider_environment IS NULL)
+     FOR UPDATE`,
+    [userId, accountId, environment],
+  );
+  const exact = candidates.rows.filter((row) => row.provider_environment === environment);
+  const legacy = candidates.rows.filter((row) => row.provider_environment === null);
+  if (exact.length > 1 || legacy.length > 1 || (exact.length > 0 && legacy.length > 0)) {
+    throw new AppError(
+      409,
+      "CTRADER_CONNECTION_IDENTITY_CONFLICT",
+      "Multiple stored cTrader connections match this account; resolve the legacy connection conflict before reconnecting",
+    );
+  }
+  const row = exact[0] ?? legacy[0] ?? null;
+  if (row?.provider_environment === null && row.connected) {
+    throw new AppError(
+      409,
+      "CTRADER_LEGACY_CONNECTION_ACTIVE",
+      "Disconnect the legacy cTrader connection before adopting it into the current integration",
+    );
+  }
+  if (row?.connected && row.connection_mode !== requestedMode) {
+    throw new AppError(
+      409,
+      "CTRADER_CONNECTION_MODE_CONFLICT",
+      requestedMode === "official"
+        ? "This cTrader account is already connected through Remote MCP; disconnect it before switching connection modes"
+        : "This cTrader account is already connected through official OAuth; disconnect it before switching connection modes",
+    );
+  }
+  return { row, adoptsLegacyEnvironment: row?.provider_environment === null };
+}
+
 const connectionSelect = `
-  SELECT c.id, c.connected, c.external_account_id, c.provider_environment,
+  SELECT c.id, c.connected, c.connection_mode, c.external_account_id, c.provider_environment,
          c.account_label, c.mapped_account_id, c.legacy_mapped_account_id,
          c.provider_metadata, c.connected_at, c.last_sync_at,
          c.disconnected_at, c.disconnect_reason, c.token_expires_at,
@@ -206,13 +336,15 @@ export class PostgresCTraderService implements CTraderBrokerService {
   constructor(
     private readonly database: Database,
     private readonly config: AppConfig,
-    private readonly oauth: CTraderOAuthClient,
-    private readonly gateway: CTraderGateway,
+    private readonly oauth: CTraderOAuthClient | null,
+    private readonly gateway: CTraderGateway | null,
     private readonly cipher: TokenCipher,
     private readonly events: EventBus,
+    private readonly mcp: CTraderMcpConnector | null = null,
   ) {}
 
   async startOAuth(auth: AuthContext): Promise<{ authorizationUrl: string; expiresAt: string }> {
+    const { oauth } = this.officialClients();
     const state = createOpaqueToken(32);
     const expiresAt = new Date(Date.now() + this.config.cTrader.oauthStateTtlSeconds * 1_000);
     await this.database.query(
@@ -232,7 +364,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
       `DELETE FROM oauth_transactions
        WHERE provider='ctrader' AND expires_at < now() - interval '1 day'`,
     ).catch(() => undefined);
-    return { authorizationUrl: this.oauth.authorizationUrl(state), expiresAt: expiresAt.toISOString() };
+    return { authorizationUrl: oauth.authorizationUrl(state), expiresAt: expiresAt.toISOString() };
   }
 
   async rejectOAuth(state: string, auth: AuthContext): Promise<void> {
@@ -241,11 +373,12 @@ export class PostgresCTraderService implements CTraderBrokerService {
   }
 
   async completeOAuth(state: string, code: string, auth: AuthContext): Promise<void> {
+    const { oauth, gateway } = this.officialClients();
     const claimed = await this.claimOAuthState(state, auth);
     if (!claimed) throw new AppError(400, "CTRADER_STATE_INVALID", "The cTrader authorization state is invalid or expired");
 
-    const tokenSet = await this.oauth.exchangeAuthorizationCode(code);
-    const accounts = await this.gateway.discoverAccounts(tokenSet.accessToken);
+    const tokenSet = await oauth.exchangeAuthorizationCode(code);
+    const accounts = await gateway.discoverAccounts(tokenSet.accessToken);
     if (accounts.length === 0) {
       throw new AppError(400, "CTRADER_NO_ACCOUNTS", "The cTrader grant contains no authorized accounts");
     }
@@ -297,11 +430,272 @@ export class PostgresCTraderService implements CTraderBrokerService {
     };
   }
 
+  async connectMcp(input: {
+    auth: AuthContext;
+    configuration: string;
+    environment: CTraderEnvironment;
+    accountId: string | null;
+    mappedLegacyAccountId: string | null;
+    label: string | null;
+  }): Promise<CTraderPublicConnection> {
+    if (!this.config.cTrader.mcpEnabled || !this.mcp) {
+      throw new AppError(503, "CTRADER_MCP_NOT_CONFIGURED", "cTrader MCP compatibility is not enabled on this server");
+    }
+    // Establish the partial-history boundary before any remote round trip so
+    // deals executed while validation is in flight cannot fall into a gap.
+    const connectionAttemptStartedAt = Date.now();
+    let validation: CTraderMcpValidation;
+    try {
+      validation = await this.mcp.validateConfiguration(input.configuration);
+    } catch (error) {
+      // The copied configuration and provider response can both contain a
+      // trading-capable credential. Never reflect either through this error.
+      const validationCode = objectValue(error).code;
+      if (validationCode === "TOOL_UNAVAILABLE") {
+        throw new AppError(
+          422,
+          "CTRADER_MCP_HISTORY_UNAVAILABLE",
+          "This cTrader configuration does not expose the required read-only trade-history tool",
+        );
+      }
+      if (validationCode === "REMOTE_RATE_LIMITED") {
+        throw new AppError(429, "CTRADER_MCP_RATE_LIMITED", "cTrader is temporarily rate limited; retry shortly");
+      }
+      if (validationCode === "REMOTE_UNAVAILABLE" || validationCode === "REQUEST_TIMEOUT") {
+        throw new AppError(503, "CTRADER_MCP_UNAVAILABLE", "cTrader is temporarily unavailable; retry shortly");
+      }
+      if (validationCode !== "AUTH_REJECTED" && validationCode !== "TOKEN_INVALID") {
+        throw new AppError(502, "CTRADER_MCP_VALIDATION_FAILED", "cTrader could not validate this Remote MCP configuration");
+      }
+      throw new AppError(401, "CTRADER_MCP_AUTH_FAILED", "The copied cTrader MCP configuration could not be authenticated");
+    }
+    const balance = unwrapFirstObject(validation.balance);
+    const accountInfo = unwrapFirstObject(validation.accountInfo);
+    const metadataObjects = [balance, accountInfo];
+    const detectedAccountId = firstText(metadataObjects, [
+      "accountId", "account_id", "ctidTraderAccountId", "traderAccountId",
+    ]);
+    if (detectedAccountId !== null && !/^(?:0|[1-9]\d{0,19})$/.test(detectedAccountId)) {
+      throw new AppError(400, "CTRADER_MCP_ACCOUNT_INVALID", "cTrader returned an invalid account identifier");
+    }
+    if (input.accountId !== null && detectedAccountId !== null && input.accountId !== detectedAccountId) {
+      throw new AppError(400, "CTRADER_MCP_ACCOUNT_MISMATCH", "The supplied account ID does not match the copied cTrader configuration");
+    }
+    const accountId = detectedAccountId ?? input.accountId;
+    if (accountId === null) {
+      throw new AppError(400, "CTRADER_MCP_ACCOUNT_REQUIRED", "Enter the numeric cTrader account ID shown for this configuration");
+    }
+    const environmentText = firstText(metadataObjects, ["environment", "accountEnvironment"]);
+    const explicitIsLive = metadataObjects.find((value) => typeof value.isLive === "boolean")?.isLive;
+    const normalizedEnvironment = environmentText?.trim().toLowerCase();
+    const detectedEnvironment: CTraderEnvironment | null = explicitIsLive === true
+      ? "live"
+      : explicitIsLive === false
+        ? "demo"
+        : normalizedEnvironment === "live" || normalizedEnvironment === "real"
+          ? "live"
+          : normalizedEnvironment === "demo"
+            ? "demo"
+            : null;
+    if (detectedEnvironment !== null && detectedEnvironment !== input.environment) {
+      throw new AppError(
+        400,
+        "CTRADER_MCP_ENVIRONMENT_MISMATCH",
+        "The selected cTrader environment does not match the copied configuration",
+      );
+    }
+    const environment = input.environment;
+    const currency = firstText(metadataObjects, ["currency", "currencyCode", "accountCurrency"]);
+    const registrationTimestamp = firstTimestamp(metadataObjects, [
+      "registrationTimestamp", "createdAt", "created_at", "registrationDate", "openDate", "startDate",
+    ]);
+    const symbolCount = arrayLength(validation.symbols);
+    if (symbolCount === 0) {
+      throw new AppError(502, "CTRADER_MCP_SYMBOLS_EMPTY", "cTrader returned no symbols for this account");
+    }
+
+    const connectionId = await withTransaction(this.database, async (client) => {
+      const mapping = await resolveOwnedAccountMapping(client, input.auth.user.id, input.mappedLegacyAccountId);
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`${input.auth.user.id}:ctrader:${accountId}`],
+      );
+      const identity = await resolveConnectionIdentity(
+        client,
+        input.auth.user.id,
+        environment,
+        accountId,
+        "mcp_read",
+      );
+      const id = identity.row?.id ?? randomUUID();
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [id]);
+      if (identity.adoptsLegacyEnvironment) {
+        const adopted = await client.query<{ id: string }>(
+          `UPDATE broker_connections SET provider_environment=$1
+           WHERE id=$2 AND connected=false AND provider_environment IS NULL
+           RETURNING id`,
+          [environment, id],
+        );
+        if (!adopted.rows[0]) {
+          throw new AppError(409, "CTRADER_CONNECTION_CHANGED", "The legacy cTrader connection changed while reconnecting");
+        }
+      }
+      const historyFloorResult = await client.query<{
+        history_floor: Date | string | null;
+        archived_count: string | number;
+        missing_identity_count: string | number;
+      }>(
+        `SELECT max(deleted_at) AS history_floor,
+                count(*) AS archived_count,
+                count(*) FILTER (WHERE broker_trade_id IS NULL) AS missing_identity_count
+         FROM trades
+         WHERE user_id=$1 AND source_system='ctrader' AND ingestion_method='migration'
+           AND external_trade_key IS NULL AND deleted_at IS NOT NULL`,
+        [input.auth.user.id],
+      );
+      const historyFloorRow = historyFloorResult.rows[0];
+      const historyFloorValue = historyFloorRow?.history_floor ?? null;
+      const archivedResetTimestamp = historyFloorValue === null ? null : new Date(historyFloorValue).getTime();
+      const validArchivedResetTimestamp = typeof archivedResetTimestamp === "number"
+        && Number.isSafeInteger(archivedResetTimestamp)
+        ? archivedResetTimestamp
+        : null;
+      const derivedFloorKind = validArchivedResetTimestamp !== null
+        ? "user_reset"
+        : registrationTimestamp !== null
+          ? "registration"
+          : "connection_time";
+      const derivedFloorTimestamp = validArchivedResetTimestamp !== null
+        ? validArchivedResetTimestamp
+        : registrationTimestamp ?? connectionAttemptStartedAt;
+      const previousMetadata = identity.row?.connection_mode === "mcp_read"
+        ? objectValue(identity.row.provider_metadata)
+        : {};
+      const previousFloorKind = String(previousMetadata.historyFloorKind ?? "");
+      const previousFloorTimestamp = firstTimestamp([previousMetadata], ["historyFloorTimestamp"]);
+      const hasStrongerRegistrationFloor = previousFloorTimestamp !== null
+        && previousFloorKind === "connection_time"
+        && derivedFloorKind === "registration"
+        && derivedFloorTimestamp < previousFloorTimestamp;
+      const preservesPreviousFloor = identity.row?.connection_mode === "mcp_read"
+        && previousFloorTimestamp !== null
+        && ["registration", "user_reset", "connection_time"].includes(previousFloorKind)
+        // A newer explicit user reset supersedes the old approved boundary.
+        && !(derivedFloorKind === "user_reset" && derivedFloorTimestamp > previousFloorTimestamp)
+        // Registration is an authoritative earlier lower bound. Adopting it
+        // requires a cursor reset so the disconnected gap and older history
+        // are backfilled atomically.
+        && !hasStrongerRegistrationFloor;
+      const historyFloorKind = preservesPreviousFloor ? previousFloorKind : derivedFloorKind;
+      const historyFloorTimestamp = preservesPreviousFloor ? previousFloorTimestamp : derivedFloorTimestamp;
+      const resetsHistoryCursor = identity.row?.connection_mode === "mcp_read" && !preservesPreviousFloor;
+      const archivedCount = Number(historyFloorRow?.archived_count ?? 0);
+      const missingIdentityCount = Number(historyFloorRow?.missing_identity_count ?? 0);
+      const resetArchiveIsIdentified = historyFloorKind === "user_reset"
+        && Number.isSafeInteger(archivedCount)
+        && archivedCount > 0
+        && missingIdentityCount === 0;
+      const openingLineagePolicy = resetArchiveIsIdentified
+        ? "archived_position_suppression_then_first_side_review"
+        : "provider_role_required";
+      const metadata = {
+        ...previousMetadata,
+        integrationMode: "mcp_read",
+        mcpEndpoint: "https://mcp.ctrader.com/trading/mcp",
+        sessionBound: true,
+        credentialCanTrade: true,
+        tradingCredentialRiskAcknowledgedAt: new Date().toISOString(),
+        edgebookToolPolicy: "read_allowlist",
+        accountCurrency: currency?.toUpperCase() ?? null,
+        registrationTimestamp,
+        symbolCount,
+        historyReadValidated: true,
+        historyFloorTimestamp,
+        historyFloorKind,
+        openingLineagePolicy,
+        readOnly: true,
+        reauthRequired: false,
+      };
+      await client.query(
+        `INSERT INTO broker_connections (
+           id, user_id, provider, connection_mode, provider_environment, oauth_scope,
+           external_account_id, account_label, mapped_account_id,
+           legacy_mapped_account_id, connected, access_token_ciphertext,
+           refresh_token_ciphertext, encryption_key_version, token_expires_at,
+           token_generation, provider_metadata, connected_at, disconnected_at,
+           disconnect_reason
+         ) VALUES (
+           $1,$2,'ctrader','mcp_read',$3,'mcp_read',$4,$5,$6,$7,true,$8,
+           NULL,$9,NULL,1,$10::jsonb,now(),NULL,NULL
+         )
+         ON CONFLICT (user_id, provider, provider_environment, external_account_id)
+           WHERE external_account_id IS NOT NULL
+         DO UPDATE SET
+           sync_cursor=CASE
+             WHEN broker_connections.connection_mode IS DISTINCT FROM EXCLUDED.connection_mode OR $11::boolean
+               THEN '{}'::jsonb
+             ELSE broker_connections.sync_cursor
+           END,
+           last_sync_at=CASE
+             WHEN broker_connections.connection_mode IS DISTINCT FROM EXCLUDED.connection_mode OR $11::boolean
+               THEN NULL
+             ELSE broker_connections.last_sync_at
+           END,
+           connection_mode=EXCLUDED.connection_mode,
+           oauth_scope=EXCLUDED.oauth_scope,
+           account_label=EXCLUDED.account_label,
+           mapped_account_id=EXCLUDED.mapped_account_id,
+           legacy_mapped_account_id=EXCLUDED.legacy_mapped_account_id,
+           connected=true,
+           access_token_ciphertext=EXCLUDED.access_token_ciphertext,
+           refresh_token_ciphertext=NULL,
+           encryption_key_version=EXCLUDED.encryption_key_version,
+           token_expires_at=NULL,
+           token_generation=broker_connections.token_generation+1,
+           token_refreshed_at=now(),
+           provider_metadata=EXCLUDED.provider_metadata,
+           connected_at=now(),
+           disconnected_at=NULL,
+           disconnect_reason=NULL`,
+        [
+          id,
+          input.auth.user.id,
+          environment,
+          accountId,
+          input.label,
+          mapping.internalId,
+          mapping.legacyId,
+          this.cipher.encrypt(validation.bearerToken, connectionTokenAad(id, "access")),
+          this.cipher.activeKeyVersion,
+          JSON.stringify(metadata),
+          resetsHistoryCursor,
+        ],
+      );
+      await client.query(
+        `INSERT INTO sync_runs (
+           id, broker_connection_id, job_key, sync_type, status,
+           requested_by_user_id, counters
+         ) VALUES ($1,$2,$3,'initial','queued',$4,'{}'::jsonb)
+         ON CONFLICT DO NOTHING`,
+        [randomUUID(), id, `mcp-connect:${Date.now()}`, input.auth.user.id],
+      );
+      return id;
+    });
+
+    const connection = await this.findConnection(input.auth.user.id, connectionId);
+    await this.events.publish(input.auth.user.id, "ctrader.connected", {
+      connectionId,
+      mode: "mcp_read",
+    }).catch(() => undefined);
+    return connection;
+  }
+
   async listConnections(userId: string): Promise<CTraderPublicConnection[]> {
     const result = await this.database.query<ConnectionRow>(
       `${connectionSelect}
        WHERE c.user_id=$1 AND c.provider='ctrader'
-         AND c.oauth_scope='accounts' AND c.provider_environment IS NOT NULL
+         AND c.connection_mode IN ('official','mcp_read')
+         AND c.provider_environment IS NOT NULL
        ORDER BY c.connected DESC, c.created_at ASC`,
       [userId],
     );
@@ -338,16 +732,28 @@ export class PostgresCTraderService implements CTraderBrokerService {
       // newly generated UUID while PostgreSQL kept the winner's UUID/AAD.
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [`${input.auth.user.id}:ctrader:${selected.environment}:${selected.ctidTraderAccountId}`],
+        [`${input.auth.user.id}:ctrader:${selected.ctidTraderAccountId}`],
       );
-      const existing = await client.query<{ id: string }>(
-        `SELECT id FROM broker_connections
-         WHERE user_id=$1 AND provider='ctrader'
-           AND provider_environment=$2 AND external_account_id=$3`,
-        [input.auth.user.id, selected.environment, selected.ctidTraderAccountId],
+      const identity = await resolveConnectionIdentity(
+        client,
+        input.auth.user.id,
+        selected.environment,
+        selected.ctidTraderAccountId,
+        "official",
       );
-      const id = existing.rows[0]?.id ?? randomUUID();
+      const id = identity.row?.id ?? randomUUID();
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [id]);
+      if (identity.adoptsLegacyEnvironment) {
+        const adopted = await client.query<{ id: string }>(
+          `UPDATE broker_connections SET provider_environment=$1
+           WHERE id=$2 AND connected=false AND provider_environment IS NULL
+           RETURNING id`,
+          [selected.environment, id],
+        );
+        if (!adopted.rows[0]) {
+          throw new AppError(409, "CTRADER_CONNECTION_CHANGED", "The legacy cTrader connection changed while reconnecting");
+        }
+      }
 
       const accessToken = this.cipher.decrypt(grant.access_token_ciphertext, grantTokenAad(grant.id, "access"));
       const refreshToken = this.cipher.decrypt(grant.refresh_token_ciphertext, grantTokenAad(grant.id, "refresh"));
@@ -362,19 +768,29 @@ export class PostgresCTraderService implements CTraderBrokerService {
       };
       await client.query(
         `INSERT INTO broker_connections (
-           id, user_id, provider, provider_environment, oauth_scope,
+           id, user_id, provider, connection_mode, provider_environment, oauth_scope,
            external_account_id, account_label, mapped_account_id,
            legacy_mapped_account_id, connected, access_token_ciphertext,
            refresh_token_ciphertext, encryption_key_version, token_expires_at,
            token_generation, provider_metadata, connected_at, disconnected_at,
            disconnect_reason
          ) VALUES (
-           $1,$2,'ctrader',$3,'accounts',$4,$5,$6,$7,true,$8,$9,$10,$11,
+           $1,$2,'ctrader','official',$3,'accounts',$4,$5,$6,$7,true,$8,$9,$10,$11,
            1,$12::jsonb,now(),NULL,NULL
          )
          ON CONFLICT (user_id, provider, provider_environment, external_account_id)
            WHERE external_account_id IS NOT NULL
          DO UPDATE SET
+           sync_cursor=CASE
+             WHEN broker_connections.connection_mode IS DISTINCT FROM EXCLUDED.connection_mode THEN '{}'::jsonb
+             ELSE broker_connections.sync_cursor
+           END,
+           last_sync_at=CASE
+             WHEN broker_connections.connection_mode IS DISTINCT FROM EXCLUDED.connection_mode THEN NULL
+             ELSE broker_connections.last_sync_at
+           END,
+           connection_mode=EXCLUDED.connection_mode,
+           oauth_scope=EXCLUDED.oauth_scope,
            account_label=EXCLUDED.account_label,
            mapped_account_id=EXCLUDED.mapped_account_id,
            legacy_mapped_account_id=EXCLUDED.legacy_mapped_account_id,
@@ -385,7 +801,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
            token_expires_at=EXCLUDED.token_expires_at,
            token_generation=broker_connections.token_generation+1,
            token_refreshed_at=now(),
-           provider_metadata=broker_connections.provider_metadata || EXCLUDED.provider_metadata,
+           provider_metadata=EXCLUDED.provider_metadata,
            connected_at=now(),
            disconnected_at=NULL,
            disconnect_reason=NULL`,
@@ -438,19 +854,25 @@ export class PostgresCTraderService implements CTraderBrokerService {
     return withTransaction(this.database, async (client) => {
       const connection = await client.query<{
         connected: boolean;
+        connection_mode: "official" | "mcp_read";
         access_token_ciphertext: string | null;
         refresh_token_ciphertext: string | null;
       }>(
-        `SELECT connected, access_token_ciphertext, refresh_token_ciphertext
+        `SELECT connected, connection_mode, access_token_ciphertext, refresh_token_ciphertext
          FROM broker_connections
          WHERE id=$1 AND user_id=$2 AND provider='ctrader'
-           AND oauth_scope='accounts' AND provider_environment IS NOT NULL
+           AND connection_mode IN ('official','mcp_read')
+           AND provider_environment IS NOT NULL
          FOR UPDATE`,
         [connectionId, userId],
       );
       const row = connection.rows[0];
       if (!row) throw notFound("cTrader connection");
-      if (!row.connected || !row.access_token_ciphertext || !row.refresh_token_ciphertext) {
+      if (
+        !row.connected
+        || !row.access_token_ciphertext
+        || (row.connection_mode === "official" && !row.refresh_token_ciphertext)
+      ) {
         throw new AppError(409, "CTRADER_REAUTH_REQUIRED", "Reconnect cTrader before requesting a sync");
       }
       const active = await client.query<{ id: string }>(
@@ -487,7 +909,8 @@ export class PostgresCTraderService implements CTraderBrokerService {
       const exists = await client.query<{ id: string }>(
         `SELECT id FROM broker_connections
          WHERE id=$1 AND user_id=$2 AND provider='ctrader'
-           AND oauth_scope='accounts' AND provider_environment IS NOT NULL
+           AND connection_mode IN ('official','mcp_read')
+           AND provider_environment IS NOT NULL
          LIMIT 1`,
         [connectionId, userId],
       );
@@ -498,7 +921,8 @@ export class PostgresCTraderService implements CTraderBrokerService {
       const locked = await client.query<{ id: string }>(
         `SELECT id FROM broker_connections
          WHERE id=$1 AND user_id=$2 AND provider='ctrader'
-           AND oauth_scope='accounts' AND provider_environment IS NOT NULL
+           AND connection_mode IN ('official','mcp_read')
+           AND provider_environment IS NOT NULL
          FOR UPDATE`,
         [connectionId, userId],
       );
@@ -542,6 +966,13 @@ export class PostgresCTraderService implements CTraderBrokerService {
     return result.rows[0] ?? null;
   }
 
+  private officialClients(): { oauth: CTraderOAuthClient; gateway: CTraderGateway } {
+    if (!this.config.cTrader.enabled || !this.oauth || !this.gateway) {
+      throw new AppError(503, "CTRADER_NOT_CONFIGURED", "cTrader OAuth is not configured on this server");
+    }
+    return { oauth: this.oauth, gateway: this.gateway };
+  }
+
   private async findConnection(userId: string, connectionId: string): Promise<CTraderPublicConnection> {
     return mapConnection(await this.findConnectionRow(userId, connectionId));
   }
@@ -550,7 +981,8 @@ export class PostgresCTraderService implements CTraderBrokerService {
     const result = await this.database.query<ConnectionRow>(
       `${connectionSelect}
        WHERE c.id=$1 AND c.user_id=$2 AND c.provider='ctrader'
-         AND c.oauth_scope='accounts' AND c.provider_environment IS NOT NULL
+         AND c.connection_mode IN ('official','mcp_read')
+         AND c.provider_environment IS NOT NULL
        LIMIT 1`,
       [connectionId, userId],
     );

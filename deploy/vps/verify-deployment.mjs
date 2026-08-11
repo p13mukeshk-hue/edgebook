@@ -46,6 +46,9 @@ for (const variable of ['CTRADER_CLIENT_ID', 'CTRADER_CLIENT_SECRET', 'CTRADER_R
   requireText(runtimeEnvExample, new RegExp(`^${variable}=$`, 'm'), `example leaves ${variable} blank for credentialless staging`);
   requireText(rehearsalComposeFixture, new RegExp(`^${variable}=$`, 'm'), `Compose rehearsal fixture leaves ${variable} blank`);
 }
+requireText(api, /CTRADER_MCP_ENABLED:\s*\$\{CTRADER_MCP_ENABLED:-false\}/, 'API receives explicit MCP compatibility flag');
+requireText(runtimeEnvExample, /^CTRADER_MCP_ENABLED=false$/m, 'MCP compatibility is opt-in in production example');
+requireText(rehearsalComposeFixture, /^CTRADER_MCP_ENABLED=false$/m, 'MCP compatibility is disabled in rehearsal fixture');
 requireText(runtimeEnvExample, /^# https:\/\/edgebook\.trade\/api\/auth\/ctrader\/callback$/m, 'canonical cTrader callback documented without creating a partial example');
 requireText(runtimeEnvExample, /^# CTRADER_ENCRYPTION_KEYS='\{"1":"<43-character-base64url-key>"\}'$/m, 'single-quoted cTrader keyring example');
 
@@ -56,9 +59,10 @@ rejectText(worker, /MIGRATION_DATABASE_URL|POSTGRES_SUPERUSER_PASSWORD|EDGEBOOK_
 for (const variable of ['CTRADER_CLIENT_ID', 'CTRADER_CLIENT_SECRET', 'CTRADER_REDIRECT_URI', 'CTRADER_ENCRYPTION_KEYS', 'CTRADER_ACTIVE_KEY_VERSION']) {
   requireText(worker, new RegExp(`${variable}:\\s*\\$\\{${variable}:-\\}`), `inactive worker interpolation is blank-safe for ${variable}`);
 }
-requireText(read('server/src/ctrader/worker.ts'), /if \(!config\.cTrader\.enabled\) throw new Error\(/, 'activated worker fails closed without complete cTrader configuration');
+requireText(worker, /CTRADER_MCP_ENABLED:\s*\$\{CTRADER_MCP_ENABLED:-false\}/, 'worker receives explicit MCP compatibility flag');
+requireText(read('server/src/ctrader/worker.ts'), /if \(!config\.cTrader\.available\)\s*\{?\s*throw new Error\(/, 'activated worker fails closed without an enabled cTrader connection mode');
 const renderedWorkerGate = read('deploy/vps/scripts/verify-rendered-worker-env.mjs');
-for (const requirement of ['CTRADER_REDIRECT_URI', 'CTRADER_ENCRYPTION_KEYS', 'CTRADER_ACTIVE_KEY_VERSION', 'SCHEDULER_ENABLED']) {
+for (const requirement of ['CTRADER_MCP_ENABLED', 'CTRADER_ENCRYPTION_KEYS', 'CTRADER_ACTIVE_KEY_VERSION', 'SCHEDULER_ENABLED']) {
   requireText(renderedWorkerGate, new RegExp(requirement), `rendered worker gate checks ${requirement}`);
 }
 rejectText(renderedWorkerGate, /JSON\.stringify\s*\(\s*(?:model|environment)|console\.log\s*\(\s*(?:model|environment)|process\.stdout\.write\s*\(\s*(?:model|environment)/, 'rendered worker gate logs secret-bearing model');

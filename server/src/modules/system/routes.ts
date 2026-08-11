@@ -6,6 +6,7 @@ const requiredMigrations = [
   "001_initial.sql",
   "002_ctrader.sql",
   "003_tenant_integrity.sql",
+  "004_ctrader_mcp_read.sql",
   "900_legacy_firebase_archive.sql",
 ] as const;
 
@@ -42,7 +43,9 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       googleClientId: app.config.googleClientId,
       authMode: "google",
       dataApiReady: true,
-      ctraderEnabled: app.config.cTrader.enabled,
+      ctraderEnabled: app.config.cTrader.available,
+      ctraderOAuthEnabled: app.config.cTrader.enabled,
+      ctraderMcpEnabled: app.config.cTrader.mcpEnabled,
     };
   });
 }

@@ -16,6 +16,14 @@ const createConnectionSchema = z.object({
   mappedLegacyAccountId: z.string().trim().min(1).max(255).nullable().optional(),
   label: z.string().trim().min(1).max(200).nullable().optional(),
 }).strict();
+const connectMcpSchema = z.object({
+  configuration: z.string().trim().min(20).max(32_768),
+  environment: z.enum(["live", "demo"]),
+  accountId: z.string().trim().regex(/^(?:0|[1-9]\d{0,19})$/).nullable().optional(),
+  mappedLegacyAccountId: z.string().trim().min(1).max(255).nullable().optional(),
+  label: z.string().trim().min(1).max(200).nullable().optional(),
+  acknowledgeTradingCredentialRisk: z.literal(true),
+}).strict();
 
 function fixedAppRedirect(app: FastifyInstance, state: "select" | "error", code?: string): string {
   const target = new URL("/app.html", app.config.publicOrigin);
@@ -111,6 +119,29 @@ export async function registerCTraderRoutes(
     reply.header("Cache-Control", "no-store");
     return enabledService().pendingOAuth(request.auth!);
   });
+
+  app.post(
+    "/api/ctrader/mcp/connect",
+    {
+      ...protectedWrite,
+      config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!app.config.cTrader.mcpEnabled) {
+        throw new AppError(503, "CTRADER_MCP_NOT_CONFIGURED", "cTrader MCP compatibility is not enabled on this server");
+      }
+      const body = connectMcpSchema.parse(request.body);
+      const connection = await enabledService().connectMcp({
+        auth: request.auth!,
+        configuration: body.configuration,
+        environment: body.environment,
+        accountId: body.accountId ?? null,
+        mappedLegacyAccountId: body.mappedLegacyAccountId ?? null,
+        label: body.label ?? null,
+      });
+      return reply.code(200).send({ connection });
+    },
+  );
 
   app.get("/api/ctrader/connections", protectedRead, async (request, reply) => {
     reply.header("Cache-Control", "no-store");

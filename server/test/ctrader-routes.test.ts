@@ -26,6 +26,7 @@ function config() {
     CTRADER_REDIRECT_URI: "http://localhost:3210/api/auth/ctrader/callback",
     CTRADER_ENCRYPTION_KEYS: JSON.stringify({ 1: Buffer.alloc(32, 1).toString("base64url") }),
     CTRADER_ACTIVE_KEY_VERSION: "1",
+    CTRADER_MCP_ENABLED: "true",
   });
 }
 
@@ -37,6 +38,11 @@ function mockService() {
     })),
     rejectOAuth: vi.fn(async () => undefined),
     completeOAuth: vi.fn(async () => undefined),
+    connectMcp: vi.fn(async () => ({
+      id: "00000000-0000-4000-8000-000000000090",
+      connected: true,
+      mode: "mcp_read",
+    })),
     pendingOAuth: vi.fn(),
     listConnections: vi.fn(async () => []),
     createConnection: vi.fn(),
@@ -127,6 +133,83 @@ describe("cTrader HTTP contract", () => {
     const app = await buildApp(config(), dependencies(mockService()));
     const response = await app.inject({ method: "GET", url: "/api/config" });
     expect(response.json().ctraderEnabled).toBe(true);
+    expect(response.json()).toMatchObject({ ctraderOAuthEnabled: true, ctraderMcpEnabled: true });
+    await app.close();
+  });
+
+  it("connects a copied MCP configuration only after explicit trading-credential acknowledgement", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/mcp/connect",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+      },
+      payload: {
+        configuration: JSON.stringify({
+          url: "https://mcp.ctrader.com/trading/mcp",
+          headers: { Authorization: `Bearer ${"x".repeat(40)}` },
+        }),
+        environment: "live",
+        accountId: "5032134",
+        label: "The5ers",
+        mappedLegacyAccountId: null,
+        acknowledgeTradingCredentialRisk: true,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().connection).toMatchObject({ connected: true, mode: "mcp_read" });
+    expect(service.connectMcp).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: "5032134",
+      environment: "live",
+      label: "The5ers",
+    }));
+    expect(response.body).not.toContain("Bearer");
+    await app.close();
+  });
+
+  it("rejects MCP connection payloads without literal risk acknowledgement", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/mcp/connect",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+      },
+      payload: {
+        configuration: `Bearer ${"x".repeat(40)}`,
+        environment: "live",
+        accountId: "5032134",
+        acknowledgeTradingCredentialRisk: false,
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(service.connectMcp).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("requires an explicit live or demo environment for MCP connections", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/mcp/connect",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+      },
+      payload: {
+        configuration: `Bearer ${"x".repeat(40)}`,
+        accountId: "5032134",
+        acknowledgeTradingCredentialRisk: true,
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(service.connectMcp).not.toHaveBeenCalled();
     await app.close();
   });
 });

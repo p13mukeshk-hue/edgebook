@@ -81,6 +81,9 @@ jobs:
             for (const name of ['CTRADER_CLIENT_ID', 'CTRADER_CLIENT_SECRET', 'CTRADER_REDIRECT_URI', 'CTRADER_ENCRYPTION_KEYS', 'CTRADER_ACTIVE_KEY_VERSION']) {
               if (environment[name] !== '') throw new Error(`${serviceName}.${name} must render blank in rehearsal`);
             }
+            if (String(environment.CTRADER_MCP_ENABLED).toLowerCase() !== 'false') {
+              throw new Error(`${serviceName}.CTRADER_MCP_ENABLED must render false in rehearsal`);
+            }
           }
           if (model.services.migrate.environment.DATABASE_URL !== '') {
             throw new Error('inactive migrator DATABASE_URL must render blank in rehearsal');

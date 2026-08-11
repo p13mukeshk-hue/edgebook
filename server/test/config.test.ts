@@ -68,6 +68,9 @@ describe("loadConfig", () => {
 
     expect(config.cTrader).toMatchObject({
       enabled: false,
+      available: false,
+      mcpEnabled: false,
+      storageEnabled: false,
       activeKeyVersion: null,
       oauthStateTtlSeconds: 300,
       maxDealsPerRequest: 1_000,
@@ -78,7 +81,33 @@ describe("loadConfig", () => {
 
   it("rejects a partially configured cTrader integration", () => {
     expect(() => loadConfig(environment({ CTRADER_CLIENT_ID: "client-only" })))
-      .toThrow(/All cTrader client, redirect, keyring, and active-key variables/);
+      .toThrow(/All cTrader client and redirect variables/);
+  });
+
+  it("enables MCP compatibility only with encrypted credential storage", () => {
+    const config = loadConfig(environment({
+      CTRADER_CLIENT_ID: "",
+      CTRADER_CLIENT_SECRET: "",
+      CTRADER_REDIRECT_URI: "",
+      CTRADER_MCP_ENABLED: "true",
+      CTRADER_ENCRYPTION_KEYS: JSON.stringify({ 1: Buffer.alloc(32).toString("base64url") }),
+      CTRADER_ACTIVE_KEY_VERSION: "1",
+    }));
+    expect(config.cTrader).toMatchObject({
+      enabled: false,
+      available: true,
+      mcpEnabled: true,
+      storageEnabled: true,
+    });
+  });
+
+  it("rejects MCP compatibility without an encryption keyring", () => {
+    expect(() => loadConfig(environment({
+      CTRADER_CLIENT_ID: "",
+      CTRADER_CLIENT_SECRET: "",
+      CTRADER_REDIRECT_URI: "",
+      CTRADER_MCP_ENABLED: "true",
+    }))).toThrow(/CTRADER_MCP_ENABLED requires/);
   });
 
   it("loads one-shot database and cleanup tools without authentication secrets", () => {

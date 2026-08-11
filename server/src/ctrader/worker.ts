@@ -7,13 +7,19 @@ import { createDatabase, type Database } from "../db/database.js";
 import { PostgresEventBus } from "../events/event-bus.js";
 import { OfficialCTraderGateway } from "./client.js";
 import { AesGcmTokenCipher } from "./crypto.js";
+import { CTraderMcpSyncEngine } from "./mcp-sync.js";
 import { OfficialCTraderOAuthClient } from "./oauth.js";
-import { CTraderSyncEngine, CTraderSyncError } from "./sync.js";
+import { CTraderSyncEngine, CTraderSyncError, type CTraderSyncResult } from "./sync.js";
 
 type QueuedRun = QueryResultRow & {
   id: string;
   broker_connection_id: string;
   attempt_count: number;
+  connection_mode: "official" | "mcp_read";
+};
+
+type ConnectionSyncEngine = {
+  syncConnection(connectionId: string, heartbeat?: () => Promise<void>): Promise<CTraderSyncResult>;
 };
 
 type Logger = Pick<Console, "info" | "warn" | "error">;
@@ -59,7 +65,8 @@ export class CTraderWorker {
   constructor(
     private readonly database: Database,
     private readonly config: AppConfig,
-    private readonly engine: CTraderSyncEngine,
+    private readonly officialEngine: ConnectionSyncEngine | null,
+    private readonly mcpEngine: ConnectionSyncEngine | null,
     private readonly logger: Logger = console,
   ) {}
 
@@ -131,10 +138,14 @@ export class CTraderWorker {
     const due = await this.database.query<{ id: string }>(
       `SELECT c.id
        FROM broker_connections c
-       WHERE c.provider='ctrader' AND c.oauth_scope='accounts'
+       WHERE c.provider='ctrader'
          AND c.provider_environment IS NOT NULL AND c.connected=true
          AND c.access_token_ciphertext IS NOT NULL
-         AND c.refresh_token_ciphertext IS NOT NULL
+         AND (
+           (c.connection_mode='official' AND c.oauth_scope='accounts'
+             AND c.refresh_token_ciphertext IS NOT NULL)
+           OR (c.connection_mode='mcp_read' AND c.oauth_scope='mcp_read')
+         )
          AND NOT EXISTS (
            SELECT 1 FROM sync_runs active
            WHERE active.broker_connection_id=c.id
@@ -163,11 +174,15 @@ export class CTraderWorker {
     try {
       await client.query("BEGIN");
       const queued = await client.query<QueuedRun>(
-        `SELECT sr.id, sr.broker_connection_id, sr.attempt_count
+        `SELECT sr.id, sr.broker_connection_id, sr.attempt_count, c.connection_mode
          FROM sync_runs sr
          JOIN broker_connections c ON c.id=sr.broker_connection_id
          WHERE sr.status='queued' AND sr.not_before <= now()
-           AND c.provider='ctrader' AND c.oauth_scope='accounts'
+           AND c.provider='ctrader'
+           AND (
+             (c.connection_mode='official' AND c.oauth_scope='accounts')
+             OR (c.connection_mode='mcp_read' AND c.oauth_scope='mcp_read')
+           )
            AND c.provider_environment IS NOT NULL AND c.connected=true
          ORDER BY sr.started_at ASC, sr.id ASC
          FOR UPDATE OF sr SKIP LOCKED
@@ -187,7 +202,8 @@ export class CTraderWorker {
         [run.id],
       );
       await client.query("COMMIT");
-      return claimed.rows[0] ?? null;
+      const claimedRow = claimed.rows[0];
+      return claimedRow ? { ...claimedRow, connection_mode: run.connection_mode } : null;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -217,7 +233,15 @@ export class CTraderWorker {
     const timer = setInterval(() => void heartbeat().catch(() => undefined), 30_000);
     timer.unref();
     try {
-      const result = await this.engine.syncConnection(run.broker_connection_id, heartbeat);
+      const engine = run.connection_mode === "mcp_read" ? this.mcpEngine : this.officialEngine;
+      if (!engine) {
+        throw new CTraderSyncError(
+          "CTRADER_MODE_NOT_CONFIGURED",
+          `The ${run.connection_mode} cTrader sync mode is not configured on this worker`,
+          false,
+        );
+      }
+      const result = await engine.syncConnection(run.broker_connection_id, heartbeat);
       await this.database.query(
         `UPDATE sync_runs SET status='succeeded', cursor_before=$1::jsonb,
            cursor_after=$2::jsonb, counters=$3::jsonb, heartbeat_at=now(),
@@ -338,14 +362,26 @@ export class CTraderWorker {
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  if (!config.cTrader.enabled) throw new Error("The cTrader worker requires a complete cTrader configuration");
+  if (!config.cTrader.available) {
+    throw new Error("The cTrader worker requires at least one enabled cTrader connection mode");
+  }
   const database = createDatabase(config);
   const events = new PostgresEventBus(database);
-  const oauth = new OfficialCTraderOAuthClient(config.cTrader);
-  const gateway = new OfficialCTraderGateway(config.cTrader);
   const cipher = AesGcmTokenCipher.fromConfig(config.cTrader);
-  const engine = new CTraderSyncEngine(database, config, oauth, gateway, cipher, events);
-  const worker = new CTraderWorker(database, config, engine);
+  const officialEngine = config.cTrader.enabled
+    ? new CTraderSyncEngine(
+        database,
+        config,
+        new OfficialCTraderOAuthClient(config.cTrader),
+        new OfficialCTraderGateway(config.cTrader),
+        cipher,
+        events,
+      )
+    : null;
+  const mcpEngine = config.cTrader.mcpEnabled
+    ? new CTraderMcpSyncEngine(database, config, cipher, events)
+    : null;
+  const worker = new CTraderWorker(database, config, officialEngine, mcpEngine);
   const controller = new AbortController();
   process.once("SIGTERM", () => controller.abort());
   process.once("SIGINT", () => controller.abort());

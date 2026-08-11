@@ -19,12 +19,13 @@ This directory is intentionally isolated from the current Firebase frontend and 
 - Versioned SQL migration runner
 - Graceful shutdown, rate limits, security headers and log redaction
 - Official cTrader OAuth with view-only `accounts` scope
+- Opt-in compatibility with an existing cTrader Remote MCP configuration
 - Encrypted, rotating cTrader tokens and a durable PostgreSQL sync queue
 - Full-history, lossless deal ingestion and idempotent position projection
 - Automatic/manual sync worker with single-writer locks and stale-job recovery
 - Unit and HTTP contract tests
 
-The cTrader integration exposes no order placement, modification, or position-close primitive. It imports only authorized account metadata and historical deals. Zerodha is not part of this server.
+The cTrader integration exposes no order placement, modification, or position-close primitive. It imports only authorized account metadata and historical deals. Remote MCP credentials are nevertheless trading-capable and session-bound at cTrader, so compatibility mode is disabled by default, requires an explicit user acknowledgement, calls a closed read-tool allowlist, and stores only an AES-GCM-encrypted bearer token. Zerodha is not part of this server.
 
 ## Local setup
 
@@ -87,6 +88,7 @@ npm run ctrader:worker
 | `CTRADER_REDIRECT_URI` | optional group | Exact HTTPS callback URL ending in `/api/auth/ctrader/callback` |
 | `CTRADER_ENCRYPTION_KEYS` | optional group | JSON version-to-32-byte-base64url token keyring |
 | `CTRADER_ACTIVE_KEY_VERSION` | optional group | Active positive keyring version |
+| `CTRADER_MCP_ENABLED` | `false` | Enables copied Remote MCP compatibility; requires the encryption keyring group |
 | `CTRADER_OAUTH_STATE_TTL_SECONDS` | `300` | One-use, session-bound OAuth state lifetime |
 | `CTRADER_GRANT_TTL_SECONDS` | `600` | Encrypted account-picker grant lifetime |
 | `CTRADER_REQUEST_TIMEOUT_MS` | `15000` | OAuth/Open API request timeout |
@@ -136,6 +138,8 @@ The CSRF value is returned by login and session discovery. The readable CSRF coo
 | POST | `/api/auth/google` | `{credential}` | `{user,csrfToken}` and cookies |
 | POST | `/api/auth/logout` | CSRF | 204 |
 
+`/api/config` also returns `ctraderEnabled`, `ctraderOAuthEnabled`, and `ctraderMcpEnabled` so the browser can expose only the configured connection modes.
+
 ### cTrader (read-only)
 
 | Method | Route | Contract |
@@ -143,6 +147,7 @@ The CSRF value is returned by login and session discovery. The readable CSRF coo
 | POST | `/api/ctrader/oauth/start` | CSRF; `{authorizationUrl,expiresAt}` |
 | GET | `/api/auth/ctrader/callback` | Provider redirect; fixed 303 to `/app.html?ctrader=select` or allowlisted error |
 | GET | `/api/ctrader/oauth/pending` | Current-session encrypted grant; `{grantId,expiresAt,accounts}` |
+| POST | `/api/ctrader/mcp/connect` | CSRF; copied `configuration`, required `environment:"live"|"demo"`, optional mapping/label, and literal `acknowledgeTradingCredentialRisk:true` |
 | GET | `/api/ctrader/connections` | `{connections}` with no token material |
 | POST | `/api/ctrader/connections` | `{grantId,ctidTraderAccountId,mappedLegacyAccountId?,label?}`; create or revive |
 | GET | `/api/ctrader/connections/:id/status` | Connection plus latest durable sync run |
@@ -151,15 +156,19 @@ The CSRF value is returned by login and session discovery. The readable CSRF coo
 
 OAuth state is opaque, HMACed, one use, short lived, and bound to the current Edgebook user and browser session. Access/refresh tokens are AES-256-GCM envelopes bound by AAD to their grant/connection ID and token kind. Account selection re-encrypts the tokens for the final connection, then erases the short-lived grant ciphertext.
 
+Remote MCP connect first proves that the credential can call balance, symbols, and a real bounded `get_deals` history request. The copied configuration is never returned or retained; its extracted bearer token is stored in the same AAD-bound AES-GCM envelope. Edgebook calls only the fixed cTrader endpoint and the reviewed read-tool allowlist. If cTrader does not advertise the history tool, no connection or sync claim is created. The user must explicitly select live or demo; provider metadata is allowed to confirm that choice but never silently defaults it.
+
 Run one long-lived worker alongside the API:
 
 ```text
 npm run ctrader:worker:prod
 ```
 
-That single process handles initial/manual queued jobs even while `SCHEDULER_ENABLED=false`. Once the previous writer is disabled, setting `SCHEDULER_ENABLED=true` also enables recurring enqueueing. A global PostgreSQL advisory lock permits only one active worker; a per-connection advisory lock coordinates sync and disconnect. Heartbeats recover abandoned jobs, transient failures retry at most three attempts, and authorization failure atomically scrubs tokens and requests fresh OAuth.
+That single process handles initial/manual queued jobs even while `SCHEDULER_ENABLED=false`. Once the previous writer is disabled, setting `SCHEDULER_ENABLED=true` also enables recurring enqueueing. A global PostgreSQL advisory lock permits only one active worker; a per-connection advisory lock coordinates sync and disconnect. Heartbeats recover abandoned jobs, transient failures retry at most three attempts, and authorization failure atomically scrubs tokens and requests fresh authorization for that connection mode.
 
-Each cTrader position remains one journal trade, including an open position with partial realized P&L. `brokerData.realizedEvents` is the immutable execution-level ledger (`executionId`, UTC `executedAt`, trading-timezone `date`/`time`, close volume, price, net/gross P&L and fees). Calendar, daily, and drawdown views use those events instead of assigning every close to the original entry date. Provider-owned projection fields cannot be changed through trade PATCH; strategy, emotion, notes, tags, psychology, custom fields, stop loss, and take profit remain editable annotations.
+For official OAuth, each cTrader position remains one journal trade, including an open position with partial realized P&L. `brokerData.realizedEvents` is the immutable execution-level ledger (`executionId`, UTC `executedAt`, trading-timezone `date`/`time`, close volume, price, net/gross P&L and fees). Calendar, daily, and drawdown views use those events instead of assigning every close to the original entry date. Provider-owned projection fields cannot be changed through trade PATCH; strategy, emotion, notes, tags, psychology, custom fields, stop loss, and take profit remain editable annotations.
+
+Remote MCP responses are intentionally projected more conservatively because their documented deal and symbol payloads may omit contract size, opener role, and authoritative net P&L semantics. Edgebook always stores validated execution facts and advances only a complete history window. A position lacking authoritative projection inputs is withheld from `trades` and analytics, retained in the connection's review queue, retried on later syncs, and surfaced through `positionsAwaitingReview` plus a sanitized connection warning. No lot size or P&L is guessed.
 
 Google users are keyed by immutable `sub`, never by email alone. `users.google_sub` is nullable only to permit a pre-link Firebase import; the importer should populate provider UIDs before auth cutover.
 

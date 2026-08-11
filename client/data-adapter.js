@@ -317,9 +317,23 @@ export function createVpsDataAdapter(api) {
     ctrader: {
       async config() {
         const payload = await api.get('/config');
-        return { enabled: payload?.ctraderEnabled === true };
+        return {
+          enabled: typeof payload?.ctraderOAuthEnabled === 'boolean'
+            ? payload.ctraderOAuthEnabled
+            : payload?.ctraderEnabled === true,
+          mcpEnabled: payload?.ctraderMcpEnabled === true,
+        };
       },
       startOAuth: () => api.post('/ctrader/oauth/start', {}),
+      connectMcp: ({ configuration, accountId = null, environment, mappedLegacyAccountId = null, label = null, acknowledgeTradingCredentialRisk = false }) =>
+        api.post('/ctrader/mcp/connect', {
+          configuration,
+          accountId: accountId ? String(accountId).trim() : null,
+          environment,
+          mappedLegacyAccountId: mappedLegacyAccountId || null,
+          label: label?.trim() || null,
+          acknowledgeTradingCredentialRisk: acknowledgeTradingCredentialRisk === true,
+        }),
       pendingOAuth: () => api.get('/ctrader/oauth/pending'),
       async list() {
         const payload = await api.get('/ctrader/connections');

@@ -4,6 +4,9 @@ import { OfficialCTraderOAuthClient } from "../src/ctrader/oauth.js";
 
 const config: CTraderConfig = {
   enabled: true,
+  available: true,
+  mcpEnabled: false,
+  storageEnabled: true,
   clientId: "client-id",
   clientSecret: "client-secret",
   redirectUri: "https://edgebook.test/api/auth/ctrader/callback",

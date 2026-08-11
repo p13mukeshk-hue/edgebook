@@ -153,6 +153,9 @@ try {
     'promotion conflicts must fail instead of silently preserving target rows');
   assert.match(promoterSource, /JSON\.stringify\(\{ \.\.\.d, screenshots:\[\] \}\)/,
     'live promoted trade rows must not retain screenshot URLs already materialized as private files');
+  assert.match(promoterSource,
+    /provider,connection_mode,external_account_id[\s\S]*CASE WHEN \$4='ctrader' THEN 'official' ELSE NULL END/,
+    'legacy cTrader brokers must satisfy the post-MCP connection-mode constraint');
 
   const valid = await writeBundle('valid', baseDocuments);
   const browserLocal = resolve(temporaryRoot, 'browser-local.json');

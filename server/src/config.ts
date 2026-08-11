@@ -73,6 +73,7 @@ const configSchema = z
     CTRADER_MAX_DEALS_PER_REQUEST: z.preprocess(blankAsUndefined, z.coerce.number().int().min(1).max(10_000).default(1_000)),
     CTRADER_SYMBOL_CACHE_SECONDS: z.preprocess(blankAsUndefined, z.coerce.number().int().min(60).max(604_800).default(86_400)),
     CTRADER_TRADING_TIME_ZONE: z.preprocess(blankAsUndefined, z.string().min(1).default("Asia/Kolkata")),
+    CTRADER_MCP_ENABLED: z.preprocess(blankAsUndefined, booleanString.default(false)),
     SCHEDULER_ENABLED: z.preprocess(blankAsUndefined, booleanString.default(false)),
   })
   .superRefine((value, context) => {
@@ -98,19 +99,43 @@ const configSchema = z
       });
     }
 
-    const cTraderInputs = [
+    const cTraderApplicationInputs = [
       value.CTRADER_CLIENT_ID,
       value.CTRADER_CLIENT_SECRET,
       value.CTRADER_REDIRECT_URI,
+    ];
+    const cTraderEncryptionInputs = [
       value.CTRADER_ENCRYPTION_KEYS,
       value.CTRADER_ACTIVE_KEY_VERSION,
     ];
-    const configuredCount = cTraderInputs.filter((entry) => entry !== undefined).length;
-    if (configuredCount !== 0 && configuredCount !== cTraderInputs.length) {
+    const applicationConfiguredCount = cTraderApplicationInputs.filter((entry) => entry !== undefined).length;
+    const encryptionConfiguredCount = cTraderEncryptionInputs.filter((entry) => entry !== undefined).length;
+    if (applicationConfiguredCount !== 0 && applicationConfiguredCount !== cTraderApplicationInputs.length) {
       context.addIssue({
         code: "custom",
         path: ["CTRADER_CLIENT_ID"],
-        message: "All cTrader client, redirect, keyring, and active-key variables must be set together",
+        message: "All cTrader client and redirect variables must be set together",
+      });
+    }
+    if (encryptionConfiguredCount !== 0 && encryptionConfiguredCount !== cTraderEncryptionInputs.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["CTRADER_ENCRYPTION_KEYS"],
+        message: "Both cTrader keyring and active-key variables must be set together",
+      });
+    }
+    if (applicationConfiguredCount === cTraderApplicationInputs.length && encryptionConfiguredCount !== cTraderEncryptionInputs.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["CTRADER_ENCRYPTION_KEYS"],
+        message: "Official cTrader OAuth requires encrypted credential storage",
+      });
+    }
+    if (value.CTRADER_MCP_ENABLED && encryptionConfiguredCount !== cTraderEncryptionInputs.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["CTRADER_MCP_ENABLED"],
+        message: "CTRADER_MCP_ENABLED requires cTrader keyring and active-key variables",
       });
     }
     if (value.CTRADER_REDIRECT_URI !== undefined) {
@@ -129,11 +154,15 @@ const configSchema = z
         });
       }
     }
-    if (value.SCHEDULER_ENABLED && configuredCount !== cTraderInputs.length) {
+    if (
+      value.SCHEDULER_ENABLED
+      && applicationConfiguredCount !== cTraderApplicationInputs.length
+      && !value.CTRADER_MCP_ENABLED
+    ) {
       context.addIssue({
         code: "custom",
         path: ["SCHEDULER_ENABLED"],
-        message: "SCHEDULER_ENABLED requires a complete cTrader configuration",
+        message: "SCHEDULER_ENABLED requires official cTrader OAuth or MCP compatibility",
       });
     }
     try {
@@ -148,7 +177,14 @@ const configSchema = z
   });
 
 export type CTraderConfig = {
+  /** Official Open API OAuth is fully configured. */
   enabled: boolean;
+  /** At least one supported cTrader connection mode is configured. */
+  available: boolean;
+  /** Opt-in compatibility for a copied, session-bound Remote MCP credential. */
+  mcpEnabled: boolean;
+  /** A complete AES-GCM credential keyring is configured. */
+  storageEnabled: boolean;
   clientId: string | null;
   clientSecret: string | null;
   redirectUri: string | null;
@@ -234,7 +270,9 @@ export function loadStorageCleanupConfig(environment: NodeJS.ProcessEnv = proces
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = configSchema.parse(environment);
-  const cTraderEnabled = parsed.CTRADER_CLIENT_ID !== undefined;
+  const cTraderStorageEnabled = parsed.CTRADER_ENCRYPTION_KEYS !== undefined;
+  const cTraderEnabled = parsed.CTRADER_CLIENT_ID !== undefined && cTraderStorageEnabled;
+  const cTraderMcpEnabled = parsed.CTRADER_MCP_ENABLED && cTraderStorageEnabled;
   return {
     nodeEnv: parsed.NODE_ENV,
     host: parsed.HOST,
@@ -258,6 +296,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     sseHeartbeatMs: parsed.SSE_HEARTBEAT_MS,
     cTrader: {
       enabled: cTraderEnabled,
+      available: cTraderEnabled || cTraderMcpEnabled,
+      mcpEnabled: cTraderMcpEnabled,
+      storageEnabled: cTraderStorageEnabled,
       clientId: parsed.CTRADER_CLIENT_ID ?? null,
       clientSecret: parsed.CTRADER_CLIENT_SECRET ?? null,
       redirectUri: parsed.CTRADER_REDIRECT_URI ?? null,

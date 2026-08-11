@@ -27,7 +27,12 @@ import { OfficialCTraderGateway } from "./ctrader/client.js";
 import { AesGcmTokenCipher } from "./ctrader/crypto.js";
 import { OfficialCTraderOAuthClient } from "./ctrader/oauth.js";
 import { registerCTraderRoutes } from "./ctrader/routes.js";
-import { PostgresCTraderService, type CTraderBrokerService } from "./ctrader/service.js";
+import {
+  PostgresCTraderService,
+  type CTraderBrokerService,
+  type CTraderMcpConnector,
+} from "./ctrader/service.js";
+import { validateCTraderMcpConfiguration } from "./ctrader/mcp.js";
 
 export type AppDependencies = {
   database?: Database;
@@ -35,6 +40,7 @@ export type AppDependencies = {
   screenshotStorage?: ScreenshotStorage;
   googleVerifier?: GoogleTokenVerifier;
   ctraderService?: CTraderBrokerService | null;
+  ctraderMcpConnector?: CTraderMcpConnector | null;
   loggerStream?: { write(message: string): void };
 };
 
@@ -53,6 +59,7 @@ export async function buildApp(config: AppConfig, dependencies: AppDependencies 
             "body.accessToken",
             "body.refreshToken",
             "body.token",
+            "body.configuration",
           ],
           censor: "[REDACTED]",
         },
@@ -75,14 +82,23 @@ export async function buildApp(config: AppConfig, dependencies: AppDependencies 
   const screenshotStorage = dependencies.screenshotStorage ?? new LocalScreenshotStorage(config);
   const ctraderService = dependencies.ctraderService !== undefined
     ? dependencies.ctraderService
-    : config.cTrader.enabled
+    : config.cTrader.available
       ? new PostgresCTraderService(
           database,
           config,
-          new OfficialCTraderOAuthClient(config.cTrader),
-          new OfficialCTraderGateway(config.cTrader),
+          config.cTrader.enabled ? new OfficialCTraderOAuthClient(config.cTrader) : null,
+          config.cTrader.enabled ? new OfficialCTraderGateway(config.cTrader) : null,
           AesGcmTokenCipher.fromConfig(config.cTrader),
           events,
+          dependencies.ctraderMcpConnector !== undefined
+            ? dependencies.ctraderMcpConnector
+            : config.cTrader.mcpEnabled
+              ? {
+                  validateConfiguration: (configuration) => validateCTraderMcpConfiguration(configuration, {
+                    requestTimeoutMs: config.cTrader.requestTimeoutMs,
+                  }),
+                }
+              : null,
         )
       : null;
   app.decorate("config", config);

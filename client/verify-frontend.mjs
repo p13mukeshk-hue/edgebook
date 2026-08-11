@@ -763,14 +763,17 @@ requireMatch(app, /SCREENSHOT_MIME_TYPES=new Set\(\[['"]image\/png['"],['"]image
 requireMatch(app, /const pendingScreenshots=\(trade\.screenshots\|\|\[\]\)\.filter/, 'screenshot promotion on existing and new trades');
 rejectMatch(app, /pendingScreenshots\s*=\s*!exists\s*\?/, 'new-trade-only screenshot promotion');
 
-// cTrader uses only same-origin OAuth and read-only sync routes. Any archived
-// pasted-token controls must remain inaccessible in the VPS runtime.
+// cTrader keeps official read-only OAuth as the primary route. An explicitly
+// enabled Remote MCP compatibility route accepts the old copied configuration
+// through the same-origin API, with a mandatory trading-capability warning.
 requireMatch(app, /app\.html\?ctrader=select|callback\?\.state===['"]select['"]/, 'cTrader OAuth account-selection callback');
 requireMatch(app, /pendingOAuth\(\)/, 'pending cTrader OAuth grant lookup');
 requireMatch(app, /mappedLegacyAccountId/, 'cTrader legacy account mapping');
 requireMatch(app, /function applyVpsCtraderPickerDefaults[\s\S]*?existing\?\.mappedLegacyAccountId/, 'cTrader reconnect mapping preservation');
 requireMatch(app, /lastSyncStatus/, 'cTrader sync status rendering');
-requireMatch(app, /Read-only automatic sync runs in the background/, 'automatic cTrader sync messaging');
+requireMatch(app, /positionsAwaitingReview[\s\S]*?Review needed/, 'cTrader quarantined-position review state');
+requireMatch(app, /lastWarning[\s\S]*?excluded from the journal and analytics/, 'cTrader safe execution-quarantine explanation');
+requireMatch(app, /Official OAuth uses read-only account access|Edgebook invokes read tools only/, 'automatic cTrader sync messaging');
 requireMatch(app, /function cTraderReviewRevision[\s\S]*?realizedEvents[\s\S]*?executions:/, 'cTrader provider-revision review marker');
 requireMatch(app, /function cTraderTradeNeedsReview[\s\S]*?edgebookReview/, 'cTrader needs-review detection');
 requireMatch(app, /cfVals\.edgebookReview=\{version:1,providerRevision:cTraderReviewRevision\(existingTrade\)/, 'cTrader review acknowledgement on journal save');
@@ -782,7 +785,114 @@ requireMatch(app, /escapeCtraderText\(JSON\.stringify\(id\)\)/, 'safe VPS cTrade
 requireMatch(app, /html\[data-auth-mode="vps"\] \.ctrader-legacy-only\{display:none!important\}/, 'legacy cTrader controls hidden in VPS mode');
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/start['"]/, 'same-origin cTrader OAuth start route');
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/pending['"]/, 'same-origin cTrader OAuth pending route');
+requireMatch(dataAdapter, /['"]\/ctrader\/mcp\/connect['"]/, 'same-origin cTrader Remote MCP connection route');
 rejectMatch(dataAdapter, /https?:\/\//i, 'absolute URL in VPS data adapter');
+
+const ctraderMcpModalSource = sourceBetween('<!-- VPS cTrader Remote MCP compatibility.', '<!-- VPS cTrader OAuth account picker');
+const ctraderMcpSubmitSource = sourceBetween('function clearVpsCtraderMcpForm', 'function openVpsCtraderPicker');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-configuration"[\s\S]*?<\/textarea>/, 'full copied Remote MCP configuration field');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-account-id"[^>]*inputmode="numeric"/, 'optional numeric cTrader account ID');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-environment"[\s\S]*?value="live"[\s\S]*?value="demo"/, 'explicit cTrader live or demo environment selection');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-map-account"/, 'Remote MCP Edgebook account mapping');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-label"/, 'Remote MCP connection label');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-risk-ack"[\s\S]*?session-bound and trading-capable[\s\S]*?only read tools/, 'explicit Remote MCP capability acknowledgement');
+rejectMatch(ctraderMcpModalSource, /type="password"|client secret|access token|refresh token|\bFIX\b/i, 'unrelated credential field in Remote MCP compatibility modal');
+requireMatch(ctraderMcpSubmitSource, /if\(!requestBody\.acknowledgeTradingCredentialRisk\)[\s\S]*?return;/, 'Remote MCP acknowledgement enforcement');
+requireMatch(ctraderMcpSubmitSource, /document\.getElementById\(['"]ctrader-mcp-configuration['"]\)\.value=['"]['"]/, 'Remote MCP configuration cleared after submission');
+rejectMatch(ctraderMcpSubmitSource, /localStorage|sessionStorage|console\.(?:log|warn|error)/, 'Remote MCP secret persistence or logging');
+requireMatch(app, /current\.authMode\|\|current\.mode[\s\S]*?Remote MCP compatibility[\s\S]*?Official OAuth/, 'cTrader connection mode rendering');
+
+try {
+  const elements = new Map([
+    ['ctrader-mcp-configuration', { value: '{"mcpServers":{"ctrader":{"transport":"fixture"}}}' }],
+    ['ctrader-mcp-account-id', { value: '42' }],
+    ['ctrader-mcp-environment', { value: 'live' }],
+    ['ctrader-mcp-label', { value: 'The5ers' }],
+    ['ctrader-mcp-map-account', { value: 'acct_1', innerHTML: '' }],
+    ['ctrader-mcp-risk-ack', { checked: false }],
+    ['ctrader-vps-mcp-error', { textContent: '', style: {} }],
+    ['ctrader-vps-mcp-submit', { disabled: false, innerHTML: '' }],
+    ['ctrader-vps-mcp', { style: { display: 'flex' } }],
+  ]);
+  const mcpCalls = [];
+  const { exports: mcpForm } = evaluateSecurityFixture(
+    ctraderMcpSubmitSource,
+    {
+      document: { getElementById: id => elements.get(id) || null },
+      window: {
+        _dataMode: 'vps',
+        _vpsData: { ctrader: { connectMcp: async body => {
+          mcpCalls.push({ ...body });
+          return { connection: { id: 'mcp-1', mode: 'mcp_read' } };
+        } } },
+      },
+      vpsCtraderState: { mcpEnabled: true },
+      ctraderAccountOptions: () => '<option value="">Not mapped</option>',
+      showToast() {},
+      setTimeout() {},
+      loadVpsCtraderConnections: async () => {},
+    },
+    '{submitVpsCtraderMcp}',
+  );
+  await mcpForm.submitVpsCtraderMcp();
+  if (mcpCalls.length !== 0 || !/acknowledge/i.test(elements.get('ctrader-vps-mcp-error').textContent)) {
+    failures.push('Remote MCP form submitted without the explicit trading-capability acknowledgement');
+  }
+  elements.get('ctrader-mcp-risk-ack').checked = true;
+  elements.get('ctrader-mcp-configuration').value = '{"mcpServers":{"ctrader":{"transport":"fixture"}}}';
+  await mcpForm.submitVpsCtraderMcp();
+  const request = mcpCalls[0];
+  if (mcpCalls.length !== 1 || request?.accountId !== '42' || request?.environment !== 'live' || request?.mappedLegacyAccountId !== 'acct_1' || request?.label !== 'The5ers' || request?.acknowledgeTradingCredentialRisk !== true || !request?.configuration) {
+    failures.push('Remote MCP form did not submit the exact acknowledged connection contract');
+  }
+  if (elements.get('ctrader-mcp-configuration').value !== '' || elements.get('ctrader-vps-mcp').style.display !== 'none') {
+    failures.push('Remote MCP form retained the copied configuration after connecting');
+  }
+} catch (error) {
+  failures.push(`Remote MCP form fixture failed: ${error.message}`);
+}
+
+try {
+  const ctraderPanelSource = sourceBetween('function renderVpsCtraderPanel', 'async function loadVpsCtraderConnections');
+  const panel = makeFakeElement('div');
+  const context = {
+    document: { getElementById: id => id === 'ctrader-vps-panel' ? panel : null },
+  };
+  vm.runInNewContext(`
+    const vpsCtraderState={oauthEnabled:false,mcpEnabled:true,pending:null,connections:[],statuses:new Map(),message:null,messageType:'success'};
+    const escapeCtraderText=value=>String(value??'');
+    const ctraderConnectionCard=()=>'';
+    ${ctraderPanelSource}
+    renderVpsCtraderPanel();
+  `, context, { timeout: 500 });
+  if (!/Paste Remote MCP configuration/.test(panel.innerHTML) || /awaiting one-time activation|aria-disabled="true"/.test(panel.innerHTML)) {
+    failures.push('MCP-only cTrader capability did not render an active direct-connection control');
+  }
+} catch (error) {
+  failures.push(`cTrader MCP-only panel fixture failed: ${error.message}`);
+}
+
+try {
+  const ctraderCardSource = sourceBetween('function ctraderConnectionCard', 'function renderVpsCtraderPanel');
+  const context = {
+    S: { accounts: [], brokerAccountMap: {} },
+    vpsCtraderState: { mcpEnabled: true, oauthEnabled: false },
+    escapeCtraderText: value => String(value ?? ''),
+    formatCtraderWhen: () => 'now',
+  };
+  const rendered = vm.runInNewContext(`
+    ${ctraderCardSource}
+    ctraderConnectionCard(
+      {id:'mcp-1',connected:true,authMode:'remote_mcp',environment:'live',ctidTraderAccountId:'42'},
+      {latestSyncRun:{status:'succeeded',counters:{inserted:0,updated:0,positionsAwaitingReview:2}}}
+    );
+  `, context, { timeout: 500 });
+  if (!/Review needed/.test(rendered) || !/2 awaiting review/.test(rendered) || !/safely retained as broker executions/.test(rendered) || !/excluded from the journal and analytics/.test(rendered)) {
+    failures.push('cTrader execution quarantine was not surfaced as an amber review state with a safe explanation');
+  }
+} catch (error) {
+  failures.push(`cTrader execution-quarantine card fixture failed: ${error.message}`);
+}
 
 try {
   const reviewSource = sourceBetween('const CTRADER_OWNED_FORM_IDS', 'function openTradeModal');
@@ -1787,7 +1897,7 @@ const ctraderCalls = [];
 const ctraderApi = {
   async get(requestPath) {
     ctraderCalls.push({ method: 'GET', path: requestPath });
-    if (requestPath === '/config') return { ctraderEnabled: true };
+    if (requestPath === '/config') return { ctraderEnabled: true, ctraderOAuthEnabled: false, ctraderMcpEnabled: true };
     if (requestPath === '/ctrader/oauth/pending') return { grantId: 'grant-1', accounts: [{ ctidTraderAccountId: '42' }] };
     if (requestPath === '/ctrader/connections') return { connections: [{ id: 'connection-1', lastSyncStatus: 'succeeded' }] };
     if (requestPath.endsWith('/status')) return { connection: { id: 'connection-1', lastSyncStatus: 'running' } };
@@ -1796,14 +1906,23 @@ const ctraderApi = {
   async post(requestPath, body) {
     ctraderCalls.push({ method: 'POST', path: requestPath, body });
     if (requestPath === '/ctrader/oauth/start') return { authorizationUrl: 'https://id.ctrader.com/my/settings/openapi/grantingaccess/', expiresAt: '2026-08-09T00:00:00Z' };
+    if (requestPath === '/ctrader/mcp/connect') return { connection: { id: 'mcp-connection-1', authMode: 'remote_mcp' } };
     if (requestPath === '/ctrader/connections') return { connection: { id: 'connection-1' } };
     if (requestPath.endsWith('/sync')) return { syncRunId: 'sync-1', status: 'queued' };
     return null;
   },
 };
 const ctraderData = createVpsDataAdapter(ctraderApi);
-await ctraderData.ctrader.config();
+const ctraderConfig = await ctraderData.ctrader.config();
 await ctraderData.ctrader.startOAuth();
+await ctraderData.ctrader.connectMcp({
+  configuration: '{"mcpServers":{"ctrader":{"token":"fixture-secret"}}}',
+  accountId: '42',
+  environment: 'live',
+  mappedLegacyAccountId: 'acct_1',
+  label: 'The5ers',
+  acknowledgeTradingCredentialRisk: true,
+});
 await ctraderData.ctrader.pendingOAuth();
 await ctraderData.ctrader.list();
 await ctraderData.ctrader.create({ grantId: 'grant-1', ctidTraderAccountId: '42', mappedLegacyAccountId: 'acct_1', label: 'Demo' });
@@ -1812,8 +1931,14 @@ await ctraderData.ctrader.sync('connection-1');
 await ctraderData.ctrader.disconnect('connection-1');
 const ctraderCreate = ctraderCalls.find(call => call.method === 'POST' && call.path === '/ctrader/connections');
 if (ctraderCreate?.body?.mappedLegacyAccountId !== 'acct_1') failures.push('cTrader legacy account mapping was not forwarded');
+if (ctraderConfig?.enabled !== false || ctraderConfig?.mcpEnabled !== true) failures.push('cTrader OAuth and MCP capabilities were not normalized independently');
+const ctraderMcpConnect = ctraderCalls.find(call => call.method === 'POST' && call.path === '/ctrader/mcp/connect');
+if (ctraderMcpConnect?.body?.accountId !== '42' || ctraderMcpConnect?.body?.environment !== 'live' || ctraderMcpConnect?.body?.mappedLegacyAccountId !== 'acct_1' || ctraderMcpConnect?.body?.label !== 'The5ers' || ctraderMcpConnect?.body?.acknowledgeTradingCredentialRisk !== true || !ctraderMcpConnect?.body?.configuration) {
+  failures.push('cTrader Remote MCP connection payload was not forwarded exactly');
+}
 for (const expectedPath of [
   '/ctrader/oauth/start',
+  '/ctrader/mcp/connect',
   '/ctrader/oauth/pending',
   '/ctrader/connections',
   '/ctrader/connections/connection-1/status',

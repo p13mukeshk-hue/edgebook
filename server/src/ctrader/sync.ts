@@ -61,6 +61,7 @@ export type CTraderSyncCounters = {
   archivedTradesPreserved: number;
   tombstonesPreserved: number;
   positionsProjected: number;
+  positionsAwaitingReview: number;
 };
 
 export type CTraderSyncResult = {
@@ -283,7 +284,8 @@ export class CTraderSyncEngine {
               sync_cursor, provider_metadata, mapped_account_id,
               legacy_mapped_account_id
        FROM broker_connections
-       WHERE id=$1 AND provider='ctrader' AND oauth_scope='accounts'
+       WHERE id=$1 AND provider='ctrader' AND connection_mode='official'
+         AND oauth_scope='accounts'
          AND provider_environment IS NOT NULL
        LIMIT 1`,
       [connectionId],
@@ -334,7 +336,8 @@ export class CTraderSyncEngine {
          token_expires_at=$4,
          token_generation=token_generation+1,
          token_refreshed_at=now()
-       WHERE id=$5 AND provider='ctrader' AND connected=true
+       WHERE id=$5 AND provider='ctrader' AND connection_mode='official'
+         AND connected=true
          AND token_generation=$6
        RETURNING token_generation`,
       [
@@ -461,7 +464,8 @@ export class CTraderSyncEngine {
     const result = await withTransaction(this.database, async (client) => {
       const locked = await client.query<{ connected: boolean }>(
         `SELECT connected FROM broker_connections
-         WHERE id=$1 AND provider='ctrader' AND oauth_scope='accounts'
+         WHERE id=$1 AND provider='ctrader' AND connection_mode='official'
+           AND oauth_scope='accounts'
            AND provider_environment IS NOT NULL FOR UPDATE`,
         [input.connection.id],
       );
@@ -480,6 +484,7 @@ export class CTraderSyncEngine {
         archivedTradesPreserved: 0,
         tombstonesPreserved: 0,
         positionsProjected: 0,
+        positionsAwaitingReview: 0,
       };
       const dealIds = input.fetchedDeals.map((deal) => deal.dealId);
       const existingExecutions = dealIds.length === 0

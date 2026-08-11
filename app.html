@@ -1069,6 +1069,17 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .ctrader-picker-option:has(input:checked){border-color:var(--accent);background:rgba(108,99,255,.08)}
 .ctrader-picker-main{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--text)}
 .ctrader-picker-sub{font-size:11px;color:var(--text3);margin:4px 0 0 22px}
+.ctrader-mcp-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ctrader-mcp-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.ctrader-mcp-field.full{grid-column:1/-1}
+.ctrader-mcp-field label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.ctrader-mcp-field input,.ctrader-mcp-field select,.ctrader-mcp-field textarea{width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:12px;color:var(--text);outline:none}
+.ctrader-mcp-field input:focus,.ctrader-mcp-field select:focus,.ctrader-mcp-field textarea:focus{border-color:var(--accent)}
+.ctrader-mcp-field textarea{min-height:132px;resize:vertical;font-family:var(--font-mono);line-height:1.45}
+.ctrader-mcp-ack{display:flex;align-items:flex-start;gap:9px;margin-top:14px;padding:11px 12px;border:1px solid rgba(245,166,35,.28);border-radius:9px;background:var(--amber-bg);color:var(--text2);font-size:11px;line-height:1.5;cursor:pointer}
+.ctrader-mcp-ack input{margin-top:2px;accent-color:var(--accent);flex-shrink:0}
+.ctrader-connect-actions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin:10px 20px 16px}
+@media(max-width:620px){.ctrader-mcp-grid{grid-template-columns:1fr}.ctrader-mcp-field.full{grid-column:auto}}
 /* ── Duplicate resolution modal ───────────────────────────────────────── */
 .dup-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .dup-card{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:16px}
@@ -1952,6 +1963,45 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
                     <button class="btn-ghost" onclick="closeAddCtraderModal()">Cancel</button>
                     <button class="btn-accent" id="ctrader-add-account-submit" onclick="addCtraderAccount()"><i class="fa-solid fa-plus"></i> Add account</button>
                   </div>
+                </div>
+              </div>
+
+              <!-- VPS cTrader Remote MCP compatibility. The copied configuration is submitted once and never stored in browser storage. -->
+              <div id="ctrader-vps-mcp" class="ctrader-vps-only" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.58);z-index:525;align-items:center;justify-content:center">
+                <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:26px;width:620px;max-width:94vw;max-height:88vh;overflow:auto">
+                  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px">
+                    <div><div style="font-size:16px;font-weight:600;color:var(--text)">Connect existing cTrader Remote MCP</div><div style="font-size:12px;color:var(--text3);margin-top:4px">Compatibility mode for the connection flow Edgebook used earlier.</div></div>
+                    <button class="modal-close" type="button" onclick="closeVpsCtraderMcp()" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+                  </div>
+                  <div id="ctrader-vps-mcp-security" class="ctrader-vps-message" style="margin:0 0 16px">
+                    <i class="fa-solid fa-lock"></i> The copied configuration is sent once to this VPS, encrypted at rest, and never saved in browser storage. Edgebook invokes only account and trade-history read tools.
+                  </div>
+                  <div class="ctrader-mcp-grid">
+                    <div class="ctrader-mcp-field full">
+                      <label for="ctrader-mcp-configuration">Full copied Remote MCP configuration <span style="color:var(--red)">*</span></label>
+                      <textarea id="ctrader-mcp-configuration" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="32768" placeholder="Paste the complete configuration copied from cTrader Remote MCP"></textarea>
+                      <div style="font-size:10px;color:var(--text3);line-height:1.45">In cTrader, open Settings → Advanced → Remote MCP → Copy configuration, then paste the complete result here.</div>
+                    </div>
+                    <div class="ctrader-mcp-field">
+                      <label for="ctrader-mcp-account-id">cTrader account ID</label>
+                      <input id="ctrader-mcp-account-id" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="20" placeholder="Optional numeric account ID">
+                    </div>
+                    <div class="ctrader-mcp-field">
+                      <label for="ctrader-mcp-environment">Account environment <span style="color:var(--red)">*</span></label>
+                      <select id="ctrader-mcp-environment"><option value="">Choose live or demo</option><option value="live">Live</option><option value="demo">Demo</option></select>
+                    </div>
+                    <div class="ctrader-mcp-field">
+                      <label for="ctrader-mcp-label">Connection label</label>
+                      <input id="ctrader-mcp-label" type="text" autocomplete="off" maxlength="200" placeholder="e.g. The5ers cTrader 5">
+                    </div>
+                    <div class="ctrader-mcp-field full">
+                      <label for="ctrader-mcp-map-account">Map to Edgebook account</label>
+                      <select id="ctrader-mcp-map-account"><option value="">Not mapped</option></select>
+                    </div>
+                  </div>
+                  <label class="ctrader-mcp-ack" for="ctrader-mcp-risk-ack"><input id="ctrader-mcp-risk-ack" type="checkbox"><span>I understand that this Remote MCP token is session-bound and trading-capable at cTrader. Edgebook will invoke only read tools, and I should revoke the token in cTrader if I no longer use this connection.</span></label>
+                  <div id="ctrader-vps-mcp-error" class="ctrader-vps-message error" role="alert" style="display:none;margin:12px 0 0"></div>
+                  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px"><button class="btn-ghost" type="button" onclick="closeVpsCtraderMcp()">Cancel</button><button id="ctrader-vps-mcp-submit" class="btn-accent" type="button" onclick="submitVpsCtraderMcp()"><i class="fa-solid fa-link"></i> Connect and start read-only sync</button></div>
                 </div>
               </div>
 
@@ -4190,8 +4240,8 @@ function showManualDupModal(incomingTrade, existingTrade){
   document.getElementById('dup-modal').classList.add('open');
 }
 
-// ── VPS CTRADER OAUTH (READ-ONLY) ─────────────────────────────────────────
-const vpsCtraderState={enabled:null,pending:null,connections:[],statuses:new Map(),callbackHandled:false,message:null,messageType:'success'};
+// ── VPS CTRADER CONNECTIONS ───────────────────────────────────────────────
+const vpsCtraderState={oauthEnabled:null,mcpEnabled:null,pending:null,connections:[],statuses:new Map(),callbackHandled:false,message:null,messageType:'success'};
 let vpsCtraderLoadPromise=null;
 
 function escapeHtml(value){
@@ -4276,34 +4326,52 @@ function ctraderConnectionCard(connection,status){
   const current={...connection,...(status?.connection&&typeof status.connection==='object'?status.connection:{})};
   const id=String(current.id);
   const idArg=escapeCtraderText(JSON.stringify(id));
+  const connectionAuthMode=String(current.authMode||current.mode||'oauth').toLowerCase();
+  const isMcpConnection=connectionAuthMode.includes('mcp');
+  const authModeLabel=isMcpConnection?'Remote MCP compatibility':'Official OAuth';
   const latest=status?.latestSyncRun||null;
   const syncStatus=latest?.status||current.lastSyncStatus||current.syncStatus||'never';
   const reauth=current.reauthRequired===true||current.connected!==true;
   const busy=syncStatus==='queued'||syncStatus==='running';
   const failed=syncStatus==='failed'||!!current.lastError||!!latest?.errorMessage;
-  const stateText=reauth?'Re-auth required':busy?(syncStatus==='queued'?'Sync queued':'Syncing'):failed?'Needs attention':'Connected';
-  const stateColor=reauth||failed?'var(--red)':busy?'var(--amber)':'var(--green)';
-  const stateBg=reauth||failed?'var(--red-bg)':busy?'var(--amber-bg)':'var(--green-bg)';
+  const counters=latest?.counters;
+  const awaitingReview=Math.max(0,Number(counters?.positionsAwaitingReview||0));
+  const warning=(typeof current.lastWarning==='string'?current.lastWarning:current.lastWarning?.message)||'';
+  const hasWarning=awaitingReview>0||!!warning;
+  const stateText=reauth?'Re-auth required':busy?(syncStatus==='queued'?'Sync queued':'Syncing'):failed?'Needs attention':hasWarning?'Review needed':'Connected';
+  const stateColor=reauth||failed?'var(--red)':busy||hasWarning?'var(--amber)':'var(--green)';
+  const stateBg=reauth||failed?'var(--red-bg)':busy||hasWarning?'var(--amber-bg)':'var(--green-bg)';
   const title=current.label||current.brokerTitleShort||`cTrader ${current.environment||''} account`;
   const broker=current.brokerTitleShort?`${escapeCtraderText(current.brokerTitleShort)} · `:'';
   const login=current.traderLogin?`Login ${escapeCtraderText(current.traderLogin)} · `:'';
   const mappedId=current.mappedLegacyAccountId||(S.brokerAccountMap||{})[id]||'';
   const mappedAccount=(S.accounts||[]).find(account=>String(account.id)===String(mappedId));
   const error=(typeof current.lastError==='string'?current.lastError:current.lastError?.message)||latest?.errorMessage||'';
-  const counters=latest?.counters;
-  const counterText=counters&&syncStatus==='succeeded'?` · ${Number(counters.inserted||0)} added, ${Number(counters.updated||0)} updated`:'';
+  const counterText=counters&&syncStatus==='succeeded'?` · ${Number(counters.inserted||0)} added, ${Number(counters.updated||0)} updated${awaitingReview?` · ${awaitingReview} awaiting review`:''}`:'';
+  const warningText=warning||(
+    awaitingReview
+      ? `${awaitingReview} cTrader position${awaitingReview===1?' is':'s are'} safely retained as broker executions but excluded from the journal and analytics because cTrader did not provide enough verified size or opening data. Refresh the Remote MCP configuration and sync again.`
+      : ''
+  );
+  const reconnectAction=isMcpConnection&&vpsCtraderState.mcpEnabled
+    ? '<button class="btn-accent" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-arrow-rotate-right"></i> Reconnect</button>'
+    : vpsCtraderState.oauthEnabled
+      ? '<button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-arrow-rotate-right"></i> Reconnect</button>'
+      : vpsCtraderState.mcpEnabled
+        ? '<button class="btn-accent" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-arrow-rotate-right"></i> Reconnect</button>'
+        : '<button class="btn-ghost" disabled>Reconnect unavailable</button>';
   return `<div class="broker-account-card">
     <div class="broker-account-card-header">
       <div style="min-width:0"><div class="broker-account-card-title" style="flex-wrap:wrap"><i class="fa-solid fa-chart-line" style="color:var(--accent2)"></i>${escapeCtraderText(title)} <span class="ctrader-env ${current.environment==='demo'?'demo':''}">${escapeCtraderText(current.environment||'')}</span></div><div class="broker-account-card-sub">${broker}${login}Account ${escapeCtraderText(current.ctidTraderAccountId)}</div></div>
-      <div class="broker-account-card-actions"><span style="font-size:10px;padding:3px 9px;border-radius:14px;background:${stateBg};color:${stateColor}">${busy?'<i class="fa-solid fa-spinner fa-spin"></i> ':''}${stateText}</span>${reauth?`<button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-arrow-rotate-right"></i> Reconnect</button>`:`<button class="btn-ghost" onclick="syncVpsCtraderConnection(${idArg},this)" ${busy?'disabled':''}><i class="fa-solid fa-rotate"></i> Sync now</button><button class="btn-ghost" onclick="disconnectVpsCtraderConnection(${idArg})" style="color:var(--red)"><i class="fa-solid fa-unlink"></i></button>`}</div>
+      <div class="broker-account-card-actions"><span style="font-size:10px;padding:3px 9px;border-radius:14px;background:${stateBg};color:${stateColor}">${busy?'<i class="fa-solid fa-spinner fa-spin"></i> ':''}${stateText}</span>${reauth?reconnectAction:`<button class="btn-ghost" onclick="syncVpsCtraderConnection(${idArg},this)" ${busy?'disabled':''}><i class="fa-solid fa-rotate"></i> Sync now</button><button class="btn-ghost" onclick="disconnectVpsCtraderConnection(${idArg})" style="color:var(--red)"><i class="fa-solid fa-unlink"></i></button>`}</div>
     </div>
-    <div style="padding:10px 16px;font-size:11px;color:var(--text3);line-height:1.7"><div><i class="fa-regular fa-clock"></i> Last sync: ${escapeCtraderText(formatCtraderWhen(current.lastSyncAt))}${counterText}</div><div><i class="fa-solid fa-shield-halved"></i> Read-only automatic sync runs in the background while connected.</div><div><i class="fa-solid fa-wallet"></i> Edgebook account: ${escapeCtraderText(mappedAccount?.name||'Not mapped')}</div>${current.accountCurrency?`<div><i class="fa-solid fa-coins"></i> Account currency: ${escapeCtraderText(current.accountCurrency)}</div>`:''}${error?`<div style="margin-top:6px;color:var(--red)"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeCtraderText(error)}</div>`:''}</div>
+    <div style="padding:10px 16px;font-size:11px;color:var(--text3);line-height:1.7"><div><i class="fa-regular fa-clock"></i> Last sync: ${escapeCtraderText(formatCtraderWhen(current.lastSyncAt))}${counterText}</div><div><i class="fa-solid fa-plug"></i> Connection: ${escapeCtraderText(authModeLabel)}</div><div><i class="fa-solid fa-shield-halved"></i> ${isMcpConnection?'Edgebook invokes read tools only; the cTrader Remote MCP token itself remains trading-capable.':'Official OAuth uses read-only account access.'}</div><div><i class="fa-solid fa-wallet"></i> Edgebook account: ${escapeCtraderText(mappedAccount?.name||'Not mapped')}</div>${current.accountCurrency?`<div><i class="fa-solid fa-coins"></i> Account currency: ${escapeCtraderText(current.accountCurrency)}</div>`:''}${warningText?`<div style="margin-top:6px;color:var(--amber)"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeCtraderText(warningText)}</div>`:''}${error?`<div style="margin-top:6px;color:var(--red)"><i class="fa-solid fa-circle-exclamation"></i> ${escapeCtraderText(error)}</div>`:''}</div>
   </div>`;
 }
 function renderVpsCtraderPanel(){
   const panel=document.getElementById('ctrader-vps-panel');
   if(!panel) return;
-  if(vpsCtraderState.enabled===false){
+  if(vpsCtraderState.oauthEnabled===false&&vpsCtraderState.mcpEnabled===false){
     panel.innerHTML=`<div class="broker-account-card">
       <div class="broker-account-card-header">
         <div style="min-width:0">
@@ -4323,9 +4391,11 @@ function renderVpsCtraderPanel(){
   }
   const message=vpsCtraderState.message?`<div class="ctrader-vps-message ${vpsCtraderState.messageType}">${escapeCtraderText(vpsCtraderState.message)}</div>`:'';
   const pending=vpsCtraderState.pending?.grantId?'<div class="ctrader-vps-message success">Authorization complete. <button class="btn-ghost" style="margin-left:8px" onclick="openVpsCtraderPicker()">Choose account</button></div>':'';
-  const intro=`<div class="broker-account-card"><div class="broker-account-card-header"><div><div class="broker-account-card-title"><i class="fa-solid fa-link" style="color:var(--accent2)"></i> Official cTrader OAuth</div><div class="broker-account-card-sub">Authorize view-only access without pasting tokens into Edgebook.</div></div><button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-arrow-up-right-from-square"></i> Connect cTrader</button></div><div style="padding:10px 16px;font-size:11px;color:var(--text3)"><i class="fa-solid fa-shield-halved"></i> Read-only data sync only. Edgebook cannot place, modify, or close trades.</div></div>`;
+  const oauthIntro=vpsCtraderState.oauthEnabled?`<div class="broker-account-card"><div class="broker-account-card-header"><div><div class="broker-account-card-title"><i class="fa-solid fa-link" style="color:var(--accent2)"></i> Connect with cTrader</div><div class="broker-account-card-sub">Recommended: authorize view-only access through cTrader's official OAuth page.</div></div><button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-arrow-up-right-from-square"></i> Connect cTrader</button></div><div style="padding:10px 16px;font-size:11px;color:var(--text3)"><i class="fa-solid fa-shield-halved"></i> Read-only data sync only. Edgebook cannot place, modify, or close trades.</div></div>`:'';
+  const mcpIntro=vpsCtraderState.mcpEnabled?`<div class="broker-account-card"><div class="broker-account-card-header"><div><div class="broker-account-card-title"><i class="fa-solid fa-plug" style="color:var(--amber)"></i> Connect existing Remote MCP</div><div class="broker-account-card-sub">Compatibility mode for the earlier Edgebook connection flow.</div></div><button class="btn-accent" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-link"></i> Paste Remote MCP configuration</button></div><div style="padding:10px 16px;font-size:11px;color:var(--text3);line-height:1.6"><div><i class="fa-solid fa-lock"></i> The configuration is encrypted on the VPS and never stored in this browser.</div><div><i class="fa-solid fa-triangle-exclamation" style="color:var(--amber)"></i> Edgebook invokes only read tools, but the underlying session-bound token is trading-capable.</div></div></div>`:'';
   const cards=vpsCtraderState.connections.map(connection=>ctraderConnectionCard(connection,vpsCtraderState.statuses.get(String(connection.id)))).join('');
-  panel.innerHTML=message+pending+(cards||intro)+(cards?'<div class="broker-add-card" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-plus"></i> Connect another cTrader account</div>':'');
+  const addActions=cards?`<div class="ctrader-connect-actions">${vpsCtraderState.oauthEnabled?'<button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-plus"></i> Connect another cTrader account</button>':''}${vpsCtraderState.mcpEnabled?'<button class="btn-ghost" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-plug"></i> Connect existing Remote MCP</button>':''}</div>`:'';
+  panel.innerHTML=message+pending+(cards||(oauthIntro+mcpIntro))+addActions;
 }
 async function loadVpsCtraderConnections(){
   if(window._dataMode!=='vps'||!window._vpsData?.ctrader) return;
@@ -4335,11 +4405,12 @@ async function loadVpsCtraderConnections(){
     if(panel) panel.innerHTML='<div class="ctrader-vps-message"><i class="fa-solid fa-spinner fa-spin"></i> Loading cTrader connections…</div>';
     try{
       const config=await window._vpsData.ctrader.config();
-      vpsCtraderState.enabled=config.enabled;
-      if(!config.enabled){renderVpsCtraderPanel();return;}
+      vpsCtraderState.oauthEnabled=config.enabled;
+      vpsCtraderState.mcpEnabled=config.mcpEnabled;
+      if(!config.enabled&&!config.mcpEnabled){renderVpsCtraderPanel();return;}
       const callback=consumeVpsCtraderQuery();
-      if(callback?.state==='error'){vpsCtraderState.message=ctraderOAuthErrorMessage(callback.code);vpsCtraderState.messageType='error';}
-      else if(callback?.state==='select'){
+      if(callback?.state==='error'&&config.enabled){vpsCtraderState.message=ctraderOAuthErrorMessage(callback.code);vpsCtraderState.messageType='error';}
+      else if(callback?.state==='select'&&config.enabled){
         try{
           const pending=await window._vpsData.ctrader.pendingOAuth();
           if(pending?.grantId&&Array.isArray(pending.accounts)&&pending.accounts.length){vpsCtraderState.pending=pending;vpsCtraderState.message='cTrader authorization succeeded. Choose the account to connect.';vpsCtraderState.messageType='success';}
@@ -4369,6 +4440,60 @@ async function beginVpsCtraderOAuth(button){
     if(url.protocol!=='https:'||!(host==='ctrader.com'||host.endsWith('.ctrader.com')||host==='spotware.com'||host.endsWith('.spotware.com')))throw new Error('The server returned an invalid cTrader authorization URL');
     location.assign(url.href);
   }catch(error){showToast('Could not start cTrader authorization: '+error.message,'error');if(button){button.disabled=false;button.innerHTML=original;}}
+}
+function clearVpsCtraderMcpForm(){
+  for(const id of ['ctrader-mcp-configuration','ctrader-mcp-account-id','ctrader-mcp-label']){
+    const input=document.getElementById(id);if(input)input.value='';
+  }
+  const environment=document.getElementById('ctrader-mcp-environment');if(environment)environment.value='';
+  const mapping=document.getElementById('ctrader-mcp-map-account');if(mapping)mapping.value='';
+  const acknowledgement=document.getElementById('ctrader-mcp-risk-ack');if(acknowledgement)acknowledgement.checked=false;
+  const errorEl=document.getElementById('ctrader-vps-mcp-error');if(errorEl){errorEl.textContent='';errorEl.style.display='none';}
+}
+function openVpsCtraderMcp(){
+  if(window._dataMode!=='vps'||!window._vpsData?.ctrader||vpsCtraderState.mcpEnabled!==true){showToast('cTrader Remote MCP compatibility is not enabled on this server.','error');return;}
+  clearVpsCtraderMcpForm();
+  document.getElementById('ctrader-mcp-map-account').innerHTML=ctraderAccountOptions();
+  const modal=document.getElementById('ctrader-vps-mcp');modal.style.display='flex';
+  setTimeout(()=>document.getElementById('ctrader-mcp-configuration')?.focus(),0);
+}
+function closeVpsCtraderMcp(){
+  clearVpsCtraderMcpForm();
+  const modal=document.getElementById('ctrader-vps-mcp');if(modal)modal.style.display='none';
+}
+async function submitVpsCtraderMcp(){
+  const read=id=>document.getElementById(id)?.value.trim()||'';
+  const accountId=read('ctrader-mcp-account-id');
+  const requestBody={
+    configuration:read('ctrader-mcp-configuration'),
+    accountId:accountId||null,
+    environment:read('ctrader-mcp-environment'),
+    mappedLegacyAccountId:read('ctrader-mcp-map-account')||null,
+    label:read('ctrader-mcp-label')||null,
+    acknowledgeTradingCredentialRisk:document.getElementById('ctrader-mcp-risk-ack')?.checked===true,
+  };
+  const errorEl=document.getElementById('ctrader-vps-mcp-error');
+  if(requestBody.configuration.length<20){errorEl.textContent='Paste the full configuration copied from cTrader Remote MCP.';errorEl.style.display='block';return;}
+  if(accountId&&!/^(?:0|[1-9]\d{0,19})$/.test(accountId)){errorEl.textContent='Enter a valid cTrader account ID (up to 20 digits, without leading zeros).';errorEl.style.display='block';return;}
+  if(!['live','demo'].includes(requestBody.environment)){errorEl.textContent='Choose whether this is a live or demo cTrader account.';errorEl.style.display='block';return;}
+  if(!requestBody.acknowledgeTradingCredentialRisk){errorEl.textContent='Acknowledge the Remote MCP token capability before connecting.';errorEl.style.display='block';return;}
+  const button=document.getElementById('ctrader-vps-mcp-submit');button.disabled=true;button.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Connecting securely...';errorEl.style.display='none';
+  try{
+    document.getElementById('ctrader-mcp-configuration').value='';
+    const pendingRequest=window._vpsData.ctrader.connectMcp(requestBody);
+    const result=await pendingRequest;
+    const connection=result?.connection;
+    if(!connection?.id)throw new Error('The server did not return a cTrader Remote MCP connection.');
+    closeVpsCtraderMcp();
+    showToast('cTrader Remote MCP connected. Edgebook will use read tools only.','success');
+    await loadVpsCtraderConnections();
+  }catch(error){
+    errorEl.textContent=error?.status===429?'Too many connection attempts. Wait briefly and try again.':(error?.message||'The cTrader Remote MCP configuration could not be connected.');
+    errorEl.style.display='block';
+  }finally{
+    requestBody.configuration='';
+    button.disabled=false;button.innerHTML='<i class="fa-solid fa-link"></i> Connect and start read-only sync';
+  }
 }
 function openVpsCtraderPicker(){
   const pending=vpsCtraderState.pending;if(!pending?.grantId||!pending.accounts?.length){showToast('No pending cTrader authorization was found','error');return;}

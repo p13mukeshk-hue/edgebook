@@ -80,17 +80,22 @@ server code, migration utilities, and deployment material.
 5. Copy `env/edgebook.env.example` to `/etc/edgebook/edgebook.env`, fill values
    directly on the VPS, and set mode `0600`. Generate fresh random secrets; do
    not reuse Firebase or legacy cTrader tokens.
-6. The replacement cTrader connection must use official OAuth with
-   `scope=accounts` (read-only). Every user authorizes again and chooses the
-   account by `ctidTraderAccountId`. Legacy bearer/refresh tokens are not
-   migrated. Generate a fresh versioned `CTRADER_ENCRYPTION_KEYS` keyring; never
-   reuse the old Firebase encryption secret. In the systemd environment file,
+6. Official OAuth with `scope=accounts` remains the preferred cTrader connection.
+   The optional `CTRADER_MCP_ENABLED=true` compatibility path lets a user paste
+   a fresh per-account Remote MCP configuration in the authenticated dashboard;
+   the server encrypts it immediately and exposes only a fixed read-tool
+   allowlist. Remote MCP tokens are session-bound and provider-trading-capable,
+   so the UI requires an explicit acknowledgement and reconnection may be
+   needed. Legacy Firebase tokens are never migrated or reused. Generate a fresh
+   versioned `CTRADER_ENCRYPTION_KEYS` keyring. In the systemd environment file,
    single-quote the entire JSON value, for example
    `CTRADER_ENCRYPTION_KEYS='{"1":"<43-character-base64url-key>"}'`, so its
    inner quotes survive both systemd and Compose parsing. For credentialless loopback staging,
-   leave all five cTrader client/redirect/keyring/active-version variables blank;
-   the API then reports cTrader disabled. A partial set is invalid, and the
-   profiled worker requires the complete non-blank set.
+   leave OAuth credentials, the keyring pair, and MCP flag blank/false; the API
+   then reports cTrader disabled. The encryption keyring pair is required for
+   either connection method; the OAuth client/secret/redirect trio is required
+   only for OAuth. The profiled worker requires encryption plus at least one
+   enabled connection method.
 7. Build a static public directory inside the immutable release. This copies only
    the four HTML entry files and three VPS browser adapters; it never exposes the
    repository root. Source and artifact both omit the Firebase fallback flag,

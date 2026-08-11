@@ -41,7 +41,7 @@ export class AesGcmTokenCipher implements TokenCipher {
   }
 
   static fromConfig(config: CTraderConfig): AesGcmTokenCipher {
-    if (!config.enabled || config.encryptionKeysJson === null || config.activeKeyVersion === null) {
+    if (!config.storageEnabled || config.encryptionKeysJson === null || config.activeKeyVersion === null) {
       throw new Error("cTrader encryption is not configured");
     }
     let input: unknown;

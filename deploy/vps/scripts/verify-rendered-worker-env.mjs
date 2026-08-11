@@ -18,19 +18,25 @@ if (!worker || !Array.isArray(worker.profiles) || !worker.profiles.includes('wri
   throw new Error('rendered Compose model does not contain the profiled cTrader worker');
 }
 const environment = worker.environment || {};
-const required = [
-  'CTRADER_CLIENT_ID',
-  'CTRADER_CLIENT_SECRET',
-  'CTRADER_REDIRECT_URI',
+const alwaysRequired = [
   'CTRADER_ENCRYPTION_KEYS',
   'CTRADER_ACTIVE_KEY_VERSION',
 ];
-for (const name of required) {
+for (const name of alwaysRequired) {
   if (typeof environment[name] !== 'string' || !environment[name].trim()) {
     throw new Error(`rendered worker environment is missing ${name}`);
   }
 }
-if (environment.CTRADER_REDIRECT_URI !== 'https://edgebook.trade/api/auth/ctrader/callback') {
+const oauthNames = ['CTRADER_CLIENT_ID', 'CTRADER_CLIENT_SECRET', 'CTRADER_REDIRECT_URI'];
+const oauthConfigured = oauthNames.filter(name => typeof environment[name] === 'string' && environment[name].trim()).length;
+if (oauthConfigured !== 0 && oauthConfigured !== oauthNames.length) {
+  throw new Error('rendered worker has a partial official cTrader OAuth configuration');
+}
+const mcpEnabled = String(environment.CTRADER_MCP_ENABLED).toLowerCase() === 'true';
+if (oauthConfigured === 0 && !mcpEnabled) {
+  throw new Error('rendered worker needs official cTrader OAuth or MCP compatibility');
+}
+if (oauthConfigured === oauthNames.length && environment.CTRADER_REDIRECT_URI !== 'https://edgebook.trade/api/auth/ctrader/callback') {
   throw new Error('rendered worker cTrader callback is not the canonical HTTPS origin');
 }
 if (String(environment.SCHEDULER_ENABLED).toLowerCase() !== 'true') {
@@ -54,7 +60,7 @@ for (const [version, encoded] of Object.entries(keyring)) {
   }
 }
 const apiEnvironment = model?.services?.api?.environment || {};
-for (const name of required) {
+for (const name of [...alwaysRequired, ...oauthNames, 'CTRADER_MCP_ENABLED']) {
   if (apiEnvironment[name] !== environment[name]) {
     throw new Error(`rendered API/worker cTrader setting differs for ${name}`);
   }

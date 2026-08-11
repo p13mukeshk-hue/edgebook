@@ -749,9 +749,9 @@ try {
     const mapped = broker.mappedLegacy ? resolvedAccountIds.get(`${broker.uid}:${broker.mappedLegacy}`) || null : null;
     await client.query(
       `INSERT INTO broker_connections
-       (id,user_id,legacy_firebase_doc_id,provider,external_account_id,account_label,mapped_account_id,connected,
+       (id,user_id,legacy_firebase_doc_id,provider,connection_mode,external_account_id,account_label,mapped_account_id,connected,
         access_token_ciphertext,refresh_token_ciphertext,provider_metadata,legacy_document,connected_at,last_sync_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,false,NULL,NULL,$8::jsonb,$9::jsonb,$10,$11)`,
+       VALUES ($1,$2,$3,$4,CASE WHEN $4='ctrader' THEN 'official' ELSE NULL END,$5,$6,$7,false,NULL,NULL,$8::jsonb,$9::jsonb,$10,$11)`,
       [broker.id,userIds.get(broker.uid),broker.legacyDocId,broker.provider,broker.externalAccountId,broker.label,mapped,
         JSON.stringify(broker.metadata),JSON.stringify(broker.metadata),broker.connectedAt,broker.lastSyncAt],
     );
