@@ -18,6 +18,8 @@ done
 
 [[ "$mode" == rehearsal || "$mode" == cutover ]] || usage
 command -v realpath >/dev/null 2>&1 || { printf 'Missing command: realpath\n' >&2; exit 1; }
+command -v sha256sum >/dev/null 2>&1 || { printf 'Missing command: sha256sum\n' >&2; exit 1; }
+command -v sed >/dev/null 2>&1 || { printf 'Missing command: sed\n' >&2; exit 1; }
 destination="$(realpath -m -- "$destination")"
 [[ "$destination" =~ ^/opt/edgebook/releases/[A-Za-z0-9._-]+/public$ ]] || {
   printf 'Refusing destination outside /opt/edgebook/releases/<id>/public: %s\n' "$destination" >&2
@@ -44,6 +46,20 @@ install -m 0644 -- "$repo_root/404.html" "$destination/404.html"
 install -m 0644 -- "$repo_root/client/api-client.js" "$destination/client/api-client.js"
 install -m 0644 -- "$repo_root/client/auth-adapter.js" "$destination/client/auth-adapter.js"
 install -m 0644 -- "$repo_root/client/data-adapter.js" "$destination/client/data-adapter.js"
+
+# The HTML pages are deliberately non-cacheable, but a browser may still hold
+# an older module response from a previous cache policy. Content-derived query
+# versions make every changed client adapter a new URL while leaving stable
+# adapters cache-friendly. This prevents stale trade code from omitting newer
+# concurrency headers after a deployment.
+for asset in api-client auth-adapter data-adapter; do
+  asset_hash="$(sha256sum "$destination/client/$asset.js")"
+  asset_hash="${asset_hash%% *}"
+  asset_hash="${asset_hash:0:16}"
+  for page in app.html index.html landing.html; do
+    sed -i "s#./client/$asset.js#./client/$asset.js?v=$asset_hash#g" "$destination/$page"
+  done
+done
 
 for page in app.html index.html landing.html; do
   if grep -Eiq 'enableFirebaseFallback|firebase-fallback|www\.gstatic\.com/firebasejs' "$destination/$page"; then

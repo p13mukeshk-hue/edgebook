@@ -394,6 +394,19 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .field input::placeholder,.field textarea::placeholder{color:var(--text3)}
 .field textarea{resize:vertical;min-height:70px}
 .field select option{background:var(--bg3)}
+.trade-voice-label{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.trade-voice-btn{width:31px;height:31px;flex:0 0 31px;display:inline-flex;align-items:center;justify-content:center;gap:2px;border:1px solid var(--border2);border-radius:9px;background:var(--bg2);color:var(--text2);cursor:pointer;transition:.18s;position:relative}
+.trade-voice-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent2);box-shadow:0 0 0 2px var(--accent-glow)}
+.trade-voice-btn:disabled{cursor:not-allowed;opacity:.45}
+.trade-voice-btn.is-listening{width:54px;border-color:rgba(255,94,106,.6);background:var(--red-bg);color:var(--red);box-shadow:0 0 0 3px rgba(255,94,106,.08)}
+.trade-voice-btn i{font-size:12px}
+.trade-voice-wave{height:13px;display:none;align-items:center;gap:2px}
+.trade-voice-btn.is-listening .trade-voice-wave{display:inline-flex}
+.trade-voice-wave b{display:block;width:2px;height:4px;border-radius:2px;background:currentColor;animation:tradeVoiceWave .82s ease-in-out infinite}
+.trade-voice-wave b:nth-child(2){animation-delay:.13s}.trade-voice-wave b:nth-child(3){animation-delay:.26s}.trade-voice-wave b:nth-child(4){animation-delay:.39s}
+.trade-voice-status{min-height:14px;font-size:10px;line-height:1.4;color:var(--text3)}
+.trade-voice-status.is-listening{color:var(--red);font-weight:600}.trade-voice-status.is-ready{color:var(--green)}
+@keyframes tradeVoiceWave{0%,100%{height:3px;opacity:.55}50%{height:13px;opacity:1}}
 .modal-footer{padding:16px 28px 24px;display:flex;gap:10px;justify-content:flex-end;position:sticky;bottom:0;background:var(--bg2);border-top:1px solid var(--border)}
 .btn-ghost{padding:10px 18px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text2);font-family:var(--font-body);font-size:13px;font-weight:500;cursor:pointer;transition:.15s}
 .btn-ghost:hover{border-color:var(--border2);color:var(--text)}
@@ -2070,11 +2083,11 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
       <div class="section-divider">Psychology</div>
       <div class="form-grid" style="margin-bottom:14px">
         <div class="field" id="tf-emotion"><label>Pre-trade emotion</label><select id="t-emo"><option>😌 Calm</option><option>🎯 Focused</option><option>😤 Frustrated</option><option>😨 Anxious</option><option>🤑 Greedy</option><option>😴 Tired</option><option>💪 Confident</option></select></div>
-        <div class="field" id="tf-psych-prethought" style="grid-column:1/-1"><label>Pre-trade thought</label><textarea id="t-psych-prethought" placeholder="What was my thesis for this trade?" rows="2" style="resize:vertical"></textarea></div>
-        <div class="field" id="tf-psych-execution" style="grid-column:1/-1"><label>Execution note</label><textarea id="t-psych-execution" placeholder="How did I execute vs my plan?" rows="2" style="resize:vertical"></textarea></div>
-        <div class="field" id="tf-psych-review" style="grid-column:1/-1"><label>Post-trade review</label><textarea id="t-psych-review" placeholder="What did I learn from this trade?" rows="2" style="resize:vertical"></textarea></div>
+        <div class="field" id="tf-psych-prethought" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-prethought">Pre-trade thought</label><button type="button" class="trade-voice-btn" data-voice-target="t-psych-prethought" onclick="toggleTradeVoice('t-psych-prethought')" aria-label="Dictate pre-trade thought" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-prethought" placeholder="What was my thesis for this trade?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-prethought" role="status" aria-live="polite"></div></div>
+        <div class="field" id="tf-psych-execution" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-execution">Execution note</label><button type="button" class="trade-voice-btn" data-voice-target="t-psych-execution" onclick="toggleTradeVoice('t-psych-execution')" aria-label="Dictate execution note" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-execution" placeholder="How did I execute vs my plan?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-execution" role="status" aria-live="polite"></div></div>
+        <div class="field" id="tf-psych-review" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-review">Post-trade review</label><button type="button" class="trade-voice-btn" data-voice-target="t-psych-review" onclick="toggleTradeVoice('t-psych-review')" aria-label="Dictate post-trade review" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-review" placeholder="What did I learn from this trade?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-review" role="status" aria-live="polite"></div></div>
         <div id="custom-fields-psychology" class="form-grid" style="display:contents"></div>
-        <div class="field" id="tf-notes" style="grid-column:1/-1"><label>Notes</label><textarea id="t-notes" placeholder="Why this trade? Thesis, key levels…"></textarea></div>
+        <div class="field" id="tf-notes" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-notes">Notes</label><button type="button" class="trade-voice-btn" data-voice-target="t-notes" onclick="toggleTradeVoice('t-notes')" aria-label="Dictate trade notes" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-notes" placeholder="Why this trade? Thesis, key levels…"></textarea><div class="trade-voice-status" id="voice-status-t-notes" role="status" aria-live="polite"></div></div>
         <div id="custom-fields-notes" class="form-grid" style="display:contents"></div>
       </div>
       <div class="field full" id="tf-screenshot">
@@ -2698,6 +2711,7 @@ const DataStore = {
   _knownTrades:new Map(),
   _knownMoods:new Map(),
   _moodsBaselineLoaded:false,
+  _lastTradeSyncError:null,
   _tk(){ return `tradedesk_trades_${this._uid}`; },
   _mk(){ return `tradedesk_moods_${this._uid}`; },
   _moodKey(uid){ return `tradedesk_moods_${uid}`; },
@@ -2748,7 +2762,18 @@ const DataStore = {
     if(window._firebaseReady) return this._syncTrades(t);
     return false;
   },
+  saveTrade(trade){
+    if(!trade?.id)return false;
+    // A modal submit owns exactly one mutation. Synchronising the entire
+    // in-memory journal here allowed an unrelated stale row to turn an
+    // acknowledged create into a visible failure and leave the modal open.
+    if(this._uid==='guest')return this.saveTrades(trades);
+    if(window._dataMode==='vps'&&window._vpsData)return this._syncVpsTrades([trade]);
+    if(window._firebaseReady)return this._syncTrades([trade]);
+    return false;
+  },
   async _syncVpsTrades(items){
+    this._lastTradeSyncError=null;
     const pending=[];
     for(const trade of items){
       if(!trade?.id) continue;
@@ -2775,8 +2800,8 @@ const DataStore = {
     const results=await Promise.allSettled(pending);
     const failed=results.filter(r=>r.status==='rejected');
     if(failed.length){
+      this._lastTradeSyncError=failed[0].reason||new Error('Trade sync failed');
       console.error('VPS trade sync failed:',failed.map(r=>r.reason));
-      showToast(`${failed.length} trade update(s) could not be synced`,'error');
     }
     return failed.length===0;
   },
@@ -3215,6 +3240,7 @@ async function migrateBrowserLocalData(user){
 let S={}, trades=[], moods=[], CH={};
 let editId=null, moodEmoji='', modalEmoji='';
 let _tradeDraftId=null, _tradeSaveInFlight=false, _dupResolutionInFlight=false;
+let tradeVoiceRecognition=null, tradeVoiceTarget=null, tradeVoiceBaseText='', tradeVoiceFinalText='', tradeVoiceInterimText='';
 let activeAcctId='all';   // 'all' or account id string
 let activeSymbolTab='eq'; // symbol manager tab
 let selectedNewAcctColor=ACCT_COLORS[0];
@@ -5804,7 +5830,81 @@ function updateTradeSaveButton(){
     : '<i class="fa-solid fa-floppy-disk"></i> Save trade';
 }
 
+const TRADE_VOICE_TARGETS=new Set(['t-psych-prethought','t-psych-execution','t-psych-review','t-notes']);
+function tradeSpeechRecognitionCtor(){return window.SpeechRecognition||window.webkitSpeechRecognition||null;}
+function tradeJoinVoiceText(base,transcript){
+  const existing=String(base||''),spoken=String(transcript||'').replace(/\s+/g,' ').trim();
+  if(!spoken)return existing;
+  if(!existing)return spoken;
+  return existing+(/\s$/.test(existing)?'':'\n')+spoken;
+}
+function tradeVoiceErrorMessage(code){
+  if(code==='not-allowed'||code==='service-not-allowed')return 'Microphone permission was blocked. Allow it for Edgebook and try again.';
+  if(code==='audio-capture')return 'No microphone was detected. Check your microphone and try again.';
+  if(code==='network')return 'Speech recognition could not connect. Your existing text is unchanged.';
+  if(code==='no-speech')return 'No speech was detected. Tap the microphone when you are ready.';
+  return 'Dictation stopped unexpectedly. Any captured text is still available to review.';
+}
+function setTradeVoiceStatus(target,message,state=''){
+  const status=document.getElementById(`voice-status-${target}`);if(!status)return;
+  status.textContent=message;status.classList.remove('is-listening','is-ready');if(state)status.classList.add(state);
+}
+function refreshTradeVoiceControls(){
+  const supported=!!tradeSpeechRecognitionCtor();
+  document.querySelectorAll('[data-voice-target]').forEach(button=>{
+    const target=button.dataset.voiceTarget,active=!!tradeVoiceRecognition&&tradeVoiceTarget===target;
+    button.disabled=!supported;button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
+    button.setAttribute('aria-label',active?'Stop dictation':`Dictate ${target==='t-notes'?'trade notes':target==='t-psych-prethought'?'pre-trade thought':target==='t-psych-execution'?'execution note':'post-trade review'}`);
+    const icon=button.querySelector('i');if(icon)icon.className=active?'fa-solid fa-stop':'fa-solid fa-microphone';
+    button.title=supported?(active?'Stop dictation':'Dictate with your microphone'):'Voice dictation is not supported in this browser';
+  });
+}
+function renderTradeVoiceTranscript(){
+  const textarea=TRADE_VOICE_TARGETS.has(tradeVoiceTarget)?document.getElementById(tradeVoiceTarget):null;if(!textarea)return;
+  textarea.value=tradeJoinVoiceText(tradeVoiceBaseText,`${tradeVoiceFinalText} ${tradeVoiceInterimText}`);
+}
+function finishTradeVoice(message,state='is-ready'){
+  const target=tradeVoiceTarget,textarea=target?document.getElementById(target):null;
+  tradeVoiceRecognition=null;tradeVoiceTarget=null;if(textarea)textarea.readOnly=false;
+  refreshTradeVoiceControls();if(target)setTradeVoiceStatus(target,message,state);
+}
+function stopTradeVoice({quiet=false}={}){
+  const recognition=tradeVoiceRecognition,target=tradeVoiceTarget,textarea=target?document.getElementById(target):null;
+  const hadTranscript=!!(`${tradeVoiceFinalText} ${tradeVoiceInterimText}`.trim());
+  tradeVoiceRecognition=null;tradeVoiceTarget=null;try{recognition?.stop();}catch{}
+  if(textarea)textarea.readOnly=false;refreshTradeVoiceControls();
+  if(target&&!quiet)setTradeVoiceStatus(target,hadTranscript?'Transcript added — review it before saving the trade.':'Listening stopped. No transcript was added.',hadTranscript?'is-ready':'');
+}
+function toggleTradeVoice(target){
+  if(!TRADE_VOICE_TARGETS.has(target))return;
+  if(tradeVoiceRecognition&&tradeVoiceTarget===target){stopTradeVoice();return;}
+  if(tradeVoiceRecognition)stopTradeVoice({quiet:true});
+  const Recognition=tradeSpeechRecognitionCtor(),textarea=document.getElementById(target);
+  if(!Recognition||!textarea){refreshTradeVoiceControls();showToast('Voice dictation is not available in this browser','info');return;}
+  const recognition=new Recognition();tradeVoiceRecognition=recognition;tradeVoiceTarget=target;
+  tradeVoiceBaseText=textarea.value;tradeVoiceFinalText='';tradeVoiceInterimText='';textarea.readOnly=true;
+  recognition.continuous=true;recognition.interimResults=true;recognition.maxAlternatives=1;recognition.lang=navigator.language||'en-IN';
+  recognition.onresult=event=>{
+    if(tradeVoiceRecognition!==recognition||tradeVoiceTarget!==target)return;
+    let interim='';
+    for(let i=event.resultIndex;i<event.results.length;i++){
+      const text=event.results[i]?.[0]?.transcript||'';
+      if(event.results[i].isFinal)tradeVoiceFinalText+=text+' ';else interim+=text+' ';
+    }
+    tradeVoiceInterimText=interim;renderTradeVoiceTranscript();
+  };
+  recognition.onerror=event=>{if(tradeVoiceRecognition===recognition)finishTradeVoice(tradeVoiceErrorMessage(event.error),event.error==='no-speech'?'':'is-ready');};
+  recognition.onend=()=>{
+    if(tradeVoiceRecognition!==recognition)return;
+    const hadTranscript=!!(`${tradeVoiceFinalText} ${tradeVoiceInterimText}`.trim());
+    finishTradeVoice(hadTranscript?'Transcript added — review it before saving the trade.':'Listening ended. No transcript was added.',hadTranscript?'is-ready':'');
+  };
+  refreshTradeVoiceControls();setTradeVoiceStatus(target,'Listening… speak naturally. Edgebook stores only the text you save.','is-listening');
+  try{recognition.start();}catch{finishTradeVoice('Could not start dictation. Please try again.','');}
+}
+
 function openTradeModal(id=null){
+  stopTradeVoice({quiet:true});
   editId=id;
   _tradeDraftId=id?null:Date.now();
   _tradeSaveInFlight=false;
@@ -5874,6 +5974,7 @@ function openTradeModal(id=null){
     updateSymbolDropdown();
   }
   document.getElementById('trade-modal').classList.add('open');
+  refreshTradeVoiceControls();
   // Auto-fill date/time AFTER modal is visible — browsers may silently
   // ignore .value assignment on type="time" inputs inside display:none elements
   if (!id) {
@@ -5883,6 +5984,7 @@ function openTradeModal(id=null){
 }
 function openMoodModal(){ document.getElementById('mood-modal').classList.add('open'); }
 function closeModal(id){
+  if(id==='trade-modal')stopTradeVoice({quiet:true});
   document.getElementById(id).classList.remove('open');
   if(id==='trade-modal'&&!_tradeSaveInFlight)_tradeDraftId=null;
 }
@@ -6191,6 +6293,14 @@ function validateTrade(sym, entry, exit, size, date, dir){
   return errors;
 }
 
+function tradeSaveFailureMessage(error){
+  if(error?.code==='VERSION_REQUIRED')return 'This trade was opened with an older cached app. It has been refreshed; review it and press Save once more.';
+  if(error?.status===409)return 'This trade changed in another tab or device. The latest version has been loaded; review it before saving again.';
+  if(error?.code==='NETWORK_ERROR'||!navigator.onLine)return 'Edgebook could not reach the VPS. Your form is still open; check your connection and retry.';
+  if(error?.message&&error?.status>=400&&error?.status<500)return `Trade was not saved: ${error.message}`;
+  return 'Trade was not saved. Your form is still open; please retry.';
+}
+
 async function saveTrade(){
   if(_tradeSaveInFlight)return;
   _tradeSaveInFlight=true;
@@ -6260,11 +6370,11 @@ async function saveTrade(){
       isOpen:        orig.isOpen        ?? trade.isOpen,
       syncedAt:      orig.syncedAt      || null,
     };
-    const synced=await DataStore.saveTrades(trades);
+    const synced=await DataStore.saveTrade(trades[i]);
     if(!synced){
       if(DataStore._uid==='guest') trades[i]=orig;
       else await DataStore.loadFromFirestore({forceServer:true});
-      showToast('Trade was not saved. Check your connection and retry.','error');
+      showToast(tradeSaveFailureMessage(DataStore._lastTradeSyncError),'error');
       return;
     }
     _tradeDraftId=null;
@@ -6285,11 +6395,11 @@ async function saveTrade(){
   const localDup = findLocalDuplicate(trade,duplicateCandidates);
   if(localDup){ showManualDupModal(trade, localDup); return; }
   trades.unshift(trade);
-  const synced=await DataStore.saveTrades(trades);
+  const synced=await DataStore.saveTrade(trade);
   if(!synced){
     if(DataStore._uid==='guest') trades.shift();
     else await DataStore.loadFromFirestore({forceServer:true});
-    showToast('Trade was not saved. Check your connection and retry.','error');
+    showToast(tradeSaveFailureMessage(DataStore._lastTradeSyncError),'error');
     return;
   }
   _tradeDraftId=null;

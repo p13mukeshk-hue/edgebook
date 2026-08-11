@@ -278,7 +278,8 @@ const csvImportCommitSource = sourceBetween('async function csvImportTrades', 'l
 requireMatch(migrationExportSource, /const bundle=\{users:\{\[legacyUid\]:\{[\s\S]*?settings:[\s\S]*?moods:[\s\S]*?dailyJournal:/, 'complete per-UID migration export shape');
 requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]vps['"][\s\S]*?return this\._syncVpsTrades\(t\);[\s\S]*?return false;/, 'trade save returns false without a selected provider');
 requireMatch(dataStoreSource, /async _syncVpsTrades\(items\)[\s\S]*?const results=await Promise\.allSettled\(pending\);[\s\S]*?return failed\.length===0;/, 'trade save awaits every VPS mutation');
-requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(['"]Trade (?:updated|logged)/, 'manual trade success waits for persistence');
+requireMatch(dataStoreSource, /saveTrade\(trade\)\{[\s\S]{0,700}?_syncVpsTrades\(\[trade\]\)/, 'trade modal persists only its owned mutation');
+requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrade\((?:trades\[i\]|trade)\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(['"]Trade (?:updated|logged)/, 'manual trade success waits for targeted persistence');
 requireMatch(tradeSaveSource, /if\(_tradeSaveInFlight\)return;[\s\S]*?_tradeSaveInFlight=true;[\s\S]*?finally[\s\S]*?_tradeSaveInFlight=false/, 'manual trade submit has an in-flight double-click lock');
 requireMatch(tradeSaveSource, /id:editId\|\|_tradeDraftId\|\|\(_tradeDraftId=Date\.now\(\)\)/, 'manual trade retries retain a stable idempotency ID');
 requireMatch(tradeSaveSource, /await loadManualDuplicateCandidates\(\)[\s\S]*?findLocalDuplicate\(trade,duplicateCandidates\)/, 'manual trade duplicate check uses the authoritative VPS list');
@@ -387,6 +388,17 @@ requireMatch(journalVoiceSource, /djVoiceBaseText=textarea\.value/, 'voice trans
 requireMatch(journalVoiceSource, /textarea\.value=djJoinVoiceText/, 'voice transcript appends through the safe text-value boundary');
 requireMatch(journalVoiceSource, /Transcript added[^\n]*review it[^\n]*save the entry/, 'review-before-save dictation completion state');
 rejectMatch(journalVoiceSource, /djAutoSave|djSaveEntry/, 'automatic persistence from voice dictation');
+const tradeVoiceSource = sourceBetween('const TRADE_VOICE_TARGETS', 'function openTradeModal');
+for (const target of ['t-psych-prethought', 't-psych-execution', 't-psych-review', 't-notes']) {
+  requireMatch(app, new RegExp(`data-voice-target=["']${target}["'][\\s\\S]{0,160}?toggleTradeVoice\\('${target}'\\)`), `trade dictation control for ${target}`);
+  requireMatch(app, new RegExp(`id=["']voice-status-${target}["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']`), `accessible trade dictation status for ${target}`);
+}
+requireMatch(app, /\.trade-voice-wave b\{[^}]*animation:tradeVoiceWave/, 'animated live trade dictation waveform');
+requireMatch(tradeVoiceSource, /window\.SpeechRecognition\|\|window\.webkitSpeechRecognition/, 'trade speech-recognition compatibility');
+requireMatch(tradeVoiceSource, /tradeVoiceBaseText=textarea\.value/, 'trade dictation preserves existing text');
+requireMatch(tradeVoiceSource, /textarea\.value=tradeJoinVoiceText/, 'trade dictation appends through the safe text-value boundary');
+requireMatch(tradeVoiceSource, /Transcript added[^\n]*review it before saving the trade/, 'review-before-save trade dictation completion state');
+rejectMatch(tradeVoiceSource, /saveTrade\s*\(/, 'automatic trade persistence from voice dictation');
 const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
 const equityAxisDomainSource = sourceBetween('function equityAxisDomain', 'function setDashboardInsightEmpty');
 const equityProjectionContext = {};
@@ -1544,6 +1556,82 @@ try {
   }
 } catch (error) {
   failures.push(`Daily-journal voice fixture failed: ${error.message}`);
+}
+
+try {
+  const classSet = values => {
+    const set = new Set(values);
+    return {
+      add: (...items) => items.forEach(item => set.add(item)),
+      remove: (...items) => items.forEach(item => set.delete(item)),
+      toggle: (item, force) => {
+        if (force === true) { set.add(item); return true; }
+        if (force === false) { set.delete(item); return false; }
+        if (set.has(item)) { set.delete(item); return false; }
+        set.add(item); return true;
+      },
+      contains: item => set.has(item),
+    };
+  };
+  const tradeVoiceIcon = { className: '' };
+  const tradeVoiceButton = {
+    dataset: { voiceTarget: 't-notes' },
+    disabled: false,
+    title: '',
+    classList: classSet(['trade-voice-btn']),
+    attributes: {},
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    querySelector(selector) { return selector === 'i' ? tradeVoiceIcon : null; },
+  };
+  const tradeVoiceStatus = { textContent: '', classList: classSet(['trade-voice-status']) };
+  const tradeVoiceNotes = { value: 'Existing trade note.', readOnly: false };
+  const tradeVoiceElements = new Map([
+    ['t-notes', tradeVoiceNotes],
+    ['voice-status-t-notes', tradeVoiceStatus],
+  ]);
+  const tradeRecognizers = [];
+  class FakeTradeSpeechRecognition {
+    constructor() { tradeRecognizers.push(this); }
+    start() { this.started = true; }
+    stop() { this.stopped = true; }
+  }
+  const tradeVoiceState = "let tradeVoiceRecognition=null,tradeVoiceTarget=null,tradeVoiceBaseText='',tradeVoiceFinalText='',tradeVoiceInterimText='';\n";
+  const { exports: tradeVoice } = evaluateSecurityFixture(
+    tradeVoiceState + tradeVoiceSource,
+    {
+      document: {
+        getElementById: id => tradeVoiceElements.get(id) || null,
+        querySelectorAll: selector => selector === '[data-voice-target]' ? [tradeVoiceButton] : [],
+      },
+      window: { SpeechRecognition: FakeTradeSpeechRecognition },
+      navigator: { language: 'en-IN' },
+      showToast() {},
+    },
+    '{toggleTradeVoice,stopTradeVoice,tradeJoinVoiceText,tradeVoiceErrorMessage}',
+  );
+  tradeVoice.toggleTradeVoice('t-notes');
+  const recognition = tradeRecognizers[0];
+  const finalResult = [{ transcript: 'Waited for the sweep' }];
+  finalResult.isFinal = true;
+  recognition.onresult({ resultIndex: 0, results: [finalResult] });
+  const interimResult = [{ transcript: 'before entering' }];
+  interimResult.isFinal = false;
+  recognition.onresult({ resultIndex: 0, results: [interimResult] });
+  const expectedTranscript = 'Existing trade note.\nWaited for the sweep before entering';
+  if (!recognition.started || !tradeVoiceNotes.readOnly || tradeVoiceButton.attributes['aria-pressed'] !== 'true' ||
+      !tradeVoiceButton.classList.contains('is-listening') || tradeVoiceNotes.value !== expectedTranscript) {
+    failures.push('Trade dictation did not append a live transcript with the animated listening state');
+  }
+  tradeVoice.stopTradeVoice();
+  if (!recognition.stopped || tradeVoiceNotes.readOnly || tradeVoiceButton.attributes['aria-pressed'] !== 'false' ||
+      !/review it.*saving the trade/i.test(tradeVoiceStatus.textContent)) {
+    failures.push('Trade dictation did not return to an editable review-before-save state');
+  }
+  if (!/permission/i.test(tradeVoice.tradeVoiceErrorMessage('not-allowed'))) {
+    failures.push('Trade dictation does not explain blocked microphone permission');
+  }
+} catch (error) {
+  failures.push(`Trade voice fixture failed: ${error.message}`);
 }
 
 const coachingFunctions = app.match(/function coachingLabel[\s\S]*?(?=\nasync function openAIReport)/)?.[0];

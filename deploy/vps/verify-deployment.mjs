@@ -122,6 +122,8 @@ for (const publicFile of ['client/api-client.js', 'client/auth-adapter.js', 'cli
 }
 requireText(build, /--mode rehearsal\|cutover/, 'separate rehearsal/cutover artifacts');
 requireText(build, /firebaseDependency["']?:false/, 'VPS-only artifact marker');
+requireText(build, /sha256sum "\$destination\/client\/\$asset\.js"/, 'content-derived client adapter cache version');
+requireText(build, /sed -i [^\n]*client\/\$asset\.js\?v=\$asset_hash/, 'versioned module imports in every public page');
 requireText(build, /! -e "\$destination\/client\/firebase-fallback\.js"/, 'Firebase fallback module absence gate');
 rejectText(build, /install[^\n]*firebase-fallback\.js/, 'Firebase fallback module copied into VPS artifact');
 rejectText(build, /sed[^\n]*enableFirebaseFallback/, 'artifact-only fallback flag rewrite');
