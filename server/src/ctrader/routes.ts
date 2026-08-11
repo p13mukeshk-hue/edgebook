@@ -23,6 +23,7 @@ const connectMcpSchema = z.object({
   mappedLegacyAccountId: z.string().trim().min(1).max(255).nullable().optional(),
   label: z.string().trim().min(1).max(200).nullable().optional(),
   acknowledgeTradingCredentialRisk: z.literal(true),
+  acknowledgeNoOpenPositionsAtConnect: z.boolean().optional(),
 }).strict();
 
 function fixedAppRedirect(app: FastifyInstance, state: "select" | "error", code?: string): string {
@@ -138,6 +139,7 @@ export async function registerCTraderRoutes(
         accountId: body.accountId ?? null,
         mappedLegacyAccountId: body.mappedLegacyAccountId ?? null,
         label: body.label ?? null,
+        acknowledgeNoOpenPositionsAtConnect: body.acknowledgeNoOpenPositionsAtConnect === true,
       });
       return reply.code(200).send({ connection });
     },

@@ -65,7 +65,6 @@ function harness(
     provider_environment?: "live" | "demo" | null;
     provider_metadata?: Record<string, unknown>;
   }> | null = null,
-  historyFloor: Date | null = null,
 ) {
   const clientQueries: Array<{ sql: string; values: readonly unknown[] }> = [];
   const client = {
@@ -75,11 +74,6 @@ function harness(
         const rows = priorConnection === null ? [] : Array.isArray(priorConnection) ? priorConnection : [priorConnection];
         return result(rows.map((row) => ({ provider_environment: "live", ...row })));
       }
-      if (sql.includes("max(deleted_at) AS history_floor")) return result([{
-        history_floor: historyFloor,
-        archived_count: historyFloor === null ? "0" : "120",
-        missing_identity_count: "0",
-      }]);
       if (sql.includes("UPDATE broker_connections SET provider_environment")) return result([{ id: connectionId }]);
       return result([]);
     }),
@@ -317,6 +311,9 @@ describe("cTrader MCP connection service", () => {
     expect(adopted?.values).toEqual(["live", connectionId]);
     const insert = clientQueries.find((query) => query.sql.includes("INSERT INTO broker_connections"));
     expect(insert?.values[0]).toBe(connectionId);
+    expect(JSON.parse(String(insert?.values[9]))).toMatchObject({
+      legacyEnvironmentWasUnbound: true,
+    });
   });
 
   it("fails closed when exact and environment-less identities both exist", async () => {
@@ -337,9 +334,9 @@ describe("cTrader MCP connection service", () => {
     });
   });
 
-  it("records the latest user reset as the initial MCP history floor", async () => {
-    const reset = new Date("2026-08-09T15:59:26.205Z");
-    const { service, clientQueries } = harness("5032134", null, reset);
+  it("does not derive an account history boundary from user-wide legacy archives", async () => {
+    const registration = new Date("2026-01-01T00:00:00.000Z");
+    const { service, clientQueries } = harness();
     await service.connectMcp({
       auth,
       configuration: `Bearer ${"x".repeat(40)}`,
@@ -350,9 +347,41 @@ describe("cTrader MCP connection service", () => {
     });
     const insert = clientQueries.find((query) => query.sql.includes("INSERT INTO broker_connections"));
     expect(JSON.parse(String(insert?.values[9]))).toMatchObject({
-      historyFloorTimestamp: reset.getTime(),
-      historyFloorKind: "user_reset",
-      openingLineagePolicy: "archived_position_suppression_then_first_side_review",
+      historyFloorTimestamp: registration.getTime(),
+      historyFloorKind: "registration",
+      openingLineagePolicy: "registration_history",
+    });
+    expect(clientQueries.some((query) => query.sql.includes("FROM trades"))).toBe(false);
+  });
+
+  it("records an immutable account, environment, connection and user-bound empty-position attestation", async () => {
+    vi.useFakeTimers();
+    const attemptStartedAt = new Date("2026-08-11T08:00:00.000Z");
+    vi.setSystemTime(attemptStartedAt);
+    const { service, clientQueries } = harness();
+    await service.connectMcp({
+      auth,
+      configuration: `Bearer ${"x".repeat(40)}`,
+      environment: "live",
+      accountId: "5032134",
+      mappedLegacyAccountId: null,
+      label: null,
+      acknowledgeNoOpenPositionsAtConnect: true,
+    });
+    const insert = clientQueries.find((query) => query.sql.includes("INSERT INTO broker_connections"));
+    expect(JSON.parse(String(insert?.values[9]))).toMatchObject({
+      historyFloorTimestamp: attemptStartedAt.getTime(),
+      historyFloorKind: "connection_time_empty_attested",
+      openingLineagePolicy: "user_attested_empty_at_connection",
+      noOpenPositionsAttestation: {
+        version: 1,
+        userId,
+        connectionId: insert?.values[0],
+        accountId: "5032134",
+        environment: "live",
+        boundaryTimestamp: attemptStartedAt.getTime(),
+        acknowledgedAt: attemptStartedAt.toISOString(),
+      },
     });
   });
 
@@ -418,7 +447,48 @@ describe("cTrader MCP connection service", () => {
     expect(JSON.parse(String(insert?.values[9]))).toMatchObject({
       historyFloorTimestamp: attemptStartedAt.getTime(),
       historyFloorKind: "connection_time",
+      openingLineagePolicy: "provider_role_required",
+      noOpenPositionsAttestation: null,
     });
+  });
+
+  it("preserves a valid prior attestation and its exact boundary on same-mode reconnect", async () => {
+    const attestedFloor = new Date("2026-08-10T08:00:00.000Z").getTime();
+    const attestation = {
+      version: 1,
+      userId,
+      connectionId,
+      accountId: "5032134",
+      environment: "live",
+      boundaryTimestamp: attestedFloor,
+      acknowledgedAt: new Date(attestedFloor).toISOString(),
+    };
+    const { service, clientQueries } = harness("5032134", {
+      id: connectionId,
+      connected: false,
+      connection_mode: "mcp_read",
+      provider_metadata: {
+        historyFloorTimestamp: attestedFloor,
+        historyFloorKind: "connection_time_empty_attested",
+        noOpenPositionsAttestation: attestation,
+      },
+    });
+    await service.connectMcp({
+      auth,
+      configuration: `Bearer ${"x".repeat(40)}`,
+      environment: "live",
+      accountId: "5032134",
+      mappedLegacyAccountId: null,
+      label: null,
+      acknowledgeNoOpenPositionsAtConnect: false,
+    });
+    const insert = clientQueries.find((query) => query.sql.includes("INSERT INTO broker_connections"));
+    expect(JSON.parse(String(insert?.values[9]))).toMatchObject({
+      historyFloorTimestamp: attestedFloor,
+      historyFloorKind: "connection_time_empty_attested",
+      noOpenPositionsAttestation: attestation,
+    });
+    expect(insert?.values[10]).toBe(false);
   });
 
   it("adopts a newly discovered earlier registration floor and resets the stale cursor", async () => {

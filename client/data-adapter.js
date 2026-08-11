@@ -325,7 +325,7 @@ export function createVpsDataAdapter(api) {
         };
       },
       startOAuth: () => api.post('/ctrader/oauth/start', {}),
-      connectMcp: ({ configuration, accountId = null, environment, mappedLegacyAccountId = null, label = null, acknowledgeTradingCredentialRisk = false }) =>
+      connectMcp: ({ configuration, accountId = null, environment, mappedLegacyAccountId = null, label = null, acknowledgeTradingCredentialRisk = false, acknowledgeNoOpenPositionsAtConnect = false }) =>
         api.post('/ctrader/mcp/connect', {
           configuration,
           accountId: accountId ? String(accountId).trim() : null,
@@ -333,6 +333,7 @@ export function createVpsDataAdapter(api) {
           mappedLegacyAccountId: mappedLegacyAccountId || null,
           label: label?.trim() || null,
           acknowledgeTradingCredentialRisk: acknowledgeTradingCredentialRisk === true,
+          acknowledgeNoOpenPositionsAtConnect: acknowledgeNoOpenPositionsAtConnect === true,
         }),
       pendingOAuth: () => api.get('/ctrader/oauth/pending'),
       async list() {

@@ -29,7 +29,11 @@ const auth: AuthContext = {
   },
 };
 
-function harness(prior: { connected: boolean; connection_mode: "official" | "mcp_read" }) {
+function harness(prior: {
+  connected: boolean;
+  connection_mode: "official" | "mcp_read";
+  provider_metadata?: Record<string, unknown>;
+}) {
   const config = loadConfig({
     NODE_ENV: "test",
     PUBLIC_ORIGIN: "http://localhost:3210",
@@ -131,7 +135,11 @@ describe("cTrader cross-mode identity", () => {
   });
 
   it("switches a disconnected MCP connection to official in place", async () => {
-    const { service, clientQueries } = harness({ connected: false, connection_mode: "mcp_read" });
+    const { service, clientQueries } = harness({
+      connected: false,
+      connection_mode: "mcp_read",
+      provider_metadata: { legacyEnvironmentWasUnbound: true },
+    });
     await service.createConnection({
       auth,
       grantId,
@@ -141,6 +149,7 @@ describe("cTrader cross-mode identity", () => {
     });
     const insert = clientQueries.find((query) => query.sql.includes("INSERT INTO broker_connections"));
     expect(insert?.values[0]).toBe(connectionId);
+    expect(JSON.parse(String(insert?.values[11]))).toMatchObject({ legacyEnvironmentWasUnbound: true });
     expect(insert?.sql).toContain("connection_mode=EXCLUDED.connection_mode");
     expect(insert?.sql).toContain("sync_cursor=CASE");
     expect(insert?.sql).toContain("ON CONFLICT (user_id, provider, provider_environment, external_account_id)");

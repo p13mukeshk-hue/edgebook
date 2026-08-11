@@ -431,7 +431,7 @@ function historyStart(
   const floorKind = providerMetadata.historyFloorKind;
   if (
     floor === null
-    || !["registration", "user_reset", "connection_time"].includes(String(floorKind))
+    || !["registration", "connection_time", "connection_time_empty_attested"].includes(String(floorKind))
   ) {
     throw new CTraderSyncError(
       "CTRADER_MCP_HISTORY_BOUND_MISSING",
@@ -445,6 +445,22 @@ function historyStart(
     return Math.max(floor, syncedThrough - config.cTrader.syncOverlapSeconds * 1_000);
   }
   return Math.min(floor, now);
+}
+
+function hasValidNoOpenPositionsAttestation(
+  connection: McpConnectionRow,
+  providerMetadata: JsonRecord,
+): boolean {
+  if (providerMetadata.historyFloorKind !== "connection_time_empty_attested") return true;
+  const floor = metadataTimestamp(providerMetadata.historyFloorTimestamp);
+  const attestation = objectValue(providerMetadata.noOpenPositionsAttestation);
+  return floor !== null
+    && attestation.version === 1
+    && attestation.userId === connection.user_id
+    && attestation.connectionId === connection.id
+    && attestation.accountId === connection.external_account_id
+    && attestation.environment === connection.provider_environment
+    && attestation.boundaryTimestamp === floor;
 }
 
 function normalizeMcpError(error: unknown): CTraderSyncError {
@@ -529,7 +545,6 @@ function projectMcpPosition(
   timeZone: string,
   accountCurrency: string | null,
   floorKind: string,
-  allowResetBoundInference: boolean,
 ): McpProjection {
   const deals = [...dealsValue].sort((left, right) =>
     left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
@@ -539,13 +554,12 @@ function projectMcpPosition(
     throw new CTraderSyncError("CTRADER_MCP_POSITIONS_MIXED", "cTrader returned mixed positions", false);
   }
   const explicitOpening = deals.filter((deal) => deal.role === "OPEN");
-  const resetBoundInference = floorKind === "user_reset"
-    && allowResetBoundInference
+  const attestedBoundaryInference = floorKind === "connection_time_empty_attested"
     && first.role === null
     && explicitOpening.length === 0;
   const lineageIsAuthoritative = floorKind === "registration"
     || explicitOpening[0] === first
-    || resetBoundInference;
+    || attestedBoundaryInference;
   if (!lineageIsAuthoritative) {
     throw new CTraderSyncError(
       "CTRADER_MCP_OPENING_LINEAGE_UNPROVEN",
@@ -644,12 +658,12 @@ function projectMcpPosition(
       accountCurrency,
       classification: {
         symbolCategoryName: symbol.category,
-        reviewNeeded: resetBoundInference || (closing.length > 0 && totalPnl === null) || asset === null,
+        reviewNeeded: attestedBoundaryInference || (closing.length > 0 && totalPnl === null) || asset === null,
         lotSizeSource: symbol.lotSizeSource,
         openingLineage: explicitOpening[0] === first
           ? "provider"
-          : resetBoundInference
-            ? "user_reset_bound_inference"
+          : attestedBoundaryInference
+            ? "user_attested_empty_at_connection"
             : "registration_bound",
       },
     },
@@ -715,6 +729,14 @@ export class CTraderMcpSyncEngine {
       const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
       const cursorBefore = safeCursor(connection.sync_cursor);
       const providerMetadata = objectValue(connection.provider_metadata);
+      if (!hasValidNoOpenPositionsAttestation(connection, providerMetadata)) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_HISTORY_BOUND_MISSING",
+          "Reconnect cTrader to establish a valid account-bound history boundary",
+          false,
+          true,
+        );
+      }
       const now = Date.now();
       const from = historyStart(this.config, cursorBefore, providerMetadata, now);
       const fetched = await this.fetchDeals(client, connection.external_account_id, from, now, heartbeat);
@@ -972,6 +994,7 @@ export class CTraderMcpSyncEngine {
           if (await this.positionSuppressed(client, input.connection, positionId, counters)) continue;
           const deals = grouped.get(positionId);
           if (!deals || deals.length === 0) {
+            await this.quarantineProjection(client, input.connection, positionId, "CTRADER_MCP_POSITION_MISSING");
             awaitingReview.set(positionId, "CTRADER_MCP_POSITION_MISSING");
             continue;
           }
@@ -979,6 +1002,7 @@ export class CTraderMcpSyncEngine {
           if (!first) continue;
           const symbol = input.symbolById.get(first.symbolId);
           if (!symbol) {
+            await this.quarantineProjection(client, input.connection, positionId, "CTRADER_MCP_SYMBOL_UNAVAILABLE");
             awaitingReview.set(positionId, "CTRADER_MCP_SYMBOL_UNAVAILABLE");
             continue;
           }
@@ -990,12 +1014,11 @@ export class CTraderMcpSyncEngine {
               this.config.cTrader.tradingTimeZone,
               input.accountCurrency,
               String(objectValue(input.connection.provider_metadata).historyFloorKind ?? "unknown"),
-              objectValue(input.connection.provider_metadata).openingLineagePolicy
-                === "archived_position_suppression_then_first_side_review",
             );
           } catch (error) {
             const reason = projectionReviewReason(error);
             if (reason === null) throw error;
+            await this.quarantineProjection(client, input.connection, positionId, reason);
             awaitingReview.set(positionId, reason);
             continue;
           }
@@ -1028,7 +1051,7 @@ export class CTraderMcpSyncEngine {
       };
       const reviewReasonCounts = reasonCounts(awaitingReview);
       const reviewWarning = awaitingReview.size > 0
-        ? `${awaitingReview.size} cTrader position${awaitingReview.size === 1 ? "" : "s"} imported as executions but withheld from the trade journal because authoritative projection data is incomplete or inconsistent.`
+        ? `${awaitingReview.size} cTrader position${awaitingReview.size === 1 ? "" : "s"} imported as executions but withheld from the trade journal because authoritative projection data is incomplete or inconsistent. Edgebook did not guess financial values; these positions stay out of totals until cTrader exposes complete data or a verified review workflow is available.`
         : null;
       const metadata = {
         accountCurrency: input.accountCurrency,
@@ -1081,14 +1104,29 @@ export class CTraderMcpSyncEngine {
       counters.tombstonesPreserved += 1;
       return true;
     }
+    // An environment-less legacy connection may be adopted for credential
+    // continuity, but that does not prove which environment its old position
+    // IDs came from. Never use those rows for suppression or adoption.
+    if (objectValue(connection.provider_metadata).legacyEnvironmentWasUnbound === true) return false;
     const archivedLegacy = await client.query<{ exists: boolean }>(
       `SELECT EXISTS(
-         SELECT 1 FROM trades
-         WHERE user_id=$1 AND source_system='ctrader'
-           AND broker_trade_id=$2 AND external_trade_key IS NULL
-           AND deleted_at IS NOT NULL
+         SELECT 1 FROM trades legacy_trade
+         JOIN broker_connections legacy_connection
+           ON legacy_connection.id=legacy_trade.broker_connection_id
+         WHERE legacy_trade.user_id=$1 AND legacy_trade.broker_connection_id=$2
+           AND legacy_trade.source_system='ctrader'
+           AND legacy_trade.broker_trade_id=$3 AND legacy_trade.external_trade_key IS NULL
+           AND legacy_trade.deleted_at IS NOT NULL
+           AND legacy_connection.external_account_id=$4
+           AND legacy_connection.provider_environment=$5
        ) AS exists`,
-      [connection.user_id, positionId],
+      [
+        connection.user_id,
+        connection.id,
+        positionId,
+        connection.external_account_id,
+        connection.provider_environment,
+      ],
     );
     if (archivedLegacy.rows[0]?.exists) {
       await client.query(
@@ -1104,13 +1142,24 @@ export class CTraderMcpSyncEngine {
       return true;
     }
     const activeLegacy = await client.query<{ id: string }>(
-      `SELECT id FROM trades
-       WHERE user_id=$1 AND source_system='ctrader'
-         AND broker_trade_id=$2 AND external_trade_key IS NULL
-         AND deleted_at IS NULL
-       ORDER BY updated_at DESC, id ASC
+      `SELECT legacy_trade.id FROM trades legacy_trade
+       JOIN broker_connections legacy_connection
+         ON legacy_connection.id=legacy_trade.broker_connection_id
+       WHERE legacy_trade.user_id=$1 AND legacy_trade.broker_connection_id=$2
+         AND legacy_trade.source_system='ctrader'
+         AND legacy_trade.broker_trade_id=$3 AND legacy_trade.external_trade_key IS NULL
+         AND legacy_trade.deleted_at IS NULL
+         AND legacy_connection.external_account_id=$4
+         AND legacy_connection.provider_environment=$5
+       ORDER BY legacy_trade.updated_at DESC, legacy_trade.id ASC
        LIMIT 2`,
-      [connection.user_id, positionId],
+      [
+        connection.user_id,
+        connection.id,
+        positionId,
+        connection.external_account_id,
+        connection.provider_environment,
+      ],
     );
     if (activeLegacy.rows.length > 1) {
       throw new CTraderSyncError(
@@ -1134,6 +1183,49 @@ export class CTraderMcpSyncEngine {
       );
     }
     return false;
+  }
+
+  private async quarantineProjection(
+    client: PoolClient,
+    connection: McpConnectionRow,
+    positionId: string,
+    reason: string,
+  ): Promise<void> {
+    const externalKey = `position:${positionId}`;
+    await client.query(
+      `UPDATE trades SET
+         pnl=NULL,
+         broker_data=(broker_data
+           - 'realizedEvents' - 'grossProfit' - 'commission' - 'swap' - 'pnlConversionFee')
+           || jsonb_build_object(
+             'realizedEvents','[]'::jsonb,
+             'pnlMethod','unavailable',
+             'grossProfit',NULL,
+             'commission',NULL,
+             'swap',NULL,
+             'pnlConversionFee',NULL,
+             'classification',
+               (CASE
+                  WHEN jsonb_typeof(broker_data->'classification')='object'
+                    THEN broker_data->'classification'
+                  ELSE '{}'::jsonb
+                END) || jsonb_build_object(
+                  'projectionQuarantined',true,
+                  'projectionQuarantineReason',$4::text,
+                  'projectionQuarantinedAt',to_jsonb(now())
+                )
+           ),
+         row_version=row_version+1,
+         updated_at=now()
+       WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+         AND deleted_at IS NULL
+         AND (
+           broker_data #> '{classification,projectionQuarantined}' IS DISTINCT FROM 'true'::jsonb
+           OR broker_data #>> '{classification,projectionQuarantineReason}' IS DISTINCT FROM $4
+           OR pnl IS NOT NULL
+         )`,
+      [connection.user_id, connection.id, externalKey, reason],
+    );
   }
 
   private async upsertSymbols(
@@ -1190,6 +1282,10 @@ export class CTraderMcpSyncEngine {
     }
     const brokerData = {
       ...projection.brokerData,
+      classification: {
+        ...objectValue(projection.brokerData.classification),
+        projectionQuarantined: false,
+      },
       environment: connection.provider_environment,
       ctidTraderAccountId: connection.external_account_id,
     };

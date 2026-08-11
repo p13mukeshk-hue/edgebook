@@ -165,6 +165,7 @@ describe("cTrader HTTP contract", () => {
       accountId: "5032134",
       environment: "live",
       label: "The5ers",
+      acknowledgeNoOpenPositionsAtConnect: false,
     }));
     expect(response.body).not.toContain("Bearer");
     await app.close();

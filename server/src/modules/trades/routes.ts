@@ -217,7 +217,7 @@ async function findTrade(app: FastifyInstance, userId: string, id: string, inclu
      FROM trades
      WHERE user_id = $1
        AND (id::text = $2 OR legacy_firebase_doc_id = $2)
-       ${includeDeleted ? "" : "AND deleted_at IS NULL"}
+       ${includeDeleted ? "" : "AND deleted_at IS NULL AND broker_data #> '{classification,projectionQuarantined}' IS DISTINCT FROM 'true'::jsonb"}
      LIMIT 1`,
     [userId, id],
   );
@@ -515,7 +515,10 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
         : query.deleted === "false"
           ? "active"
           : query.deleted ?? "active";
-    if (deletedMode === "active") predicates.push("deleted_at IS NULL");
+    if (deletedMode === "active") {
+      predicates.push("deleted_at IS NULL");
+      predicates.push("broker_data #> '{classification,projectionQuarantined}' IS DISTINCT FROM 'true'::jsonb");
+    }
     else if (deletedMode === "deleted") predicates.push("deleted_at IS NOT NULL");
     else if (deletedMode !== "all") throw conflict("deleted must be active, deleted, or all");
     if (query.source) {

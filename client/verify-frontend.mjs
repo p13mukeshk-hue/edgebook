@@ -796,6 +796,7 @@ requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-environment"[\s\S]*?value="
 requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-map-account"/, 'Remote MCP Edgebook account mapping');
 requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-label"/, 'Remote MCP connection label');
 requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-risk-ack"[\s\S]*?session-bound and trading-capable[\s\S]*?only read tools/, 'explicit Remote MCP capability acknowledgement');
+requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-flat-ack"[\s\S]*?When I click Connect[\s\S]*?no open positions[\s\S]*?older history will not be inferred[\s\S]*?hold role-less positions out of the journal/, 'explicit account-flat lineage acknowledgement');
 rejectMatch(ctraderMcpModalSource, /type="password"|client secret|access token|refresh token|\bFIX\b/i, 'unrelated credential field in Remote MCP compatibility modal');
 requireMatch(ctraderMcpSubmitSource, /if\(!requestBody\.acknowledgeTradingCredentialRisk\)[\s\S]*?return;/, 'Remote MCP acknowledgement enforcement');
 requireMatch(ctraderMcpSubmitSource, /document\.getElementById\(['"]ctrader-mcp-configuration['"]\)\.value=['"]['"]/, 'Remote MCP configuration cleared after submission');
@@ -810,6 +811,7 @@ try {
     ['ctrader-mcp-label', { value: 'The5ers' }],
     ['ctrader-mcp-map-account', { value: 'acct_1', innerHTML: '' }],
     ['ctrader-mcp-risk-ack', { checked: false }],
+    ['ctrader-mcp-flat-ack', { checked: true }],
     ['ctrader-vps-mcp-error', { textContent: '', style: {} }],
     ['ctrader-vps-mcp-submit', { disabled: false, innerHTML: '' }],
     ['ctrader-vps-mcp', { style: { display: 'flex' } }],
@@ -842,7 +844,7 @@ try {
   elements.get('ctrader-mcp-configuration').value = '{"mcpServers":{"ctrader":{"transport":"fixture"}}}';
   await mcpForm.submitVpsCtraderMcp();
   const request = mcpCalls[0];
-  if (mcpCalls.length !== 1 || request?.accountId !== '42' || request?.environment !== 'live' || request?.mappedLegacyAccountId !== 'acct_1' || request?.label !== 'The5ers' || request?.acknowledgeTradingCredentialRisk !== true || !request?.configuration) {
+  if (mcpCalls.length !== 1 || request?.accountId !== '42' || request?.environment !== 'live' || request?.mappedLegacyAccountId !== 'acct_1' || request?.label !== 'The5ers' || request?.acknowledgeTradingCredentialRisk !== true || request?.acknowledgeNoOpenPositionsAtConnect !== true || !request?.configuration) {
     failures.push('Remote MCP form did not submit the exact acknowledged connection contract');
   }
   if (elements.get('ctrader-mcp-configuration').value !== '' || elements.get('ctrader-vps-mcp').style.display !== 'none') {
@@ -1922,6 +1924,7 @@ await ctraderData.ctrader.connectMcp({
   mappedLegacyAccountId: 'acct_1',
   label: 'The5ers',
   acknowledgeTradingCredentialRisk: true,
+  acknowledgeNoOpenPositionsAtConnect: true,
 });
 await ctraderData.ctrader.pendingOAuth();
 await ctraderData.ctrader.list();
@@ -1933,7 +1936,7 @@ const ctraderCreate = ctraderCalls.find(call => call.method === 'POST' && call.p
 if (ctraderCreate?.body?.mappedLegacyAccountId !== 'acct_1') failures.push('cTrader legacy account mapping was not forwarded');
 if (ctraderConfig?.enabled !== false || ctraderConfig?.mcpEnabled !== true) failures.push('cTrader OAuth and MCP capabilities were not normalized independently');
 const ctraderMcpConnect = ctraderCalls.find(call => call.method === 'POST' && call.path === '/ctrader/mcp/connect');
-if (ctraderMcpConnect?.body?.accountId !== '42' || ctraderMcpConnect?.body?.environment !== 'live' || ctraderMcpConnect?.body?.mappedLegacyAccountId !== 'acct_1' || ctraderMcpConnect?.body?.label !== 'The5ers' || ctraderMcpConnect?.body?.acknowledgeTradingCredentialRisk !== true || !ctraderMcpConnect?.body?.configuration) {
+if (ctraderMcpConnect?.body?.accountId !== '42' || ctraderMcpConnect?.body?.environment !== 'live' || ctraderMcpConnect?.body?.mappedLegacyAccountId !== 'acct_1' || ctraderMcpConnect?.body?.label !== 'The5ers' || ctraderMcpConnect?.body?.acknowledgeTradingCredentialRisk !== true || ctraderMcpConnect?.body?.acknowledgeNoOpenPositionsAtConnect !== true || !ctraderMcpConnect?.body?.configuration) {
   failures.push('cTrader Remote MCP connection payload was not forwarded exactly');
 }
 for (const expectedPath of [

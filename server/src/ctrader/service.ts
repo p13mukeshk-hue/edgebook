@@ -121,6 +121,7 @@ export interface CTraderBrokerService {
     accountId: string | null;
     mappedLegacyAccountId: string | null;
     label: string | null;
+    acknowledgeNoOpenPositionsAtConnect?: boolean;
   }): Promise<CTraderPublicConnection>;
   listConnections(userId: string): Promise<CTraderPublicConnection[]>;
   createConnection(input: {
@@ -437,6 +438,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
     accountId: string | null;
     mappedLegacyAccountId: string | null;
     label: string | null;
+    acknowledgeNoOpenPositionsAtConnect?: boolean;
   }): Promise<CTraderPublicConnection> {
     if (!this.config.cTrader.mcpEnabled || !this.mcp) {
       throw new AppError(503, "CTRADER_MCP_NOT_CONFIGURED", "cTrader MCP compatibility is not enabled on this server");
@@ -540,64 +542,64 @@ export class PostgresCTraderService implements CTraderBrokerService {
           throw new AppError(409, "CTRADER_CONNECTION_CHANGED", "The legacy cTrader connection changed while reconnecting");
         }
       }
-      const historyFloorResult = await client.query<{
-        history_floor: Date | string | null;
-        archived_count: string | number;
-        missing_identity_count: string | number;
-      }>(
-        `SELECT max(deleted_at) AS history_floor,
-                count(*) AS archived_count,
-                count(*) FILTER (WHERE broker_trade_id IS NULL) AS missing_identity_count
-         FROM trades
-         WHERE user_id=$1 AND source_system='ctrader' AND ingestion_method='migration'
-           AND external_trade_key IS NULL AND deleted_at IS NOT NULL`,
-        [input.auth.user.id],
-      );
-      const historyFloorRow = historyFloorResult.rows[0];
-      const historyFloorValue = historyFloorRow?.history_floor ?? null;
-      const archivedResetTimestamp = historyFloorValue === null ? null : new Date(historyFloorValue).getTime();
-      const validArchivedResetTimestamp = typeof archivedResetTimestamp === "number"
-        && Number.isSafeInteger(archivedResetTimestamp)
-        ? archivedResetTimestamp
-        : null;
-      const derivedFloorKind = validArchivedResetTimestamp !== null
-        ? "user_reset"
-        : registrationTimestamp !== null
-          ? "registration"
-          : "connection_time";
-      const derivedFloorTimestamp = validArchivedResetTimestamp !== null
-        ? validArchivedResetTimestamp
-        : registrationTimestamp ?? connectionAttemptStartedAt;
       const previousMetadata = identity.row?.connection_mode === "mcp_read"
         ? objectValue(identity.row.provider_metadata)
         : {};
       const previousFloorKind = String(previousMetadata.historyFloorKind ?? "");
       const previousFloorTimestamp = firstTimestamp([previousMetadata], ["historyFloorTimestamp"]);
+      const previousAttestation = objectValue(previousMetadata.noOpenPositionsAttestation);
+      const previousAttestationIsValid = previousFloorTimestamp !== null
+        && previousAttestation.version === 1
+        && previousAttestation.userId === input.auth.user.id
+        && previousAttestation.connectionId === id
+        && previousAttestation.accountId === accountId
+        && previousAttestation.environment === environment
+        && previousAttestation.boundaryTimestamp === previousFloorTimestamp;
+      const createsAttestedBoundary = input.acknowledgeNoOpenPositionsAtConnect === true
+        && previousFloorKind !== "connection_time_empty_attested";
+      const derivedFloorKind = input.acknowledgeNoOpenPositionsAtConnect === true
+        ? "connection_time_empty_attested"
+        : registrationTimestamp !== null
+          ? "registration"
+          : "connection_time";
+      const derivedFloorTimestamp = derivedFloorKind === "registration"
+        ? registrationTimestamp!
+        : connectionAttemptStartedAt;
       const hasStrongerRegistrationFloor = previousFloorTimestamp !== null
         && previousFloorKind === "connection_time"
         && derivedFloorKind === "registration"
         && derivedFloorTimestamp < previousFloorTimestamp;
       const preservesPreviousFloor = identity.row?.connection_mode === "mcp_read"
         && previousFloorTimestamp !== null
-        && ["registration", "user_reset", "connection_time"].includes(previousFloorKind)
-        // A newer explicit user reset supersedes the old approved boundary.
-        && !(derivedFloorKind === "user_reset" && derivedFloorTimestamp > previousFloorTimestamp)
+        && ["registration", "connection_time", "connection_time_empty_attested"].includes(previousFloorKind)
+        && (previousFloorKind !== "connection_time_empty_attested" || previousAttestationIsValid)
         // Registration is an authoritative earlier lower bound. Adopting it
         // requires a cursor reset so the disconnected gap and older history
         // are backfilled atomically.
-        && !hasStrongerRegistrationFloor;
+        && !hasStrongerRegistrationFloor
+        && !createsAttestedBoundary;
       const historyFloorKind = preservesPreviousFloor ? previousFloorKind : derivedFloorKind;
       const historyFloorTimestamp = preservesPreviousFloor ? previousFloorTimestamp : derivedFloorTimestamp;
       const resetsHistoryCursor = identity.row?.connection_mode === "mcp_read" && !preservesPreviousFloor;
-      const archivedCount = Number(historyFloorRow?.archived_count ?? 0);
-      const missingIdentityCount = Number(historyFloorRow?.missing_identity_count ?? 0);
-      const resetArchiveIsIdentified = historyFloorKind === "user_reset"
-        && Number.isSafeInteger(archivedCount)
-        && archivedCount > 0
-        && missingIdentityCount === 0;
-      const openingLineagePolicy = resetArchiveIsIdentified
-        ? "archived_position_suppression_then_first_side_review"
-        : "provider_role_required";
+      const openingLineagePolicy = historyFloorKind === "registration"
+        ? "registration_history"
+        : historyFloorKind === "connection_time_empty_attested"
+          ? "user_attested_empty_at_connection"
+          : "provider_role_required";
+      const noOpenPositionsAttestation = preservesPreviousFloor
+        && historyFloorKind === "connection_time_empty_attested"
+        ? previousAttestation
+        : historyFloorKind === "connection_time_empty_attested"
+        ? {
+            version: 1,
+            userId: input.auth.user.id,
+            connectionId: id,
+            accountId,
+            environment,
+            boundaryTimestamp: historyFloorTimestamp,
+            acknowledgedAt: new Date(historyFloorTimestamp).toISOString(),
+          }
+        : null;
       const metadata = {
         ...previousMetadata,
         integrationMode: "mcp_read",
@@ -613,6 +615,9 @@ export class PostgresCTraderService implements CTraderBrokerService {
         historyFloorTimestamp,
         historyFloorKind,
         openingLineagePolicy,
+        noOpenPositionsAttestation,
+        legacyEnvironmentWasUnbound: identity.adoptsLegacyEnvironment
+          || previousMetadata.legacyEnvironmentWasUnbound === true,
         readOnly: true,
         reauthRequired: false,
       };
@@ -757,12 +762,15 @@ export class PostgresCTraderService implements CTraderBrokerService {
 
       const accessToken = this.cipher.decrypt(grant.access_token_ciphertext, grantTokenAad(grant.id, "access"));
       const refreshToken = this.cipher.decrypt(grant.refresh_token_ciphertext, grantTokenAad(grant.id, "refresh"));
+      const previousMetadata = objectValue(identity.row?.provider_metadata);
       const metadata = {
         brokerTitleShort: selected.brokerTitleShort,
         traderLogin: selected.traderLogin,
         lastClosingDealTimestamp: selected.lastClosingDealTimestamp,
         lastBalanceUpdateTimestamp: selected.lastBalanceUpdateTimestamp,
         permissionScope: "accounts",
+        legacyEnvironmentWasUnbound: identity.adoptsLegacyEnvironment
+          || previousMetadata.legacyEnvironmentWasUnbound === true,
         readOnly: true,
         reauthRequired: false,
       };

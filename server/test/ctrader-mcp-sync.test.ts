@@ -60,8 +60,11 @@ function harness(dealsResponse: unknown, options: {
   providerMetadata?: Record<string, unknown>;
   syncCursor?: Record<string, unknown>;
   archivedLegacy?: boolean;
+  archivedLegacyConnectionId?: string;
   tombstoned?: boolean;
   activeLegacyIds?: string[];
+  activeLegacyConnectionId?: string;
+  existingTrade?: { id: string; deleted_at: Date | string | null };
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
@@ -88,12 +91,16 @@ function harness(dealsResponse: unknown, options: {
         return result([{ exists: options.tombstoned ?? false }]);
       }
       if (sql.includes("SELECT EXISTS") && sql.includes("external_trade_key IS NULL")) {
-        return result([{ exists: options.archivedLegacy ?? false }]);
+        const scoped = options.archivedLegacyConnectionId ?? connectionId;
+        return result([{ exists: (options.archivedLegacy ?? false) && values[1] === scoped }]);
       }
-      if (sql.includes("SELECT id FROM trades") && sql.includes("external_trade_key IS NULL")) {
-        return result((options.activeLegacyIds ?? []).map((id) => ({ id })));
+      if (sql.includes("SELECT legacy_trade.id FROM trades") && sql.includes("external_trade_key IS NULL")) {
+        const scoped = options.activeLegacyConnectionId ?? connectionId;
+        return result(values[1] === scoped ? (options.activeLegacyIds ?? []).map((id) => ({ id })) : []);
       }
-      if (sql.includes("SELECT id, deleted_at FROM trades")) return result([]);
+      if (sql.includes("SELECT id, deleted_at FROM trades")) {
+        return result(options.existingTrade ? [options.existingTrade] : []);
+      }
       if (sql.includes("INSERT INTO trades")) return result([{ id: tradeId }]);
       return result([]);
     }),
@@ -114,7 +121,7 @@ function harness(dealsResponse: unknown, options: {
           sync_cursor: options.syncCursor ?? {},
           provider_metadata: options.providerMetadata ?? {
             historyFloorTimestamp: historyFloor,
-            historyFloorKind: "user_reset",
+            historyFloorKind: "registration",
           },
           mapped_account_id: null,
           legacy_mapped_account_id: null,
@@ -143,7 +150,7 @@ afterEach(() => {
 });
 
 describe("CTraderMcpSyncEngine", () => {
-  it("filters by account, projects one position and preserves the reset history floor", async () => {
+  it("filters by account, projects one position and preserves the registration history floor", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, readClient, clientQueries, storedExecutions } = harness([
@@ -181,12 +188,13 @@ describe("CTraderMcpSyncEngine", () => {
       grossProfit: null,
       commission: "-5",
       swap: "-1",
+      classification: { projectionQuarantined: false },
     });
     const connectionUpdate = clientQueries.find((query) => query.sql.includes("UPDATE broker_connections SET"));
     expect(JSON.parse(String(connectionUpdate?.values[0]))).toMatchObject({
       historyWindowComplete: true,
-      fullHistoryComplete: false,
-      historyFloorKind: "user_reset",
+      fullHistoryComplete: true,
+      historyFloorKind: "registration",
       historyStartTimestamp: historyFloor,
       syncedThroughTimestamp: now.getTime(),
     });
@@ -232,6 +240,7 @@ describe("CTraderMcpSyncEngine", () => {
     vi.setSystemTime(now);
     const { engine, clientQueries } = harness([deal()], {
       symbolsResponse: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+      existingTrade: { id: tradeId, deleted_at: null },
     });
     const synced = await engine.syncConnection(connectionId);
     expect(synced.counters).toMatchObject({
@@ -240,6 +249,13 @@ describe("CTraderMcpSyncEngine", () => {
       positionsAwaitingReview: 1,
     });
     expect(clientQueries.some((query) => query.sql.includes("INSERT INTO trades"))).toBe(false);
+    const quarantine = clientQueries.find((query) => query.sql.includes("projectionQuarantined',true"));
+    expect(quarantine?.values).toEqual([
+      userId,
+      connectionId,
+      "position:9001",
+      "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
+    ]);
     const connectionUpdate = clientQueries.find((query) => query.sql.includes("UPDATE broker_connections SET"));
     expect(JSON.parse(String(connectionUpdate?.values[0]))).toMatchObject({
       syncedThroughTimestamp: now.getTime(),
@@ -357,14 +373,22 @@ describe("CTraderMcpSyncEngine", () => {
     expect(clientQueries.some((query) => query.sql.includes("INSERT INTO trades"))).toBe(false);
   });
 
-  it("marks a roleless post-reset projection for review only under the recorded archive policy", async () => {
+  it("projects a roleless future position only with an exact account-bound empty-position attestation", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, clientQueries } = harness([deal({ dealType: undefined })], {
       providerMetadata: {
         historyFloorTimestamp: historyFloor,
-        historyFloorKind: "user_reset",
-        openingLineagePolicy: "archived_position_suppression_then_first_side_review",
+        historyFloorKind: "connection_time_empty_attested",
+        openingLineagePolicy: "user_attested_empty_at_connection",
+        noOpenPositionsAttestation: {
+          version: 1,
+          userId,
+          connectionId,
+          accountId: "5032134",
+          environment: "live",
+          boundaryTimestamp: historyFloor,
+        },
       },
     });
     const synced = await engine.syncConnection(connectionId);
@@ -373,9 +397,34 @@ describe("CTraderMcpSyncEngine", () => {
     expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
       classification: {
         reviewNeeded: true,
-        openingLineage: "user_reset_bound_inference",
+        openingLineage: "user_attested_empty_at_connection",
       },
     });
+  });
+
+  it("rejects an attested floor whose immutable identity binding does not match the connection", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ dealType: undefined })], {
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "connection_time_empty_attested",
+        openingLineagePolicy: "user_attested_empty_at_connection",
+        noOpenPositionsAttestation: {
+          version: 1,
+          userId,
+          connectionId,
+          accountId: "5043464",
+          environment: "live",
+          boundaryTimestamp: historyFloor,
+        },
+      },
+    });
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_HISTORY_BOUND_MISSING",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
   });
 
   it("orders digit-only deal IDs numerically when execution timestamps are equal", async () => {
@@ -388,8 +437,16 @@ describe("CTraderMcpSyncEngine", () => {
     ], {
       providerMetadata: {
         historyFloorTimestamp: historyFloor,
-        historyFloorKind: "user_reset",
-        openingLineagePolicy: "archived_position_suppression_then_first_side_review",
+        historyFloorKind: "connection_time_empty_attested",
+        openingLineagePolicy: "user_attested_empty_at_connection",
+        noOpenPositionsAttestation: {
+          version: 1,
+          userId,
+          connectionId,
+          accountId: "5032134",
+          environment: "live",
+          boundaryTimestamp: historyFloor,
+        },
       },
     });
     await engine.syncConnection(connectionId);
@@ -407,6 +464,44 @@ describe("CTraderMcpSyncEngine", () => {
     expect(synced.counters).toMatchObject({ tombstonesPreserved: 1, insertedTrades: 0 });
     expect(clientQueries.some((query) => query.sql.includes("INSERT INTO ctrader_trade_tombstones"))).toBe(true);
     expect(clientQueries.some((query) => query.sql.includes("INSERT INTO trades"))).toBe(false);
+  });
+
+  it("does not suppress or adopt the same position ID from another broker connection", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const otherConnectionId = "00000000-0000-4000-8000-000000000091";
+    const { engine, clientQueries } = harness([deal()], {
+      archivedLegacy: true,
+      archivedLegacyConnectionId: otherConnectionId,
+      activeLegacyIds: ["00000000-0000-4000-8000-000000000088"],
+      activeLegacyConnectionId: otherConnectionId,
+    });
+    const synced = await engine.syncConnection(connectionId);
+    expect(synced.counters).toMatchObject({ insertedTrades: 1, tombstonesPreserved: 0 });
+    const archivedLookup = clientQueries.find((query) =>
+      query.sql.includes("SELECT EXISTS") && query.sql.includes("external_trade_key IS NULL"));
+    expect(archivedLookup?.sql).toContain("broker_connection_id=$2");
+    expect(archivedLookup?.values).toEqual([userId, connectionId, "9001", "5032134", "live"]);
+    expect(clientQueries.some((query) => query.sql.includes("INSERT INTO ctrader_trade_tombstones"))).toBe(false);
+    expect(clientQueries.some((query) => query.sql.includes("UPDATE trades SET broker_connection_id"))).toBe(false);
+  });
+
+  it("never suppresses or adopts legacy rows whose environment provenance was unbound", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([deal()], {
+      archivedLegacy: true,
+      activeLegacyIds: ["00000000-0000-4000-8000-000000000088"],
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        legacyEnvironmentWasUnbound: true,
+      },
+    });
+    const synced = await engine.syncConnection(connectionId);
+    expect(synced.counters).toMatchObject({ insertedTrades: 1, tombstonesPreserved: 0 });
+    expect(clientQueries.some((query) =>
+      query.sql.includes("FROM trades legacy_trade") && query.sql.includes("external_trade_key IS NULL"))).toBe(false);
   });
 
   it("adopts one active legacy trade identity before projection", async () => {

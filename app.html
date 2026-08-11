@@ -2000,6 +2000,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
                     </div>
                   </div>
                   <label class="ctrader-mcp-ack" for="ctrader-mcp-risk-ack"><input id="ctrader-mcp-risk-ack" type="checkbox"><span>I understand that this Remote MCP token is session-bound and trading-capable at cTrader. Edgebook will invoke only read tools, and I should revoke the token in cTrader if I no longer use this connection.</span></label>
+                  <label class="ctrader-mcp-ack" for="ctrader-mcp-flat-ack"><input id="ctrader-mcp-flat-ack" type="checkbox"><span>When I click Connect, this exact cTrader live/demo account has no open positions. Import only executions from this connection time onward; older history will not be inferred. If left unchecked, Edgebook will capture executions but hold role-less positions out of the journal for review.</span></label>
                   <div id="ctrader-vps-mcp-error" class="ctrader-vps-message error" role="alert" style="display:none;margin:12px 0 0"></div>
                   <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px"><button class="btn-ghost" type="button" onclick="closeVpsCtraderMcp()">Cancel</button><button id="ctrader-vps-mcp-submit" class="btn-accent" type="button" onclick="submitVpsCtraderMcp()"><i class="fa-solid fa-link"></i> Connect and start read-only sync</button></div>
                 </div>
@@ -4350,7 +4351,7 @@ function ctraderConnectionCard(connection,status){
   const counterText=counters&&syncStatus==='succeeded'?` · ${Number(counters.inserted||0)} added, ${Number(counters.updated||0)} updated${awaitingReview?` · ${awaitingReview} awaiting review`:''}`:'';
   const warningText=warning||(
     awaitingReview
-      ? `${awaitingReview} cTrader position${awaitingReview===1?' is':'s are'} safely retained as broker executions but excluded from the journal and analytics because cTrader did not provide enough verified size or opening data. Refresh the Remote MCP configuration and sync again.`
+      ? `${awaitingReview} cTrader position${awaitingReview===1?' is':'s are'} safely retained as broker executions but excluded from the journal and analytics because cTrader did not provide enough verified size or opening data. Edgebook did not guess financial values; these positions stay out of totals until cTrader exposes complete data or a verified review workflow is available.`
       : ''
   );
   const reconnectAction=isMcpConnection&&vpsCtraderState.mcpEnabled
@@ -4448,6 +4449,7 @@ function clearVpsCtraderMcpForm(){
   const environment=document.getElementById('ctrader-mcp-environment');if(environment)environment.value='';
   const mapping=document.getElementById('ctrader-mcp-map-account');if(mapping)mapping.value='';
   const acknowledgement=document.getElementById('ctrader-mcp-risk-ack');if(acknowledgement)acknowledgement.checked=false;
+  const flatAcknowledgement=document.getElementById('ctrader-mcp-flat-ack');if(flatAcknowledgement)flatAcknowledgement.checked=false;
   const errorEl=document.getElementById('ctrader-vps-mcp-error');if(errorEl){errorEl.textContent='';errorEl.style.display='none';}
 }
 function openVpsCtraderMcp(){
@@ -4471,6 +4473,7 @@ async function submitVpsCtraderMcp(){
     mappedLegacyAccountId:read('ctrader-mcp-map-account')||null,
     label:read('ctrader-mcp-label')||null,
     acknowledgeTradingCredentialRisk:document.getElementById('ctrader-mcp-risk-ack')?.checked===true,
+    acknowledgeNoOpenPositionsAtConnect:document.getElementById('ctrader-mcp-flat-ack')?.checked===true,
   };
   const errorEl=document.getElementById('ctrader-vps-mcp-error');
   if(requestBody.configuration.length<20){errorEl.textContent='Paste the full configuration copied from cTrader Remote MCP.';errorEl.style.display='block';return;}
