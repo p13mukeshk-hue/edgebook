@@ -769,6 +769,8 @@ requireMatch(app, /mappedLegacyAccountId/, 'cTrader legacy account mapping');
 requireMatch(app, /function applyVpsCtraderPickerDefaults[\s\S]*?existing\?\.mappedLegacyAccountId/, 'cTrader reconnect mapping preservation');
 requireMatch(app, /lastSyncStatus/, 'cTrader sync status rendering');
 requireMatch(app, /Read-only automatic sync runs in the background/, 'automatic cTrader sync messaging');
+requireMatch(app, /id="sn-brokers"[^>]*showBrokerConnections/, 'dedicated broker sync settings navigation');
+requireMatch(app, /cTrader automatic sync[\s\S]*?Setup required[\s\S]*?never paste a broker password, API secret, or access token/, 'visible fail-closed cTrader setup card');
 requireMatch(app, /escapeCtraderText\(JSON\.stringify\(id\)\)/, 'safe VPS cTrader inline identifier');
 requireMatch(app, /html\[data-auth-mode="vps"\] \.ctrader-legacy-only\{display:none!important\}/, 'legacy cTrader controls hidden in VPS mode');
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/start['"]/, 'same-origin cTrader OAuth start route');

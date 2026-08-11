@@ -1698,6 +1698,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
             </div>
             <div class="s-nav-group">
               <div class="s-nav-group-label">Data</div>
+              <div class="s-nav-item" id="sn-brokers" onclick="showBrokerConnections(this)"><i class="fa-solid fa-arrows-rotate"></i> Broker sync</div>
               <div class="s-nav-item" id="sn-data" onclick="showSPanel('data',this)"><i class="fa-solid fa-database"></i> Import / Export</div>
               <div class="s-nav-item" id="sn-danger" onclick="showSPanel('danger',this)"><i class="fa-solid fa-triangle-exclamation"></i> <span style="color:var(--red)">Danger zone</span></div>
             </div>
@@ -1876,7 +1877,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
               <div class="s-panel-head"><div class="s-panel-head-left"><div class="s-panel-title">Import / Export</div><div class="s-panel-sub">Move your data in and out of Edgebook.</div></div><div class="help-wrap"><div class="help-icon help-lg" onclick="toggleHelp('ht-data',event)">?</div><div class="help-tooltip ht-below" id="ht-data"><div class="ht-title"><i class="fa-solid fa-database" style="font-size:11px"></i> Import / Export</div><div class="ht-body">Import trades from broker CSV files (Zerodha, Groww, Angel One, Upstox supported). Export your full journal as CSV or back up your settings as JSON to restore later.</div><div class="ht-tip"><i class="fa-solid fa-lightbulb"></i> Export settings before making major changes — you can always restore them with Import JSON.</div></div></div></div>
 
               <!-- BROKER CONNECTIONS -->
-              <div class="s-section">
+              <div class="s-section" id="broker-connections-section">
                 <div class="s-section-head"><div class="s-section-title">Broker connections</div><div class="s-section-sub">Manage supported live integrations</div></div>
                 <div class="broker-section-label">cTrader</div>
                 <!-- cTrader connections — rendered dynamically by renderCtraderCards() -->
@@ -3881,7 +3882,7 @@ function handleNotifAction(notifId, target){
   if(!target) return;
   if(target === 'settings/brokers'){
     navigate('settings', document.getElementById('nav-settings'));
-    setTimeout(()=>showSPanel('data', document.getElementById('sn-data')), 350);
+    setTimeout(()=>showBrokerConnections(document.getElementById('sn-brokers')), 350);
   } else if(target === 'settings/accounts'){
     navigate('settings', document.getElementById('nav-settings'));
     setTimeout(()=>showSPanel('accounts', document.getElementById('sn-accounts')), 350);
@@ -4287,7 +4288,24 @@ function ctraderConnectionCard(connection,status){
 function renderVpsCtraderPanel(){
   const panel=document.getElementById('ctrader-vps-panel');
   if(!panel) return;
-  if(vpsCtraderState.enabled===false){panel.innerHTML='<div class="ctrader-vps-message error">cTrader OAuth is not configured on this server.</div>';return;}
+  if(vpsCtraderState.enabled===false){
+    panel.innerHTML=`<div class="broker-account-card">
+      <div class="broker-account-card-header">
+        <div style="min-width:0">
+          <div class="broker-account-card-title"><i class="fa-solid fa-chart-line" style="color:var(--accent2)"></i> cTrader automatic sync</div>
+          <div class="broker-account-card-sub">Import trades automatically using cTrader's official read-only API.</div>
+        </div>
+        <div class="broker-account-card-actions"><span style="font-size:10px;padding:3px 9px;border-radius:14px;background:var(--amber-bg);color:var(--amber)">Setup required</span></div>
+      </div>
+      <div style="padding:12px 16px;font-size:11px;color:var(--text2);line-height:1.7">
+        <div><i class="fa-solid fa-circle-info" style="color:var(--amber)"></i> Edgebook's one-time cTrader application setup has not been completed yet.</div>
+        <div><i class="fa-solid fa-key" style="color:var(--green)"></i> Users will never paste a broker password, API secret, or access token into Edgebook.</div>
+        <div><i class="fa-solid fa-shield-halved" style="color:var(--green)"></i> After activation, <strong>Connect cTrader</strong> securely authorizes view-only access and enables background syncing.</div>
+      </div>
+      <button class="broker-add-card" type="button" disabled aria-disabled="true" style="opacity:.65;cursor:not-allowed;margin-bottom:14px"><i class="fa-solid fa-plus"></i> Connect cTrader — awaiting one-time activation</button>
+    </div>`;
+    return;
+  }
   const message=vpsCtraderState.message?`<div class="ctrader-vps-message ${vpsCtraderState.messageType}">${escapeCtraderText(vpsCtraderState.message)}</div>`:'';
   const pending=vpsCtraderState.pending?.grantId?'<div class="ctrader-vps-message success">Authorization complete. <button class="btn-ghost" style="margin-left:8px" onclick="openVpsCtraderPicker()">Choose account</button></div>':'';
   const intro=`<div class="broker-account-card"><div class="broker-account-card-header"><div><div class="broker-account-card-title"><i class="fa-solid fa-link" style="color:var(--accent2)"></i> Official cTrader OAuth</div><div class="broker-account-card-sub">Authorize view-only access without pasting tokens into Edgebook.</div></div><button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-arrow-up-right-from-square"></i> Connect cTrader</button></div><div style="padding:10px 16px;font-size:11px;color:var(--text3)"><i class="fa-solid fa-shield-halved"></i> Read-only data sync only. Edgebook cannot place, modify, or close trades.</div></div>`;
@@ -5373,6 +5391,11 @@ function editCustomField(id){
   document.querySelectorAll('.cf-edit-inline').forEach(r=>r.style.display='none');
   const row=document.getElementById(`cf-edit-row-${safeDomId(id)}`);
   if(row) row.style.display='flex';
+}
+function showBrokerConnections(element){
+  showSPanel('data',element);
+  setTimeout(()=>document.getElementById('broker-connections-section')?.scrollIntoView({block:'start',behavior:'smooth'}),0);
+  loadVpsCtraderConnections();
 }
 function orderedPlaybookFields(){
   return Object.keys(PLAYBOOK_FIELD_META).sort((a,b)=>(S.playbook.fields[a]?.order??0)-(S.playbook.fields[b]?.order??0));
