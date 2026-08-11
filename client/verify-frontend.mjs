@@ -769,6 +769,11 @@ requireMatch(app, /mappedLegacyAccountId/, 'cTrader legacy account mapping');
 requireMatch(app, /function applyVpsCtraderPickerDefaults[\s\S]*?existing\?\.mappedLegacyAccountId/, 'cTrader reconnect mapping preservation');
 requireMatch(app, /lastSyncStatus/, 'cTrader sync status rendering');
 requireMatch(app, /Read-only automatic sync runs in the background/, 'automatic cTrader sync messaging');
+requireMatch(app, /function cTraderReviewRevision[\s\S]*?realizedEvents[\s\S]*?executions:/, 'cTrader provider-revision review marker');
+requireMatch(app, /function cTraderTradeNeedsReview[\s\S]*?edgebookReview/, 'cTrader needs-review detection');
+requireMatch(app, /cfVals\.edgebookReview=\{version:1,providerRevision:cTraderReviewRevision\(existingTrade\)/, 'cTrader review acknowledgement on journal save');
+requireMatch(app, /const CTRADER_OWNED_FORM_IDS=[\s\S]*?function setTradeBrokerOwnedMode/, 'cTrader broker-owned form lock');
+requireMatch(app, /cTraderReviewBadge\(t\)/, 'cTrader needs-review table badge');
 requireMatch(app, /id="sn-brokers"[^>]*showBrokerConnections/, 'dedicated broker sync settings navigation');
 requireMatch(app, /cTrader automatic sync[\s\S]*?Setup required[\s\S]*?never paste a broker password, API secret, or access token/, 'visible fail-closed cTrader setup card');
 requireMatch(app, /escapeCtraderText\(JSON\.stringify\(id\)\)/, 'safe VPS cTrader inline identifier');
@@ -776,6 +781,31 @@ requireMatch(app, /html\[data-auth-mode="vps"\] \.ctrader-legacy-only\{display:n
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/start['"]/, 'same-origin cTrader OAuth start route');
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/pending['"]/, 'same-origin cTrader OAuth pending route');
 rejectMatch(dataAdapter, /https?:\/\//i, 'absolute URL in VPS data adapter');
+
+try {
+  const reviewSource = sourceBetween('const CTRADER_OWNED_FORM_IDS', 'function openTradeModal');
+  const reviewStableJson = value => {
+    if (Array.isArray(value)) return `[${value.map(reviewStableJson).join(',')}]`;
+    if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${reviewStableJson(value[key])}`).join(',')}}`;
+    return JSON.stringify(value) ?? 'null';
+  };
+  const { exports: review } = evaluateSecurityFixture(
+    reviewSource,
+    {
+      stableJson: reviewStableJson,
+      tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
+    },
+    '{cTraderReviewRevision,cTraderTradeNeedsReview}',
+  );
+  const imported = { source: 'ctrader', isOpen: true, entryAt: '2026-08-11T01:00:00.000Z', brokerData: { realizedEvents: [] }, custom: {} };
+  if (!review.cTraderTradeNeedsReview(imported)) failures.push('A newly imported cTrader trade was not marked for review');
+  const reviewed = { ...imported, custom: { edgebookReview: { providerRevision: review.cTraderReviewRevision(imported) } } };
+  if (review.cTraderTradeNeedsReview(reviewed)) failures.push('An unchanged reviewed cTrader trade remained marked for review');
+  const closed = { ...reviewed, isOpen: false, exitAt: '2026-08-11T02:00:00.000Z', brokerData: { realizedEvents: [{ executionId: 'close-1', executedAt: '2026-08-11T02:00:00.000Z', pnl: '12.5' }] } };
+  if (!review.cTraderTradeNeedsReview(closed)) failures.push('A newly closed cTrader trade did not return to needs-review state');
+} catch (error) {
+  failures.push(`cTrader review lifecycle fixture failed: ${error.message}`);
+}
 
 // Coaching reports are deterministic and private. Browser code must never
 // send trade context directly to a third-party model endpoint.
@@ -1221,6 +1251,7 @@ try {
       getAccount: id => id === account.id ? account : null,
       acctCur: () => maliciousMarkup,
       pnlBreakdown: () => maliciousMarkup,
+      cTraderTradeNeedsReview: () => false,
       FUTURES_SPECS: {},
       ASSET_LABELS: { eq: 'Equity', cx: 'Crypto', fx: 'Forex', cm: 'Commodity', ix: 'Index' },
       fmtDate: value => value,

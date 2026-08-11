@@ -1085,6 +1085,10 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .badge-src-zerodha{background:var(--blue-bg);color:var(--blue)}
 .badge-src-ctrader{background:rgba(108,99,255,0.15);color:var(--accent2)}
 .badge-src-csv{background:var(--amber-bg);color:var(--amber)}
+.badge-review{border:0;background:var(--amber-bg);color:var(--amber);font-family:var(--font-body);cursor:pointer;margin-left:4px}
+.badge-review:hover{filter:brightness(1.15)}
+.broker-owned-note{display:none;margin:0 0 14px;padding:10px 12px;border:1px solid rgba(108,99,255,.24);border-radius:9px;background:rgba(108,99,255,.07);color:var(--text2);font-size:11px;line-height:1.55}
+.broker-owned-note.visible{display:block}
 </style>
 </head>
 <body>
@@ -2032,6 +2036,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
   <div class="modal">
     <div class="modal-head"><div class="modal-title" id="trade-modal-title">Log a trade</div><button class="modal-close" onclick="closeModal('trade-modal')"><i class="fa-solid fa-xmark"></i></button></div>
     <div class="modal-body">
+      <div id="broker-owned-note" class="broker-owned-note"><i class="fa-solid fa-shield-halved" style="color:var(--accent2);margin-right:5px"></i> Broker facts are read-only and update automatically from cTrader. Add your playbook, psychology, notes and screenshots, then save to mark this broker revision reviewed.</div>
       <div class="section-divider">Trade details</div>
       <div class="form-grid three" style="margin-bottom:14px">
         <div class="field" id="tf-asset"><label>Asset class</label><select id="t-asset" onchange="updateSymbolDropdown();updateSizeLabel()"><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select></div>
@@ -5926,6 +5931,27 @@ function toggleTradeVoice(target){
   try{recognition.start();}catch{finishTradeVoice('Could not start dictation. Please try again.','');}
 }
 
+const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-date','t-time'];
+function isCTraderTrade(trade){return String(trade?.sourceSystem||trade?.source||trade?.broker||'').toLowerCase()==='ctrader';}
+function cTraderReviewRevision(trade){
+  const events=Array.isArray(trade?.brokerData?.realizedEvents)?trade.brokerData.realizedEvents:[];
+  return stableJson({
+    isOpen:tradeIsOpen(trade),
+    entryAt:trade?.entryAt||null,
+    exitAt:trade?.exitAt||null,
+    executions:events.map(event=>[event?.executionId||null,event?.executedAt||null,event?.pnl??null]),
+  });
+}
+function cTraderTradeNeedsReview(trade){
+  if(!isCTraderTrade(trade))return false;
+  return trade?.custom?.edgebookReview?.providerRevision!==cTraderReviewRevision(trade);
+}
+function setTradeBrokerOwnedMode(trade){
+  const locked=isCTraderTrade(trade);
+  CTRADER_OWNED_FORM_IDS.forEach(id=>{const element=document.getElementById(id);if(element)element.disabled=locked;});
+  document.getElementById('broker-owned-note')?.classList.toggle('visible',locked);
+}
+
 function openTradeModal(id=null){
   stopTradeVoice({quiet:true});
   editId=id;
@@ -5985,7 +6011,9 @@ function openTradeModal(id=null){
     // restore screenshots
     currentScreenshots = t.screenshots ? [...t.screenshots] : [];
     renderScreenshotPreviews();
+    setTradeBrokerOwnedMode(t);
   } else {
+    setTradeBrokerOwnedMode(null);
     ['t-entry','t-exit','t-size','t-sl','t-tp','t-time','t-notes','t-psych-prethought','t-psych-execution','t-psych-review'].forEach(x=>document.getElementById(x).value='');
     document.getElementById('t-sym').value='';
     document.getElementById('t-asset').value=S.prefs.defaultAsset||'eq';
@@ -6354,6 +6382,7 @@ async function saveTrade(){
   const cfVals={...(existingTrade?.custom||{})};
   S.customFields.forEach(cf=>{ const el=document.getElementById('cf-v-'+safeDomId(cf.id)); if(el) cfVals[cf.id]=cf.type==='checkbox'?el.checked:el.value; });
   const playbookSnapshot=readTradePlaybook(existingTrade);cfVals.playbook=playbookSnapshot;
+  if(isCTraderTrade(existingTrade))cfVals.edgebookReview={version:1,providerRevision:cTraderReviewRevision(existingTrade),reviewedAt:new Date().toISOString()};
   const accountId=document.getElementById('t-account').value||null;
   const entryTime = document.getElementById('t-time').value || null;
   const trade={
@@ -6750,6 +6779,10 @@ function sourceBadge(t){
   if(src==='csv')     return '<span class="badge badge-src-csv">CSV</span>';
   return '<span class="badge badge-src-manual">Manual</span>';
 }
+function cTraderReviewBadge(t){
+  if(!cTraderTradeNeedsReview(t))return '';
+  return `<button type="button" class="badge badge-review" onclick="openTradeModal(${inlineStringArg(t.id)})" title="Add your strategy, psychology and review notes"><i class="fa-solid fa-clipboard-check"></i> Needs review</button>`;
+}
 // Pick the correct size unit label for a trade based on its instrument/asset.
 // F&O (Options/Futures), commodities and any trade with an explicit lotSize > 1
 // are shown in "lot/lots". Forex is "lot/lots". Equities are "share/shares".
@@ -6842,7 +6875,7 @@ function tradeRow(t){
     <td>${escapeHtml(t.emotion?.split(' ')[0]||'—')}</td>
     <td style="font-size:12px;color:var(--text3)">${escapeHtml(t.strategy||'—')}</td>
     <td>${acctTagCell(t)}</td>
-    <td>${sourceBadge(t)}</td>
+    <td>${sourceBadge(t)}${cTraderReviewBadge(t)}</td>
     <td>${(()=>{const src=getThumbSrc(t),count=Array.isArray(t.screenshots)?t.screenshots.length:0;return src?`<span class="ss-cell-thumb" onclick="openLightbox(${inlineStringArg(t.id)},0)" title="View ${count} screenshot${count>1?'s':''}"><img src="${escapeHtml(src)}" alt="chart"></span>${count>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${count-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>';})()}</td>
     <td>${pnlStr}</td>
     <td style="white-space:nowrap">
