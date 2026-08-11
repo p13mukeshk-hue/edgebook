@@ -2718,6 +2718,7 @@ const DataStore = {
   _knownMoods:new Map(),
   _moodsBaselineLoaded:false,
   _lastTradeSyncError:null,
+  _lastTradeSyncWarning:null,
   _tk(){ return `tradedesk_trades_${this._uid}`; },
   _mk(){ return `tradedesk_moods_${this._uid}`; },
   _moodKey(uid){ return `tradedesk_moods_${uid}`; },
@@ -2780,6 +2781,7 @@ const DataStore = {
   },
   async _syncVpsTrades(items){
     this._lastTradeSyncError=null;
+    this._lastTradeSyncWarning=null;
     const pending=[];
     for(const trade of items){
       if(!trade?.id) continue;
@@ -2796,11 +2798,19 @@ const DataStore = {
       pending.push(Promise.resolve(request).then(async result=>{
         const canonical=result?.trade || (result?.id!=null ? result : trade);
         if(canonical && typeof canonical==='object') Object.assign(trade,canonical);
-        if(pendingScreenshots.length){
-          await promoteTradeScreenshots(trade,[...(trade.screenshots||[]),...pendingScreenshots]);
-        }
         const canonicalKey=String(trade.id??key);
         this._knownTrades.set(canonicalKey,JSON.stringify(trade));
+        if(pendingScreenshots.length){
+          try{
+            await promoteTradeScreenshots(trade,[...(trade.screenshots||[]),...pendingScreenshots]);
+          }catch(error){
+            // The trade write has already been acknowledged. Preserve the
+            // browser references for a later retry, but never report the
+            // successfully committed trade itself as unsaved.
+            trade.screenshots=[...(trade.screenshots||[]),...pendingScreenshots].slice(0,5);
+            this._lastTradeSyncWarning=error||new Error('Some screenshots still need to be uploaded');
+          }
+        }
       }));
     }
     const results=await Promise.allSettled(pending);
@@ -6433,7 +6443,7 @@ async function saveTrade(){
     closeModal('trade-modal');
     editId=null;
     refreshAll();
-    showToast('Trade updated','success');
+    showToast(DataStore._lastTradeSyncWarning?'Trade updated. A screenshot still needs to be uploaded.':'Trade updated',DataStore._lastTradeSyncWarning?'info':'success');
     return;
   }
 
@@ -6450,7 +6460,22 @@ async function saveTrade(){
   const synced=await DataStore.saveTrade(trade);
   if(!synced){
     if(DataStore._uid==='guest') trades.shift();
-    else await DataStore.loadFromFirestore({forceServer:true});
+    else {
+      await DataStore.loadFromFirestore({forceServer:true});
+      // The request can commit successfully even if a browser extension,
+      // proxy, or post-save client step loses the acknowledgement. The stable
+      // idempotency ID proves this exact create exists, so treat the canonical
+      // server row as success instead of showing a false failure.
+      const committed=trades.find(item=>String(item.id)===String(trade.id));
+      if(committed){
+        _tradeDraftId=null;
+        closeModal('trade-modal');
+        editId=null;
+        refreshAll();
+        showToast('Trade saved. Edgebook recovered after a delayed confirmation.','success');
+        return;
+      }
+    }
     showToast(tradeSaveFailureMessage(DataStore._lastTradeSyncError),'error');
     return;
   }
@@ -6458,7 +6483,7 @@ async function saveTrade(){
   closeModal('trade-modal');
   editId=null;
   refreshAll();
-  showToast('Trade logged','success');
+  showToast(DataStore._lastTradeSyncWarning?'Trade logged. A screenshot still needs to be uploaded.':'Trade logged',DataStore._lastTradeSyncWarning?'info':'success');
   }finally{
     _tradeSaveInFlight=false;
     updateTradeSaveButton();

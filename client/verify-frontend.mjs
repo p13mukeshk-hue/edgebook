@@ -279,7 +279,9 @@ requireMatch(migrationExportSource, /const bundle=\{users:\{\[legacyUid\]:\{[\s\
 requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]vps['"][\s\S]*?return this\._syncVpsTrades\(t\);[\s\S]*?return false;/, 'trade save returns false without a selected provider');
 requireMatch(dataStoreSource, /async _syncVpsTrades\(items\)[\s\S]*?const results=await Promise\.allSettled\(pending\);[\s\S]*?return failed\.length===0;/, 'trade save awaits every VPS mutation');
 requireMatch(dataStoreSource, /saveTrade\(trade\)\{[\s\S]{0,700}?_syncVpsTrades\(\[trade\]\)/, 'trade modal persists only its owned mutation');
-requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrade\((?:trades\[i\]|trade)\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(['"]Trade (?:updated|logged)/, 'manual trade success waits for targeted persistence');
+requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrade\((?:trades\[i\]|trade)\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(/, 'manual trade success waits for targeted persistence');
+requireMatch(tradeSaveSource, /if\(!synced\)[\s\S]*?loadFromFirestore\(\{forceServer:true\}\)[\s\S]*?String\(item\.id\)===String\(trade\.id\)[\s\S]*?delayed confirmation/, 'committed trade recovery closes a false-failure create');
+requireMatch(dataStoreSource, /_lastTradeSyncWarning=null[\s\S]*?promoteTradeScreenshots[\s\S]*?catch\(error\)[\s\S]*?_lastTradeSyncWarning=error[\s\S]*?const results=await Promise\.allSettled/, 'screenshot post-processing cannot misreport a committed trade as unsaved');
 requireMatch(tradeSaveSource, /if\(_tradeSaveInFlight\)return;[\s\S]*?_tradeSaveInFlight=true;[\s\S]*?finally[\s\S]*?_tradeSaveInFlight=false/, 'manual trade submit has an in-flight double-click lock');
 requireMatch(tradeSaveSource, /id:editId\|\|_tradeDraftId\|\|\(_tradeDraftId=Date\.now\(\)\)/, 'manual trade retries retain a stable idempotency ID');
 requireMatch(tradeSaveSource, /await loadManualDuplicateCandidates\(\)[\s\S]*?findLocalDuplicate\(trade,duplicateCandidates\)/, 'manual trade duplicate check uses the authoritative VPS list');
