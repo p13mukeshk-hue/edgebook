@@ -26,6 +26,39 @@ const ACCOUNT_ID_KEYS = [
   "traderAccountId",
 ] as const;
 
+const ACCOUNT_METADATA_WRAPPER_KEYS = ["account", "balance", "data", "result"] as const;
+const MAX_ACCOUNT_METADATA_ARRAY_ENTRIES = MAX_HISTORICAL_PREVIEW_DEALS;
+const MAX_ACCOUNT_METADATA_OBJECTS = MAX_HISTORICAL_PREVIEW_DEALS + 32;
+
+const ACCOUNTLESS_HISTORY_ATTESTATION_KEY = "accountlessHistoryAttributionAttestation";
+const ACCOUNTLESS_HISTORY_ATTESTATION_PURPOSE = "accountless_remote_mcp_history_attribution";
+const ACCOUNTLESS_HISTORY_ATTESTATION_SOURCE = "operator_verified_per_account_remote_mcp_token";
+
+type AccountlessHistoryAttributionAttestation = {
+  version: 1;
+  purpose: typeof ACCOUNTLESS_HISTORY_ATTESTATION_PURPOSE;
+  source: typeof ACCOUNTLESS_HISTORY_ATTESTATION_SOURCE;
+  userId: string;
+  connectionId: string;
+  externalAccountId: string;
+  environment: "live" | "demo";
+  tokenGeneration: string;
+  acknowledgedAt: string;
+  fingerprint: string;
+};
+
+const MCP_VOLUME_ALIASES = [
+  { key: "filledVolumeCents", scale: "unit_cents" },
+  { key: "filledVolume", scale: "unit_cents" },
+  { key: "filled_volume", scale: "unknown" },
+  { key: "volume", scale: "unknown" },
+  { key: "quantity", scale: "unknown" },
+] as const;
+
+type McpVolumeSourceKey = (typeof MCP_VOLUME_ALIASES)[number]["key"];
+type McpVolumeScale = (typeof MCP_VOLUME_ALIASES)[number]["scale"];
+type McpDealOrigin = "provider" | "stored";
+
 type HistoricalFetchBudget = {
   deadline: number;
   requestCount: number;
@@ -45,6 +78,16 @@ type McpConnectionRow = QueryResultRow & {
   provider_metadata: unknown;
   mapped_account_id: string | null;
   legacy_mapped_account_id: string | null;
+};
+
+type LockedMcpConnectionAttestationRow = QueryResultRow & {
+  connection_id: string;
+  connection_user_id: string;
+  external_account_id: string;
+  provider_environment: "live" | "demo";
+  connected: boolean;
+  token_generation: string | number;
+  provider_metadata: unknown;
 };
 
 type ExistingTradeRow = QueryResultRow & {
@@ -110,6 +153,8 @@ type McpDeal = {
   side: "BUY" | "SELL";
   role: "OPEN" | "CLOSE" | null;
   filledVolumeCents: bigint;
+  filledVolumeSourceKey: McpVolumeSourceKey | null;
+  filledVolumeScale: McpVolumeScale;
   executionPrice: number;
   executionTimestamp: number;
   dealStatus: number | null;
@@ -214,6 +259,68 @@ function positiveInteger(value: unknown, field: string): bigint {
   return parsed;
 }
 
+function normalizedVolume(
+  raw: JsonRecord,
+  storedCanonical: boolean,
+): {
+  value: bigint;
+  sourceKey: McpVolumeSourceKey | null;
+  scale: McpVolumeScale;
+} {
+  const present = MCP_VOLUME_ALIASES.flatMap(({ key, scale }) => {
+    const value = raw[key];
+    return value === undefined || value === null
+      ? []
+      : [{ key, scale, value: positiveInteger(value, "filledVolume") }];
+  });
+  const accepted = present[0];
+  if (!accepted) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_DEAL_INVALID",
+      "cTrader deal is missing filledVolume",
+      false,
+    );
+  }
+  if (present.some((candidate) => candidate.value !== accepted.value)) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_DEAL_INVALID",
+      "cTrader returned conflicting filledVolume aliases",
+      false,
+    );
+  }
+
+  if (!storedCanonical) {
+    return { value: accepted.value, sourceKey: accepted.key, scale: accepted.scale };
+  }
+
+  const storedSource = raw.filledVolumeSourceKey;
+  const storedScale = raw.filledVolumeScale;
+  if (storedSource === undefined && storedScale === undefined) {
+    // Executions written before provenance was captured cannot safely be
+    // attributed to the canonical field name used by Edgebook storage.
+    return { value: accepted.value, sourceKey: null, scale: "unknown" };
+  }
+  if (storedSource === null && storedScale === "unknown") {
+    return { value: accepted.value, sourceKey: null, scale: "unknown" };
+  }
+  if (typeof storedSource !== "string" || typeof storedScale !== "string") {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_DEAL_INVALID",
+      "Stored cTrader deal has invalid filledVolume provenance",
+      false,
+    );
+  }
+  const source = MCP_VOLUME_ALIASES.find(({ key }) => key === storedSource);
+  if (!source || source.scale !== storedScale) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_DEAL_INVALID",
+      "Stored cTrader deal has invalid filledVolume provenance",
+      false,
+    );
+  }
+  return { value: accepted.value, sourceKey: source.key, scale: source.scale };
+}
+
 function timestamp(value: unknown, field: string): number {
   let parsed = typeof value === "number"
     ? value
@@ -282,6 +389,8 @@ function canonicalStoredDeal(deal: McpDeal): JsonRecord {
     side: deal.side,
     role: deal.role,
     filledVolumeCents: deal.filledVolumeCents.toString(),
+    filledVolumeSourceKey: deal.filledVolumeSourceKey,
+    filledVolumeScale: deal.filledVolumeScale,
     executionPrice: deal.executionPrice,
     executionTimestamp: deal.executionTimestamp,
     dealStatus: deal.dealStatus,
@@ -296,10 +405,27 @@ function canonicalStoredDeal(deal: McpDeal): JsonRecord {
   };
 }
 
-function normalizeDeal(value: unknown): McpDeal {
+function normalizeDeal(value: unknown, origin: McpDealOrigin): McpDeal {
   const envelope = objectValue(value);
-  const canonical = objectValue(envelope.edgebookMcpDeal);
-  const raw = Object.keys(canonical).length > 0 ? canonical : envelope;
+  const hasCanonicalEnvelope = Object.prototype.hasOwnProperty.call(envelope, "edgebookMcpDeal");
+  const hasInternalProvenance = Object.prototype.hasOwnProperty.call(envelope, "filledVolumeSourceKey")
+    || Object.prototype.hasOwnProperty.call(envelope, "filledVolumeScale");
+  if (origin === "provider" && (hasCanonicalEnvelope || hasInternalProvenance)) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_DEAL_INVALID",
+      "cTrader returned reserved internal deal provenance",
+      false,
+    );
+  }
+  const canonical = origin === "stored" ? objectValue(envelope.edgebookMcpDeal) : {};
+  if (origin === "stored" && (!hasCanonicalEnvelope || Object.keys(canonical).length === 0)) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_DEAL_INVALID",
+      "Stored cTrader deal is missing its canonical envelope",
+      false,
+    );
+  }
+  const raw = origin === "stored" ? canonical : envelope;
   const dealId = textValue(firstValue(raw, ["dealId", "deal_id", "id"]), "dealId", true);
   const positionId = textValue(firstValue(raw, ["positionId", "position_id"]), "positionId", true);
   const symbolId = textValue(firstValue(raw, ["symbolId", "symbol_id"]), "symbolId", true);
@@ -310,10 +436,7 @@ function normalizeDeal(value: unknown): McpDeal {
   const closeDetailPresent = Object.prototype.hasOwnProperty.call(raw, "closePositionDetail")
     || Object.prototype.hasOwnProperty.call(raw, "close_position_detail");
   const closeDetail = firstValue(raw, ["closePositionDetail", "close_position_detail"]);
-  const filledVolumeCents = positiveInteger(
-    firstValue(raw, ["filledVolumeCents", "filledVolume", "filled_volume", "volume", "quantity"]),
-    "filledVolume",
-  );
+  const normalizedFilledVolume = normalizedVolume(raw, origin === "stored");
   const executionPrice = finiteNumber(
     firstValue(raw, ["executionPrice", "execution_price", "price", "dealPrice", "filledPrice"]),
     "executionPrice",
@@ -326,7 +449,7 @@ function normalizeDeal(value: unknown): McpDeal {
   const statusValue = firstValue(raw, ["dealStatus", "deal_status", "status"]);
   const parsedStatus = statusValue === null ? null : Number(statusValue);
   const explicitAccountIds = accountIds(
-    Object.keys(canonical).length > 0 ? [envelope, canonical] : [raw],
+    origin === "stored" ? [envelope, canonical] : [raw],
   );
   const accountId = explicitAccountIds[0] ?? null;
   if (explicitAccountIds.some((value) => value !== accountId)) {
@@ -349,7 +472,9 @@ function normalizeDeal(value: unknown): McpDeal {
     accountId,
     side: tradeSide,
     role,
-    filledVolumeCents,
+    filledVolumeCents: normalizedFilledVolume.value,
+    filledVolumeSourceKey: normalizedFilledVolume.sourceKey,
+    filledVolumeScale: normalizedFilledVolume.scale,
     executionPrice,
     executionTimestamp,
     dealStatus: parsedStatus !== null && Number.isSafeInteger(parsedStatus) ? parsedStatus : null,
@@ -498,6 +623,7 @@ function cursorPositionIds(value: unknown): string[] {
 
 const REVIEWABLE_PROJECTION_ERRORS = new Set([
   "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
+  "CTRADER_MCP_VOLUME_SCALE_UNAVAILABLE",
   "CTRADER_MCP_OPENING_LINEAGE_UNPROVEN",
   "CTRADER_MCP_POSITION_VOLUME_INVALID",
   "CTRADER_MCP_OPEN_SIDE_MISMATCH",
@@ -526,7 +652,7 @@ function metadataTimestamp(value: unknown): number | null {
 function unwrapFirstObject(value: unknown): JsonRecord {
   if (Array.isArray(value)) return objectValue(value[0]);
   const root = objectValue(value);
-  for (const key of ["account", "balance", "data", "result"] as const) {
+  for (const key of ACCOUNT_METADATA_WRAPPER_KEYS) {
     const nested = root[key];
     if (Array.isArray(nested)) return objectValue(nested[0]);
     if (typeof nested === "object" && nested !== null) return objectValue(nested);
@@ -535,10 +661,40 @@ function unwrapFirstObject(value: unknown): JsonRecord {
 }
 
 function accountMetadataObjects(value: unknown): JsonRecord[] {
-  if (Array.isArray(value)) return [objectValue(value[0])];
-  const root = objectValue(value);
-  const selected = unwrapFirstObject(value);
-  return selected === root ? [root] : [root, selected];
+  const objects: JsonRecord[] = [];
+  const pending: unknown[] = [value];
+  const visited = new Set<object>();
+  let arrayEntriesSeen = 0;
+  for (let index = 0; index < pending.length; index += 1) {
+    const candidate = pending[index];
+    if (Array.isArray(candidate)) {
+      arrayEntriesSeen += candidate.length;
+      if (arrayEntriesSeen > MAX_ACCOUNT_METADATA_ARRAY_ENTRIES) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_METADATA_INVALID",
+          "cTrader returned too many account metadata entries",
+          false,
+        );
+      }
+      pending.push(...candidate);
+      continue;
+    }
+    if (typeof candidate !== "object" || candidate === null || visited.has(candidate)) continue;
+    visited.add(candidate);
+    const object = objectValue(candidate);
+    objects.push(object);
+    if (objects.length > MAX_ACCOUNT_METADATA_OBJECTS) {
+      throw new CTraderSyncError(
+        "CTRADER_MCP_METADATA_INVALID",
+        "cTrader returned too many account metadata objects",
+        false,
+      );
+    }
+    for (const key of ACCOUNT_METADATA_WRAPPER_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(object, key)) pending.push(object[key]);
+    }
+  }
+  return objects;
 }
 
 function firstText(objects: readonly JsonRecord[], keys: readonly string[]): string | null {
@@ -583,7 +739,7 @@ function verifiedAccountAttribution(
 function historyResponseHasVerifiedAccount(value: unknown, expectedAccountId: string): boolean {
   if (Array.isArray(value)) return false;
   return verifiedAccountAttribution(
-    [objectValue(value)],
+    accountMetadataObjects(value),
     expectedAccountId,
     accountHistoryMismatch,
   );
@@ -643,6 +799,112 @@ function hasValidNoOpenPositionsAttestation(
     && attestation.accountId === connection.external_account_id
     && attestation.environment === connection.provider_environment
     && attestation.boundaryTimestamp === floor;
+}
+
+function invalidAccountlessHistoryAttestation(): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_MCP_ACCOUNTLESS_ATTESTATION_INVALID",
+    "The operator-verified cTrader account attribution is invalid for this connection",
+    false,
+  );
+}
+
+function accountlessHistoryAttestationFingerprint(
+  input: Omit<AccountlessHistoryAttributionAttestation, "fingerprint">,
+): string {
+  return json([
+    input.version,
+    input.purpose,
+    input.source,
+    input.userId,
+    input.connectionId,
+    input.externalAccountId,
+    input.environment,
+    input.tokenGeneration,
+    input.acknowledgedAt,
+  ]);
+}
+
+function accountlessHistoryAttestation(
+  connection: Pick<McpConnectionRow, "id" | "user_id" | "external_account_id" | "provider_environment" | "token_generation">,
+  providerMetadata: JsonRecord,
+): AccountlessHistoryAttributionAttestation | null {
+  const value = providerMetadata[ACCOUNTLESS_HISTORY_ATTESTATION_KEY];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) throw invalidAccountlessHistoryAttestation();
+  const raw = objectValue(value);
+  const expectedKeys = [
+    "acknowledgedAt",
+    "connectionId",
+    "environment",
+    "externalAccountId",
+    "purpose",
+    "source",
+    "tokenGeneration",
+    "userId",
+    "version",
+  ];
+  if (json(Object.keys(raw).sort()) !== json(expectedKeys)) throw invalidAccountlessHistoryAttestation();
+  const acknowledgedAt = raw.acknowledgedAt;
+  const acknowledgedTimestamp = typeof acknowledgedAt === "string" ? Date.parse(acknowledgedAt) : Number.NaN;
+  if (
+    raw.version !== 1
+    || raw.purpose !== ACCOUNTLESS_HISTORY_ATTESTATION_PURPOSE
+    || raw.source !== ACCOUNTLESS_HISTORY_ATTESTATION_SOURCE
+    || raw.userId !== connection.user_id
+    || raw.connectionId !== connection.id
+    || raw.externalAccountId !== connection.external_account_id
+    || raw.environment !== connection.provider_environment
+    || raw.tokenGeneration !== String(connection.token_generation)
+    || typeof acknowledgedAt !== "string"
+    || !Number.isSafeInteger(acknowledgedTimestamp)
+    || acknowledgedTimestamp <= 0
+    || acknowledgedTimestamp > Date.now() + 5 * 60 * 1_000
+    || new Date(acknowledgedTimestamp).toISOString() !== acknowledgedAt
+  ) {
+    throw invalidAccountlessHistoryAttestation();
+  }
+  const parsed: Omit<AccountlessHistoryAttributionAttestation, "fingerprint"> = {
+    version: 1 as const,
+    purpose: ACCOUNTLESS_HISTORY_ATTESTATION_PURPOSE,
+    source: ACCOUNTLESS_HISTORY_ATTESTATION_SOURCE,
+    userId: connection.user_id,
+    connectionId: connection.id,
+    externalAccountId: connection.external_account_id,
+    environment: connection.provider_environment,
+    tokenGeneration: String(connection.token_generation),
+    acknowledgedAt,
+  };
+  return {
+    ...parsed,
+    fingerprint: accountlessHistoryAttestationFingerprint(parsed),
+  };
+}
+
+function assertAccountlessHistoryAttestationUnchanged(
+  locked: LockedMcpConnectionAttestationRow,
+  expected: AccountlessHistoryAttributionAttestation | null,
+): void {
+  if (expected === null) return;
+  let current: AccountlessHistoryAttributionAttestation | null;
+  try {
+    current = accountlessHistoryAttestation({
+      id: locked.connection_id,
+      user_id: locked.connection_user_id,
+      external_account_id: locked.external_account_id,
+      provider_environment: locked.provider_environment,
+      token_generation: locked.token_generation,
+    }, objectValue(locked.provider_metadata));
+  } catch {
+    current = null;
+  }
+  if (current?.fingerprint !== expected.fingerprint) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_ACCOUNTLESS_ATTESTATION_CHANGED",
+      "The operator-verified cTrader account attribution changed during sync",
+      false,
+    );
+  }
 }
 
 function normalizeMcpError(error: unknown): CTraderSyncError {
@@ -777,6 +1039,13 @@ function projectMcpPosition(
   }
   const opening = deals.filter((deal) => deal.role === "OPEN" || (deal.role === null && deal.side === openingSide));
   const closing = deals.filter((deal) => deal.role === "CLOSE" || (deal.role === null && deal.side !== openingSide));
+  if (deals.some((deal) => deal.filledVolumeScale !== "unit_cents" || deal.filledVolumeSourceKey === null)) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_VOLUME_SCALE_UNAVAILABLE",
+      `cTrader did not provide an authoritative volume scale for position ${first.positionId}`,
+      false,
+    );
+  }
   if (symbol.lotSize === null) {
     throw new CTraderSyncError(
       "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
@@ -1085,6 +1354,8 @@ export class CTraderMcpSyncEngine {
     heartbeat: () => Promise<void> = async () => undefined,
   ): Promise<CTraderSyncResult> {
     const connection = await this.loadConnection(connectionId);
+    const providerMetadata = objectValue(connection.provider_metadata);
+    const operatorAccountAttestation = accountlessHistoryAttestation(connection, providerMetadata);
     if (!connection.access_token_ciphertext) {
       throw new CTraderSyncError("CTRADER_REAUTH_REQUIRED", "Reconnect cTrader before syncing", false, true);
     }
@@ -1119,7 +1390,6 @@ export class CTraderMcpSyncEngine {
       const symbols = normalizeSymbols(symbolsRaw);
       const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
       const cursorBefore = safeCursor(connection.sync_cursor);
-      const providerMetadata = objectValue(connection.provider_metadata);
       if (!hasValidNoOpenPositionsAttestation(connection, providerMetadata)) {
         throw new CTraderSyncError(
           "CTRADER_MCP_HISTORY_BOUND_MISSING",
@@ -1136,7 +1406,10 @@ export class CTraderMcpSyncEngine {
         from,
         now,
         heartbeat,
-        { sessionAccountVerified },
+        {
+          sessionAccountVerified,
+          accountlessHistoryAttested: operatorAccountAttestation !== null,
+        },
       );
       const currency = accountCurrency([balance, accountInfo, providerMetadata]);
       const result = await this.persist({
@@ -1149,6 +1422,7 @@ export class CTraderMcpSyncEngine {
         queryFromTimestamp: from,
         syncedThroughTimestamp: now,
         accountCurrency: currency,
+        operatorAccountAttestation,
       });
       await this.events.publish(connection.user_id, "ctrader.synced", {
         connectionId,
@@ -1205,6 +1479,7 @@ export class CTraderMcpSyncEngine {
       );
     }
     const providerMetadata = objectValue(connection.provider_metadata);
+    const operatorAccountAttestation = accountlessHistoryAttestation(connection, providerMetadata);
     const normalHistoryFloor = metadataTimestamp(providerMetadata.historyFloorTimestamp);
     const requestedNormalFloor = dateValue(
       historicalImport.normal_history_floor_at_request,
@@ -1263,6 +1538,7 @@ export class CTraderMcpSyncEngine {
         heartbeat,
         previewDeadline,
         sessionAccountVerified,
+        operatorAccountAttestation !== null,
       );
       const currency = accountCurrency([
         balance,
@@ -1280,6 +1556,7 @@ export class CTraderMcpSyncEngine {
         cursorSnapshot,
         previewDeadline,
         heartbeat,
+        operatorAccountAttestation,
       });
       await this.events.publish(connection.user_id, "ctrader.historical_import.review_ready", {
         connectionId: connection.id,
@@ -1400,6 +1677,7 @@ export class CTraderMcpSyncEngine {
       maximumWindowMs?: number;
       sharedBudget?: HistoricalFetchBudget | null;
       sessionAccountVerified?: boolean;
+      accountlessHistoryAttested?: boolean;
     } = {},
   ): Promise<McpDeal[]> {
     const {
@@ -1408,6 +1686,7 @@ export class CTraderMcpSyncEngine {
       maximumWindowMs = MAX_HISTORY_WINDOW_MS,
       sharedBudget = null,
       sessionAccountVerified = false,
+      accountlessHistoryAttested = false,
     } = options;
     const byId = new Map<string, McpDeal>();
     const budget = sharedBudget ?? {
@@ -1464,11 +1743,11 @@ export class CTraderMcpSyncEngine {
         return;
       }
       assertCompleteHistoryPage(raw);
-      // cTrader Remote MCP issues one token per trading account and the
-      // account is verified on this same MCP session before history is read.
-      // Its history shape may follow ProtoOADealListRes, where account
-      // attribution lives on the response rather than on each ProtoOADeal.
-      // Honour either shape, while failing closed on every explicit mismatch.
+      // Prefer explicit same-session or response-envelope attribution. Some
+      // per-account Remote MCP tokens omit account fields from every read
+      // response; only the separately operator-attested connection may inherit
+      // identity in that shape. Every explicit identifier still fails closed
+      // on a mismatch, regardless of the attestation.
       const responseAccountVerified = historyResponseHasVerifiedAccount(raw, accountId);
       const rows = unwrapArray(raw, ["deals", "data", "result", "items", "history"], "deal history");
       for (const row of rows) {
@@ -1476,7 +1755,7 @@ export class CTraderMcpSyncEngine {
           budget.processedDeals += 1;
           enforcePreviewBudget(depth);
         }
-        const normalizedDeal = normalizeDeal(row);
+        const normalizedDeal = normalizeDeal(row, "provider");
         if (
           normalizedDeal.executionTimestamp < start
           || (splitIncompletePages ? normalizedDeal.executionTimestamp >= end : normalizedDeal.executionTimestamp > end)
@@ -1494,6 +1773,7 @@ export class CTraderMcpSyncEngine {
           normalizedDeal.accountId === null
           && !responseAccountVerified
           && !sessionAccountVerified
+          && !accountlessHistoryAttested
         ) {
           throw new CTraderSyncError(
             "CTRADER_MCP_ACCOUNT_ATTRIBUTION_MISSING",
@@ -1535,6 +1815,7 @@ export class CTraderMcpSyncEngine {
     heartbeat: () => Promise<void>,
     deadline: number,
     sessionAccountVerified: boolean,
+    accountlessHistoryAttested: boolean,
   ): Promise<McpDeal[]> {
     const budget: HistoricalFetchBudget = { deadline, requestCount: 0, processedDeals: 0 };
     const fullRangePlan = await this.fetchDeals(
@@ -1549,6 +1830,7 @@ export class CTraderMcpSyncEngine {
         maximumWindowMs: MAX_HISTORY_WINDOW_MS,
         sharedBudget: budget,
         sessionAccountVerified,
+        accountlessHistoryAttested,
       },
     );
     const partitionPlan = await this.fetchDeals(
@@ -1563,6 +1845,7 @@ export class CTraderMcpSyncEngine {
         maximumWindowMs: 60 * 60 * 1_000,
         sharedBudget: budget,
         sessionAccountVerified,
+        accountlessHistoryAttested,
       },
     );
     const partitionById = new Map(partitionPlan.map((deal) => [deal.dealId, deal]));
@@ -1593,6 +1876,7 @@ export class CTraderMcpSyncEngine {
     cursorSnapshot: JsonRecord;
     previewDeadline: number;
     heartbeat: () => Promise<void>;
+    operatorAccountAttestation: AccountlessHistoryAttributionAttestation | null;
   }): Promise<CTraderSyncResult> {
     const counters = await withTransaction(this.database, async (client) => {
       const enforcePersistenceDeadline = (): void => {
@@ -1605,15 +1889,18 @@ export class CTraderMcpSyncEngine {
         }
       };
       enforcePersistenceDeadline();
-      const locked = await client.query<{
+      const locked = await client.query<LockedMcpConnectionAttestationRow & {
         status: HistoricalImportRow["status"];
         counters: unknown;
-        token_generation: string | number;
-        connected: boolean;
         sync_cursor: unknown;
       }>(
         `SELECT import.status, import.counters, connection.token_generation,
-                connection.connected, connection.sync_cursor
+                connection.connected, connection.sync_cursor,
+                connection.id AS connection_id,
+                connection.user_id AS connection_user_id,
+                connection.external_account_id,
+                connection.provider_environment,
+                connection.provider_metadata
          FROM ctrader_historical_imports import
          JOIN broker_connections connection
            ON connection.user_id=import.user_id
@@ -1654,6 +1941,7 @@ export class CTraderMcpSyncEngine {
           true,
         );
       }
+      assertAccountlessHistoryAttestationUnchanged(state, input.operatorAccountAttestation);
       // A replay of an already-committed preview is a read-only success. This
       // protects a run whose final worker acknowledgement was lost.
       if (state.status === "review" || state.status === "completed") {
@@ -2121,14 +2409,24 @@ export class CTraderMcpSyncEngine {
     queryFromTimestamp: number;
     syncedThroughTimestamp: number;
     accountCurrency: string | null;
+    operatorAccountAttestation: AccountlessHistoryAttributionAttestation | null;
   }): Promise<CTraderSyncResult> {
     const persisted = await withTransaction(this.database, async (client) => {
-      const locked = await client.query<{ connected: boolean; token_generation: string | number }>(
-        `SELECT connected, token_generation FROM broker_connections
+      const locked = await client.query<LockedMcpConnectionAttestationRow>(
+        `SELECT connected, token_generation,
+                id AS connection_id, user_id AS connection_user_id,
+                external_account_id, provider_environment, provider_metadata
+         FROM broker_connections
          WHERE id=$1 AND provider='ctrader' AND connection_mode='mcp_read'
            AND oauth_scope='mcp_read' AND provider_environment IS NOT NULL
+           AND user_id=$2 AND external_account_id=$3 AND provider_environment=$4
          FOR UPDATE`,
-        [input.connection.id],
+        [
+          input.connection.id,
+          input.connection.user_id,
+          input.connection.external_account_id,
+          input.connection.provider_environment,
+        ],
       );
       const lockedConnection = locked.rows[0];
       if (!lockedConnection?.connected) {
@@ -2137,6 +2435,7 @@ export class CTraderMcpSyncEngine {
       if (String(lockedConnection.token_generation) !== String(input.connection.token_generation)) {
         throw new CTraderSyncError("CTRADER_CONNECTION_CHANGED", "The cTrader connection changed during sync", true);
       }
+      assertAccountlessHistoryAttestationUnchanged(lockedConnection, input.operatorAccountAttestation);
       const counters: CTraderSyncCounters = {
         inserted: 0,
         updated: 0,
@@ -2248,7 +2547,7 @@ export class CTraderMcpSyncEngine {
         const grouped = new Map<string, McpDeal[]>();
         for (const row of stored.rows) {
           let deal: McpDeal;
-          try { deal = normalizeDeal(row.raw_payload); } catch {
+          try { deal = normalizeDeal(row.raw_payload, "stored"); } catch {
             throw new CTraderSyncError(
               "CTRADER_MCP_STORED_DEAL_INVALID",
               `Stored cTrader execution for position ${row.external_position_id} is invalid`,

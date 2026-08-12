@@ -55,11 +55,27 @@ function deal(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function accountlessHistoryAttestation(overrides: Record<string, unknown> = {}) {
+  return {
+    version: 1,
+    purpose: "accountless_remote_mcp_history_attribution",
+    source: "operator_verified_per_account_remote_mcp_token",
+    userId,
+    connectionId,
+    externalAccountId: "5032134",
+    environment: "live",
+    tokenGeneration: "1",
+    acknowledgedAt: "2026-08-11T11:59:00.000Z",
+    ...overrides,
+  };
+}
+
 function harness(dealsResponse: unknown, options: {
   symbolsResponse?: unknown;
   balanceResponse?: unknown;
   accountInfoResponse?: unknown;
   providerMetadata?: Record<string, unknown>;
+  lockedProviderMetadata?: Record<string, unknown>;
   syncCursor?: Record<string, unknown>;
   archivedLegacy?: boolean;
   archivedLegacyConnectionId?: string;
@@ -70,13 +86,25 @@ function harness(dealsResponse: unknown, options: {
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
+  const providerMetadata = options.providerMetadata ?? {
+    historyFloorTimestamp: historyFloor,
+    historyFloorKind: "registration",
+  };
   const storedExecutions: Array<{ position: string; payload: unknown }> = [];
   const clientQueries: Array<{ sql: string; values: readonly unknown[] }> = [];
   const transactionClient = {
     query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
       clientQueries.push({ sql, values });
       if (sql.includes("SELECT connected, token_generation")) {
-        return result([{ connected: true, token_generation: "1" }]);
+        return result([{
+          connected: true,
+          token_generation: "1",
+          connection_id: connectionId,
+          connection_user_id: userId,
+          external_account_id: "5032134",
+          provider_environment: "live",
+          provider_metadata: options.lockedProviderMetadata ?? providerMetadata,
+        }]);
       }
       if (sql.includes("SELECT external_execution_id FROM trade_executions")) return result([]);
       if (sql.includes("INSERT INTO trade_executions")) {
@@ -121,10 +149,7 @@ function harness(dealsResponse: unknown, options: {
           encryption_key_version: 1,
           token_generation: "1",
           sync_cursor: options.syncCursor ?? {},
-          provider_metadata: options.providerMetadata ?? {
-            historyFloorTimestamp: historyFloor,
-            historyFloorKind: "registration",
-          },
+          provider_metadata: providerMetadata,
           mapped_account_id: null,
           legacy_mapped_account_id: null,
         }]);
@@ -179,6 +204,13 @@ describe("CTraderMcpSyncEngine", () => {
       toTimestamp: now.toISOString(),
     });
     expect(synced.counters).toMatchObject({ fetchedDeals: 2, insertedExecutions: 2, insertedTrades: 1 });
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: {
+        filledVolumeCents: "1000",
+        filledVolumeSourceKey: "filledVolume",
+        filledVolumeScale: "unit_cents",
+      },
+    });
     const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
     expect(tradeInsert?.values.slice(5, 15)).toEqual([
       "position:9001", "9001", "XAU/USD", "cm", "Long", "2000", "2010", "0.1", "100", false,
@@ -201,6 +233,94 @@ describe("CTraderMcpSyncEngine", () => {
       syncedThroughTimestamp: now.getTime(),
     });
     expect(readClient.close).toHaveBeenCalledOnce();
+  });
+
+  it("persists generic volume provenance but quarantines projection when its scale is unknown", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries, storedExecutions } = harness([deal({
+      filledVolume: undefined,
+      volume: "1000",
+    })]);
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({
+      insertedExecutions: 1,
+      insertedTrades: 0,
+      positionsAwaitingReview: 1,
+    });
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: {
+        filledVolumeCents: "1000",
+        filledVolumeSourceKey: "volume",
+        filledVolumeScale: "unknown",
+      },
+    });
+    expect(clientQueries.some((query) => query.sql.includes("INSERT INTO trades"))).toBe(false);
+    const quarantine = clientQueries.find((query) => query.sql.includes("projectionQuarantined',true"));
+    expect(quarantine?.values).toEqual([
+      userId,
+      connectionId,
+      "position:9001",
+      "CTRADER_MCP_VOLUME_SCALE_UNAVAILABLE",
+    ]);
+  });
+
+  it("does not infer unit-cents semantics from a transformed snake-case volume alias", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries, storedExecutions } = harness([deal({
+      filledVolume: undefined,
+      filled_volume: "1000",
+    })]);
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({ insertedExecutions: 1, insertedTrades: 0, positionsAwaitingReview: 1 });
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: {
+        filledVolumeSourceKey: "filled_volume",
+        filledVolumeScale: "unknown",
+      },
+    });
+    expect(clientQueries.some((query) => query.sql.includes("INSERT INTO trades"))).toBe(false);
+  });
+
+  it("fails closed before persistence when volume aliases conflict", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database, storedExecutions } = harness([deal({ volume: "999" })]);
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_DEAL_INVALID",
+      message: "cTrader returned conflicting filledVolume aliases",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+    expect(storedExecutions).toHaveLength(0);
+  });
+
+  it("rejects provider attempts to spoof Edgebook's stored volume provenance envelope", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const providerDeal = deal({ filledVolume: undefined, volume: "1000" });
+    const { engine, database, storedExecutions } = harness([{
+      ...providerDeal,
+      edgebookMcpDeal: {
+        ...providerDeal,
+        volume: undefined,
+        filledVolumeCents: "1000",
+        filledVolumeSourceKey: "filledVolumeCents",
+        filledVolumeScale: "unit_cents",
+      },
+    }]);
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_DEAL_INVALID",
+      message: "cTrader returned reserved internal deal provenance",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+    expect(storedExecutions).toHaveLength(0);
   });
 
   it("fails closed when cTrader indicates that a history page is incomplete", async () => {
@@ -270,6 +390,92 @@ describe("CTraderMcpSyncEngine", () => {
     expect(database.connect).not.toHaveBeenCalled();
   });
 
+  it("accepts accountless rows only under the exact operator-verified per-account token attestation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const providerMetadata = {
+      historyFloorTimestamp: historyFloor,
+      historyFloorKind: "registration",
+      accountlessHistoryAttributionAttestation: accountlessHistoryAttestation(),
+    };
+    const { engine, storedExecutions } = harness([deal({ accountId: undefined })], {
+      balanceResponse: { currency: "USD" },
+      accountInfoResponse: {},
+      providerMetadata,
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: { accountId: "5032134" },
+    });
+  });
+
+  it("rejects an operator accountless-history attestation bound to another account", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database, readClient } = harness([deal({ accountId: undefined })], {
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        accountlessHistoryAttributionAttestation: accountlessHistoryAttestation({
+          externalAccountId: "999999",
+        }),
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNTLESS_ATTESTATION_INVALID",
+    });
+    expect(readClient.getBalance).not.toHaveBeenCalled();
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("rolls back without executions or cursor movement when the operator attestation is revoked after fetch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const providerMetadata = {
+      historyFloorTimestamp: historyFloor,
+      historyFloorKind: "registration",
+      accountlessHistoryAttributionAttestation: accountlessHistoryAttestation(),
+    };
+    const { engine, clientQueries, storedExecutions } = harness([deal({ accountId: undefined })], {
+      balanceResponse: { currency: "USD" },
+      accountInfoResponse: {},
+      providerMetadata,
+      lockedProviderMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNTLESS_ATTESTATION_CHANGED",
+    });
+    expect(storedExecutions).toHaveLength(0);
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trade_executions"))).toBe(false);
+    expect(clientQueries.some(({ sql }) => sql.includes("UPDATE broker_connections SET"))).toBe(false);
+  });
+
+  it("does not let an operator attestation override an explicit deal account mismatch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ accountId: "999999" })], {
+      balanceResponse: { currency: "USD" },
+      accountInfoResponse: {},
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        accountlessHistoryAttributionAttestation: accountlessHistoryAttestation(),
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
   it("accepts a matching history envelope even when session metadata omits account identity", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -309,6 +515,44 @@ describe("CTraderMcpSyncEngine", () => {
     expect(database.connect).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      { accountId: "5032134", currency: "USD" },
+      { accountId: "999999", currency: "USD" },
+    ],
+    {
+      account: { accountId: "5032134", currency: "USD" },
+      result: { accountId: "999999", currency: "USD" },
+    },
+  ])("fails closed when a later account metadata entry conflicts", async (balanceResponse) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ accountId: undefined })], {
+      balanceResponse,
+      accountInfoResponse: {},
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects account metadata arrays beyond the bounded inspection budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ accountId: undefined })], {
+      balanceResponse: Array.from({ length: 5_001 }, () => ({ currency: "USD" })),
+      accountInfoResponse: {},
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_METADATA_INVALID",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
   it("fails closed when a session response root conflicts with its selected nested account", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -336,7 +580,6 @@ describe("CTraderMcpSyncEngine", () => {
       deals: [deal({ accountId: undefined })],
     },
     [deal({ accountId: "5032134", ctidTraderAccountId: "999999" })],
-    [{ accountId: "999999", edgebookMcpDeal: deal({ accountId: "5032134" }) }],
     [deal({ accountId: "999999" })],
   ])("fails closed on an explicit deal-history account mismatch", async (dealsResponse) => {
     vi.useFakeTimers();
