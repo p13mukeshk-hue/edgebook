@@ -15,33 +15,81 @@ const serverManagedTradeFields = new Set([
 const patchMatchesCurrentTrade = (current, fields) => Object.entries(fields || {}).every(([key, value]) =>
   serverManagedTradeFields.has(key) || stableJson(current?.[key]) === stableJson(value));
 
+const tradeCreateFields = new Set([
+  'id', 'legacyFirebaseDocId', 'accountId', 'internalAccountId', 'brokerConnectionId',
+  'source', 'sourceSystem', 'ingestionMethod', 'externalTradeKey', 'brokerTradeId',
+  'symbol', 'asset', 'instrument', 'optionType', 'strike', 'expiry', 'exchange',
+  'product', 'direction', 'entry', 'exit', 'size', 'pnl', 'sl', 'tp', 'isOpen',
+  'date', 'entryAt', 'exitAt', 'entryTime', 'exitTime', 'strategy', 'emotion',
+  'notes', 'tags', 'psychology', 'custom', 'brokerData', 'calculationVersion',
+  'screenshots',
+]);
+
 const tradeCreateFingerprint = trade => {
-  const numberOrNull = value => value == null || value === '' ? null : Number(value);
+  const value = trade || {};
+  const numberOrNull = candidate => candidate == null || candidate === '' ? null : Number(candidate);
+  const textOrNull = candidate => candidate == null ? null : String(candidate).trim();
+  const isoOrNull = candidate => {
+    if (candidate == null || candidate === '') return null;
+    const timestamp = new Date(candidate);
+    return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : String(candidate);
+  };
+  const sourceSystem = String(value.sourceSystem ?? value.source ?? 'manual').trim();
+  const ingestionMethod = value.ingestionMethod ?? (sourceSystem === 'csv' ? 'csv' : sourceSystem === 'manual' ? 'manual' : 'api');
+  const suppliedId = value.legacyFirebaseDocId ?? value.id;
+  const passthrough = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!tradeCreateFields.has(key) && !serverManagedTradeFields.has(key) && key !== 'deleted') {
+      passthrough[key] = item;
+    }
+  }
   return stableJson({
-    id: trade?.id == null ? null : String(trade.id),
-    date: String(trade?.date || '').slice(0, 10),
-    symbol: String(trade?.symbol || '').trim().toUpperCase(),
-    asset: trade?.asset || null,
-    direction: trade?.direction || null,
-    entry: numberOrNull(trade?.entry),
-    exit: numberOrNull(trade?.exit),
-    size: numberOrNull(trade?.size),
-    sl: numberOrNull(trade?.sl),
-    tp: numberOrNull(trade?.tp),
-    strike: numberOrNull(trade?.strike),
-    accountId: trade?.accountId == null ? null : String(trade.accountId),
-    instrument: trade?.instrument || null,
-    optionType: trade?.optionType || null,
-    strategy: trade?.strategy || '',
-    emotion: trade?.emotion || '',
-    notes: trade?.notes || '',
-    custom: trade?.custom || {},
-    psychology: trade?.psychology || {},
+    ...passthrough,
+    legacyId: suppliedId == null ? null : String(suppliedId),
+    accountId: value.accountId == null ? null : String(value.accountId),
+    internalAccountId: value.internalAccountId ?? null,
+    brokerConnectionId: value.brokerConnectionId ?? null,
+    sourceSystem,
+    ingestionMethod,
+    externalTradeKey: textOrNull(value.externalTradeKey),
+    brokerTradeId: textOrNull(value.brokerTradeId),
+    symbol: String(value.symbol ?? '').trim(),
+    asset: textOrNull(value.asset),
+    instrument: textOrNull(value.instrument),
+    optionType: textOrNull(value.optionType),
+    strike: numberOrNull(value.strike),
+    expiry: value.expiry ?? null,
+    exchange: textOrNull(value.exchange),
+    product: textOrNull(value.product),
+    direction: value.direction ?? null,
+    entry: numberOrNull(value.entry),
+    exit: numberOrNull(value.exit),
+    size: numberOrNull(value.size),
+    pnl: numberOrNull(value.pnl),
+    sl: numberOrNull(value.sl),
+    tp: numberOrNull(value.tp),
+    isOpen: value.isOpen ?? null,
+    date: String(value.date ?? '').slice(0, 10),
+    entryAt: isoOrNull(value.entryAt),
+    exitAt: isoOrNull(value.exitAt),
+    entryTime: value.entryTime == null ? null : String(value.entryTime).slice(0, 5),
+    exitTime: value.exitTime == null ? null : String(value.exitTime).slice(0, 5),
+    strategy: textOrNull(value.strategy),
+    emotion: textOrNull(value.emotion),
+    notes: textOrNull(value.notes),
+    tags: Array.isArray(value.tags) ? value.tags.map(item => String(item).trim()) : [],
+    psychology: value.psychology || {},
+    custom: value.custom || {},
+    brokerData: value.brokerData || {},
+    calculationVersion: value.calculationVersion ?? 1,
   });
 };
 
 const isAmbiguousWriteError = error => error?.code === 'NETWORK_ERROR' ||
   error?.status === 409 || Number(error?.status) >= 500;
+
+const isAmbiguousCreateError = error => error?.code === 'NETWORK_ERROR' ||
+  Number(error?.status) >= 500;
 
 export function createVpsDataAdapter(api) {
   let settingsVersion = null;
@@ -142,7 +190,7 @@ export function createVpsDataAdapter(api) {
           // A response can be lost after PostgreSQL committed. Re-read by the
           // stable browser trade ID so the UI reports the committed write as a
           // success and a retry keeps the same Idempotency-Key.
-          if (trade?.id != null && isAmbiguousWriteError(error)) {
+          if (trade?.id != null && isAmbiguousCreateError(error)) {
             try {
               const latest = await api.get(`/trades/${encodeURIComponent(trade.id)}`);
               const current = latest?.trade ?? latest;
@@ -431,10 +479,28 @@ export function createVpsDataAdapter(api) {
       },
     },
     screenshots: {
-      async upload(tradeId, file) {
-        const form = new FormData();
-        form.append('file', file);
-        return api.post(`/trades/${encodeURIComponent(tradeId)}/screenshots`, form);
+      async upload(tradeId, file, { idempotencyKey = crypto.randomUUID() } = {}) {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+          const error = new Error('Screenshot upload requires a stable UUID idempotency key');
+          error.code = 'IDEMPOTENCY_KEY_REQUIRED';
+          throw error;
+        }
+        const upload = () => {
+          const form = new FormData();
+          form.append('file', file);
+          return api.post(`/trades/${encodeURIComponent(tradeId)}/screenshots`, form, {
+            headers: { 'idempotency-key': idempotencyKey.toLowerCase() },
+          });
+        };
+        try {
+          return await upload();
+        } catch (error) {
+          // A response may be lost after both the file and its idempotency
+          // record commit. Replaying the same processed bytes under the same
+          // UUID returns the canonical owned file instead of creating a copy.
+          if (isAmbiguousWriteError(error)) return upload();
+          throw error;
+        }
       },
       delete: fileId => api.delete(`/files/${encodeURIComponent(fileId)}`),
       url: fileId => `/api/files/${encodeURIComponent(fileId)}`,

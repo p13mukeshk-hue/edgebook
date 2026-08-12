@@ -57,6 +57,8 @@ function deal(overrides: Record<string, unknown> = {}) {
 
 function harness(dealsResponse: unknown, options: {
   symbolsResponse?: unknown;
+  balanceResponse?: unknown;
+  accountInfoResponse?: unknown;
   providerMetadata?: Record<string, unknown>;
   syncCursor?: Record<string, unknown>;
   archivedLegacy?: boolean;
@@ -133,10 +135,11 @@ function harness(dealsResponse: unknown, options: {
     end: vi.fn(async () => undefined),
   } as unknown as Database;
   const readClient = {
-    getBalance: vi.fn(async () => ({ accountId: "5032134", currency: "USD" })),
+    getBalance: vi.fn(async () => options.balanceResponse
+      ?? { accountId: "5032134", currency: "USD" }),
     getSymbols: vi.fn(async () => options.symbolsResponse
       ?? [{ id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" }]),
-    getAccountInfo: vi.fn(async () => ({})),
+    getAccountInfo: vi.fn(async () => options.accountInfoResponse ?? {}),
     getDeals: vi.fn(async () => dealsResponse),
     close: vi.fn(async () => undefined),
   } satisfies CTraderMcpReadClientLike;
@@ -150,7 +153,7 @@ afterEach(() => {
 });
 
 describe("CTraderMcpSyncEngine", () => {
-  it("filters by account, projects one position and preserves the registration history floor", async () => {
+  it("projects one position and preserves the registration history floor", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, readClient, clientQueries, storedExecutions } = harness([
@@ -166,7 +169,6 @@ describe("CTraderMcpSyncEngine", () => {
         executionPrice: 2_010,
         executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
       }),
-      deal({ dealId: "other", positionId: "other", accountId: "999999" }),
     ]);
 
     const synced = await engine.syncConnection(connectionId);
@@ -225,12 +227,125 @@ describe("CTraderMcpSyncEngine", () => {
     },
   );
 
-  it("rejects every accountless deal rather than assuming token scope", async () => {
+  it("inherits the exact session-verified account for an accountless deal", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
-    const { engine, database } = harness([deal({ accountId: undefined })]);
+    const { engine, storedExecutions } = harness([deal({ accountId: undefined })]);
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({ fetchedDeals: 1, insertedExecutions: 1 });
+    expect(storedExecutions).toHaveLength(1);
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: { accountId: "5032134" },
+    });
+  });
+
+  it("inherits a matching response-envelope account for accountless deal rows", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, storedExecutions } = harness({
+      ctidTraderAccountId: "5032134",
+      deals: [deal({ accountId: undefined })],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: { accountId: "5032134" },
+    });
+  });
+
+  it("fails closed when neither session metadata nor the response attributes an accountless deal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ accountId: undefined })], {
+      balanceResponse: { currency: "USD" },
+      accountInfoResponse: {},
+    });
+
     await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
       code: "CTRADER_MCP_ACCOUNT_ATTRIBUTION_MISSING",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("accepts a matching history envelope even when session metadata omits account identity", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, storedExecutions } = harness({
+      ctidTraderAccountId: "5032134",
+      deals: [deal({ accountId: undefined })],
+    }, {
+      balanceResponse: { currency: "USD" },
+      accountInfoResponse: {},
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(storedExecutions[0]?.payload).toMatchObject({
+      edgebookMcpDeal: { accountId: "5032134" },
+    });
+  });
+
+  it.each([
+    {
+      balanceResponse: { accountId: "5032134", currency: "USD" },
+      accountInfoResponse: { ctidTraderAccountId: "999999" },
+    },
+    {
+      balanceResponse: { accountId: "5032134", ctidTraderAccountId: "999999", currency: "USD" },
+      accountInfoResponse: {},
+    },
+  ])("fails closed on conflicting session account aliases", async (options) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ accountId: undefined })], options);
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a session response root conflicts with its selected nested account", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({ accountId: undefined })], {
+      balanceResponse: {
+        accountId: "999999",
+        data: { accountId: "5032134", currency: "USD" },
+      },
+      accountInfoResponse: {},
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { ctidTraderAccountId: "999999", deals: [deal({ accountId: undefined })] },
+    { ctidTraderAccountId: "5032134", deals: [deal({ accountId: "999999" })] },
+    {
+      accountId: "5032134",
+      ctidTraderAccountId: "999999",
+      deals: [deal({ accountId: undefined })],
+    },
+    [deal({ accountId: "5032134", ctidTraderAccountId: "999999" })],
+    [{ accountId: "999999", edgebookMcpDeal: deal({ accountId: "5032134" }) }],
+    [deal({ accountId: "999999" })],
+  ])("fails closed on an explicit deal-history account mismatch", async (dealsResponse) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness(dealsResponse);
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+      requiresReauth: true,
     });
     expect(database.connect).not.toHaveBeenCalled();
   });

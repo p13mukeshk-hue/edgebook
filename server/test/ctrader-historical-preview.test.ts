@@ -116,6 +116,8 @@ function harness(options: {
   identityConflict?: Record<string, unknown>;
   floorKind?: string;
   advanceClockOnConnect?: boolean;
+  balanceResponse?: unknown;
+  accountInfoResponse?: unknown;
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
@@ -237,11 +239,12 @@ function harness(options: {
     end: vi.fn(async () => undefined),
   } as unknown as Database;
   const readClient = {
-    getBalance: vi.fn(async () => ({ accountId: "5050060", currency: "USD" })),
+    getBalance: vi.fn(async () => options.balanceResponse
+      ?? { accountId: "5050060", currency: "USD" }),
     getSymbols: vi.fn(async () => options.symbols ?? [
       { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" },
     ]),
-    getAccountInfo: vi.fn(async () => ({})),
+    getAccountInfo: vi.fn(async () => options.accountInfoResponse ?? {}),
     getDeals: vi.fn(async (request: { fromTimestamp: string; toTimestamp: string }) => {
       const from = Date.parse(request.fromTimestamp);
       const to = Date.parse(request.toTimestamp);
@@ -285,6 +288,118 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     expect(candidateData.allowedActions).toEqual(["link_manual", "reject"]);
     expect(candidateData.publishBlockedReason).toBe("closed_provider_pnl_unavailable");
     expect(JSON.parse(String(values?.[13]))).toMatchObject({ pnl: null, quantityLots: "0.1" });
+  });
+
+  it("accepts accountless rows under the exact historical account session in both validation plans", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, candidateRows } = harness({
+      deals: closedPosition().map((row) => ({
+        ...(row as Record<string, unknown>),
+        accountId: undefined,
+      })),
+    });
+
+    const preview = await engine.previewHistoricalImport(importId, connectionId);
+
+    expect(readClient.getDeals.mock.calls.length).toBeGreaterThan(1);
+    expect(preview.counters).toMatchObject({ fetchedDeals: 2, positionsStaged: 1 });
+    expect(candidateRows).toHaveLength(1);
+    const candidateData = JSON.parse(String(candidateRows[0]?.values[12])) as Record<string, unknown>;
+    expect(candidateData).toMatchObject({ accountId: "5050060" });
+  });
+
+  it("fails the historical dual-plan preview on an explicit row account mismatch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      deals: closedPosition().map((row, index) => index === 0
+        ? { ...(row as Record<string, unknown>), accountId: "999999" }
+        : row),
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails the historical dual-plan preview when accountless rows have no positive account proof", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      deals: closedPosition().map((row) => ({
+        ...(row as Record<string, unknown>),
+        accountId: undefined,
+      })),
+      balanceResponse: { currency: "USD" },
+      accountInfoResponse: {},
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_ATTRIBUTION_MISSING",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      balanceResponse: { accountId: "5050060", currency: "USD" },
+      accountInfoResponse: { ctidTraderAccountId: "999999" },
+    },
+    {
+      balanceResponse: { accountId: "5050060", ctidTraderAccountId: "999999", currency: "USD" },
+      accountInfoResponse: {},
+    },
+  ])("fails the historical preview on conflicting session account aliases", async (identity) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness(identity);
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails the historical preview when a session root conflicts with selected nested account metadata", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      balanceResponse: {
+        ctidTraderAccountId: "999999",
+        data: { accountId: "5050060", currency: "USD" },
+      },
+      accountInfoResponse: {},
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails the historical preview on conflicting aliases within a deal row", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      deals: closedPosition().map((row, index) => index === 0
+        ? {
+            ...(row as Record<string, unknown>),
+            accountId: "5050060",
+            ctidTraderAccountId: "999999",
+          }
+        : row),
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+      requiresReauth: true,
+    });
+    expect(database.connect).not.toHaveBeenCalled();
   });
 
   it("stages missing authoritative lot size as execution-only without guessed trade values", async () => {

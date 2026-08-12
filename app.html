@@ -2876,8 +2876,8 @@ const DataStore = {
   async _fsSet(col,id,data){ try{ await window._fbSetDoc(window._fbDoc(window._fbDb,'users',this._uid,col,id),data); return true; }catch(e){ return false; } },
   async _fsDel(col,id){ try{ await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',this._uid,col,id)); return true; }catch(e){ return false; } },
   // Trades — try Firestore, fallback to localStorage
-  // Authenticated users: Firestore is the sole persistent store — skip localStorage.
-  // Guests: localStorage only (no Firestore).
+  // Authenticated users: the VPS is the sole persistent store. Guests keep a
+  // browser-local journal only.
   loadTrades(){
     if(this._uid==='guest'){ try{return JSON.parse(localStorage.getItem(this._tk()))||[];}catch{return[];} }
     return []; // authenticated — populated by loadFromFirestore()
@@ -2911,8 +2911,11 @@ const DataStore = {
       const serialized=JSON.stringify(trade);
       if(this._knownTrades.get(key)===serialized) continue;
       const exists=this._knownTrades.has(key);
-      const pendingScreenshots=(trade.screenshots||[]).filter(ss=>!isPrivateVpsScreenshot(ss));
-      const outboundSource=pendingScreenshots.length?{...trade,screenshots:(trade.screenshots||[]).filter(isPrivateVpsScreenshot)}:trade;
+      const draftScreenshots=(trade.screenshots||[]).filter(isPendingTradeScreenshot);
+      const pendingScreenshots=(trade.screenshots||[]).filter(ss=>!isPrivateVpsScreenshot(ss)&&!isPendingTradeScreenshot(ss));
+      const outboundSource=(pendingScreenshots.length||draftScreenshots.length)
+        ? {...trade,screenshots:(trade.screenshots||[]).filter(isPrivateVpsScreenshot)}
+        : trade;
       const outbound=JSON.parse(JSON.stringify(outboundSource));
       const request=exists
         ? window._vpsData.trades.patch(key,outbound)
@@ -3063,7 +3066,7 @@ const DataStore = {
     if(failed.length) console.error('VPS mood sync failed:',failed.map(result=>result.reason));
     return failed.length===0;
   },
-  // Load trades from Firestore and merge with localStorage
+  // Load the authoritative trade list from the active provider.
   async loadFromFirestore(opts={}){
     if(this._uid==='guest') return;
     try{
@@ -3223,15 +3226,26 @@ function isPrivateVpsScreenshot(screenshot){
   const src=typeof screenshot==='string'?screenshot:screenshot?.src;
   return typeof src==='string'&&/^\/api\/files\/[A-Za-z0-9_-]+/.test(src);
 }
+function screenshotDataUrlToFile(source,name){
+  const match=/^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(String(source||''));
+  if(!match)throw new Error('Screenshot data is invalid');
+  const decoded=atob(match[2].replace(/\s/g,''));
+  const bytes=new Uint8Array(decoded.length);
+  for(let index=0;index<decoded.length;index++)bytes[index]=decoded.charCodeAt(index);
+  return new File([bytes],name,{type:match[1].toLowerCase()});
+}
 async function screenshotRefToFile(screenshot){
   const src=typeof screenshot==='string'?screenshot:screenshot?.src;
   if(typeof src!=='string'||!src) throw new Error('Screenshot source is missing');
+  const rawName=(typeof screenshot==='object'&&screenshot?.name)||src.split('/').pop()?.split('?')[0]||'screenshot';
+  const name=String(rawName).replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,200)||'screenshot';
+  // Decode legacy inline images locally. fetch(data:) is blocked by the
+  // production connect-src policy and must never be part of an upload path.
+  if(src.startsWith('data:image/'))return screenshotDataUrlToFile(src,name);
   const response=await fetch(src,{credentials:src.startsWith('/')?'same-origin':'omit'});
   if(!response.ok) throw new Error(`Screenshot download failed (${response.status})`);
   const blob=await response.blob();
   if(!blob.type.startsWith('image/')) throw new Error('Screenshot source is not an image');
-  const rawName=(typeof screenshot==='object'&&screenshot?.name)||src.split('/').pop()?.split('?')[0]||'screenshot';
-  const name=String(rawName).replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,200)||'screenshot';
   return new File([blob],name,{type:blob.type});
 }
 async function promoteTradeScreenshots(trade,sourceScreenshots=trade?.screenshots||[]){
@@ -3377,6 +3391,8 @@ async function migrateBrowserLocalData(user){
 ══════════════════════════════════════════════════════ */
 let S={}, trades=[], moods=[], CH={};
 let editId=null, moodEmoji='', modalEmoji='';
+let _tradeModalGeneration=0;
+let _tradeDraftCommittedId=null;
 let _tradeDraftId=null, _tradeSaveInFlight=false, _dupResolutionInFlight=false;
 let tradeVoiceRecognition=null, tradeVoiceTarget=null, tradeVoiceBaseText='', tradeVoiceFinalText='', tradeVoiceInterimText='';
 let activeAcctId='all';   // 'all' or account id string
@@ -4188,12 +4204,28 @@ async function resolveDup(action){
       ? {..._pendingManualTrade.incomingTrade}
       : normaliseIncomingTrade(dup.incomingTrade);
     if(!newTrade.id) newTrade.id = Date.now();
-    trades.unshift(newTrade);
-    const saved=await DataStore.saveTrades(trades);
-    if(!saved){
-      await recoverTradesAfterFailedWrite(previous);
-      showToast('Both trades were not saved. Check your connection and retry.','error');
-      return;
+    if(isManual){
+      const persistence=await persistNewTradeWithScreenshotDraft(newTrade);
+      if(!persistence.tradeSaved){
+        showToast('Both trades were not saved. Check your connection and retry.','error');
+        return;
+      }
+      if(!persistence.attachmentsSaved){
+        const remaining=Number(persistence.remaining)||pendingTradeScreenshotDraft.length||1;
+        _pendingDups.splice(_dupIdx,1);
+        _pendingManualTrade=null;
+        closeModal('dup-modal');
+        showToast(`Trade saved, but ${remaining} screenshot${remaining===1?'':'s'} could not be uploaded. The trade form is still open; check your connection and press Save trade to retry.`,'error');
+        return;
+      }
+    }else{
+      trades.unshift(newTrade);
+      const saved=await DataStore.saveTrades(trades);
+      if(!saved){
+        await recoverTradesAfterFailedWrite(previous);
+        showToast('Both trades were not saved. Check your connection and retry.','error');
+        return;
+      }
     }
     refreshAll();
     if(!isManual) await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',uid,'pendingDuplicates',dup.id));
@@ -4225,8 +4257,10 @@ async function resolveDup(action){
 
   if(isManual){
     _tradeDraftId=null;
+    _tradeDraftCommittedId=null;
+    resetPendingTradeScreenshotDraft();
     editId=null;
-    closeModal('trade-modal');
+    closeModal('trade-modal',{force:true});
   }
 
   // Remove current dup (optimistic) and show next or close
@@ -6479,9 +6513,18 @@ function setTradeBrokerOwnedMode(trade){
 }
 
 function openTradeModal(id=null){
+  if(document.getElementById('trade-modal')?.classList.contains('open')&&
+     (pendingTradeScreenshotDraft.length||_uploadingCount>0)){
+    showToast('Finish or discard the current trade screenshot draft before opening another trade.','info');
+    return;
+  }
   stopTradeVoice({quiet:true});
+  _tradeModalGeneration++;
+  resetPendingTradeScreenshotDraft();
+  _uploadingCount=0;
   editId=id;
-  _tradeDraftId=id?null:Date.now();
+  _tradeDraftId=id?null:crypto.randomUUID();
+  _tradeDraftCommittedId=null;
   _tradeSaveInFlight=false;
   updateTradeSaveButton();
   document.getElementById('trade-modal-title').textContent=id?'Edit trade':'Log a trade';
@@ -6560,8 +6603,26 @@ function openTradeModal(id=null){
   }
 }
 function openMoodModal(){ document.getElementById('mood-modal').classList.add('open'); }
-function closeModal(id){
-  if(id==='trade-modal')stopTradeVoice({quiet:true});
+function closeModal(id,options={}){
+  if(id==='trade-modal'){
+    if((_tradeSaveInFlight||_uploadingCount>0)&&!options.force){
+      showToast('Please wait for the current save or screenshot preparation to finish.','info');
+      return;
+    }
+    if(pendingTradeScreenshotDraft.length&&!options.discardPending){
+      const count=pendingTradeScreenshotDraft.length;
+      showConfirm(
+        'Discard pending screenshots?',
+        `${count} screenshot${count===1?' has':'s have'} not reached private VPS storage yet. The saved trade will remain, but these pending images will be discarded.`,
+        ()=>closeModal('trade-modal',{discardPending:true,force:true}),
+      );
+      return;
+    }
+    _tradeModalGeneration++;
+    resetPendingTradeScreenshotDraft();
+    _tradeDraftCommittedId=null;
+    stopTradeVoice({quiet:true});
+  }
   document.getElementById(id).classList.remove('open');
   if(id==='trade-modal'&&!_tradeSaveInFlight)_tradeDraftId=null;
 }
@@ -6912,7 +6973,7 @@ async function saveTrade(){
   const accountId=document.getElementById('t-account').value||null;
   const entryTime = document.getElementById('t-time').value || null;
   const trade={
-    id:editId||_tradeDraftId||(_tradeDraftId=Date.now()), date,
+    id:editId||_tradeDraftId||(_tradeDraftId=crypto.randomUUID()), date,
     entryTime,
     symbol:sym, asset,
     direction:dir, entry, exit, size,
@@ -6956,7 +7017,7 @@ async function saveTrade(){
       return;
     }
     _tradeDraftId=null;
-    closeModal('trade-modal');
+    closeModal('trade-modal',{force:true});
     editId=null;
     refreshAll();
     showToast(DataStore._lastTradeSyncWarning?'Trade updated. A screenshot still needs to be uploaded.':'Trade updated',DataStore._lastTradeSyncWarning?'info':'success');
@@ -6972,34 +7033,8 @@ async function saveTrade(){
   }
   const localDup = findLocalDuplicate(trade,duplicateCandidates);
   if(localDup){ showManualDupModal(trade, localDup); return; }
-  trades.unshift(trade);
-  const synced=await DataStore.saveTrade(trade);
-  if(!synced){
-    if(DataStore._uid==='guest') trades.shift();
-    else {
-      await DataStore.loadFromFirestore({forceServer:true});
-      // The request can commit successfully even if a browser extension,
-      // proxy, or post-save client step loses the acknowledgement. The stable
-      // idempotency ID proves this exact create exists, so treat the canonical
-      // server row as success instead of showing a false failure.
-      const committed=trades.find(item=>String(item.id)===String(trade.id));
-      if(committed){
-        _tradeDraftId=null;
-        closeModal('trade-modal');
-        editId=null;
-        refreshAll();
-        showToast('Trade saved. Edgebook recovered after a delayed confirmation.','success');
-        return;
-      }
-    }
-    showToast(tradeSaveFailureMessage(DataStore._lastTradeSyncError),'error');
-    return;
-  }
-  _tradeDraftId=null;
-  closeModal('trade-modal');
-  editId=null;
-  refreshAll();
-  showToast(DataStore._lastTradeSyncWarning?'Trade logged. A screenshot still needs to be uploaded.':'Trade logged',DataStore._lastTradeSyncWarning?'info':'success');
+  const persistence=await persistNewTradeWithScreenshotDraft(trade);
+  finishNewTradeSave(persistence);
   }finally{
     _tradeSaveInFlight=false;
     updateTradeSaveButton();
@@ -8675,9 +8710,183 @@ function showToast(msg,type='success'){
 /* ══════════════════════════════════════════════════════
    SCREENSHOT MODULE
 ══════════════════════════════════════════════════════ */
-let currentScreenshots = []; // [{src, name}] max 5
+let currentScreenshots = []; // persisted refs plus in-modal draft refs, max 5
+// New trades do not have a server ID when a file is selected. Keep the real
+// compressed File in memory and use a revocable blob URL only for its preview;
+// after the trade create is acknowledged, the exact File is uploaded directly
+// to the private VPS endpoint. Never round-trip a new screenshot through a
+// data: URL: production CSP correctly blocks data: fetches, and a failed
+// promotion would otherwise disappear when the modal closes.
+let pendingTradeScreenshotDraft = []; // [{id,file,previewUrl,name}]
+let pendingTradeScreenshotSequence = 0;
 let lightboxTradeId = null;
 let lightboxIdx = 0;
+
+function isPendingTradeScreenshot(screenshot){
+  return !!(screenshot&&typeof screenshot==='object'&&typeof screenshot.pendingScreenshotId==='string');
+}
+
+function revokePendingTradeScreenshot(item){
+  if(!item?.previewUrl)return;
+  try{ URL.revokeObjectURL(item.previewUrl); }catch{}
+}
+
+function resetPendingTradeScreenshotDraft(){
+  pendingTradeScreenshotDraft.forEach(revokePendingTradeScreenshot);
+  pendingTradeScreenshotDraft=[];
+}
+
+function queuePendingTradeScreenshotFile(file){
+  const previewUrl=URL.createObjectURL(file);
+  const id=`draft-screenshot-${Date.now()}-${++pendingTradeScreenshotSequence}`;
+  const idempotencyKey=crypto.randomUUID();
+  const item={id,file,previewUrl,idempotencyKey,name:String(file?.name||'screenshot').slice(0,255)};
+  pendingTradeScreenshotDraft.push(item);
+  return {pendingScreenshotId:id,src:previewUrl,name:item.name};
+}
+
+function mapVpsScreenshotUpload(result,fallbackName){
+  const stored=result?.screenshot||result?.file||result;
+  const fileId=stored?.fileId||stored?.id;
+  const src=stored?.src||stored?.url||(fileId?window._vpsData.screenshots.url(fileId):'');
+  if(!fileId||!safeScreenshotSource(src))throw new Error('Edgebook did not return a valid screenshot reference');
+  return {...stored,fileId,src,name:stored?.name||fallbackName||'screenshot'};
+}
+
+async function uploadVpsScreenshotFile(tradeId,file,{idempotencyKey=crypto.randomUUID()}={}){
+  if(window._dataMode!=='vps'||!window._vpsData||!tradeId)throw new Error('Private screenshot storage is not ready');
+  const result=await window._vpsData.screenshots.upload(String(tradeId),file,{idempotencyKey});
+  return mapVpsScreenshotUpload(result,file?.name);
+}
+
+function syncCurrentScreenshotsToTrade(trade){
+  if(!trade)return;
+  trade.screenshots=[...currentScreenshots];
+  const liveTrade=trades.find(item=>String(item?.id)===String(trade.id));
+  if(liveTrade&&liveTrade!==trade)liveTrade.screenshots=[...currentScreenshots];
+  DataStore._knownTrades.set(String(trade.id),JSON.stringify(liveTrade||trade));
+}
+
+async function persistPendingTradeScreenshots(trade){
+  if(!pendingTradeScreenshotDraft.length)return [];
+  if(!trade?.id)throw new Error('The trade must be saved before its screenshots can be uploaded');
+  const uploaded=[];
+  for(const item of [...pendingTradeScreenshotDraft]){
+    let stored;
+    try{
+      // Upload the retained File itself. This deliberately performs no
+      // data-URL or blob-URL network conversion.
+      stored=await uploadVpsScreenshotFile(trade.id,item.file,{idempotencyKey:item.idempotencyKey});
+    }catch(cause){
+      syncCurrentScreenshotsToTrade(trade);
+      renderScreenshotPreviews();
+      const remaining=pendingTradeScreenshotDraft.length;
+      const error=new Error(`${remaining} screenshot${remaining===1?'':'s'} still need${remaining===1?'s':''} to be uploaded`);
+      error.code='SCREENSHOT_UPLOAD_PENDING';
+      error.cause=cause;
+      error.remaining=remaining;
+      throw error;
+    }
+    const previewIndex=currentScreenshots.findIndex(screenshot=>screenshot?.pendingScreenshotId===item.id);
+    if(previewIndex>=0)currentScreenshots.splice(previewIndex,1,stored);
+    else currentScreenshots.push(stored);
+    const draftIndex=pendingTradeScreenshotDraft.findIndex(candidate=>candidate.id===item.id);
+    if(draftIndex>=0)pendingTradeScreenshotDraft.splice(draftIndex,1);
+    revokePendingTradeScreenshot(item);
+    uploaded.push(stored);
+    syncCurrentScreenshotsToTrade(trade);
+  }
+  renderScreenshotPreviews();
+  return uploaded;
+}
+
+function restorePendingScreenshotPreviews(canonicalTrade){
+  const canonical=(canonicalTrade?.screenshots||[]).filter(screenshot=>!isPendingTradeScreenshot(screenshot));
+  const pending=pendingTradeScreenshotDraft.map(item=>({
+    pendingScreenshotId:item.id,
+    src:item.previewUrl,
+    name:item.name,
+  }));
+  currentScreenshots=[...canonical,...pending].slice(0,5);
+  renderScreenshotPreviews();
+}
+
+async function reloadCommittedTradeKeepingScreenshotDraft(tradeId){
+  await DataStore.loadFromFirestore({forceServer:true});
+  const committed=trades.find(item=>String(item?.id)===String(tradeId));
+  if(committed)restorePendingScreenshotPreviews(committed);
+  return committed||null;
+}
+
+async function persistNewTradeWithScreenshotDraft(trade){
+  const committedDraft=String(_tradeDraftCommittedId||'')===String(trade.id);
+  if(!committedDraft&&DataStore._knownTrades.has(String(trade.id))){
+    const error=new Error('This trade draft ID is already used by another saved trade');
+    error.code='TRADE_DRAFT_ID_CONFLICT';
+    DataStore._lastTradeSyncError=error;
+    return {tradeSaved:false,attachmentsSaved:false,error};
+  }
+  const existingDraftIndex=trades.findIndex(item=>String(item?.id)===String(trade.id));
+  const previousDraftTrade=committedDraft&&existingDraftIndex>=0?trades[existingDraftIndex]:null;
+  if(!committedDraft&&existingDraftIndex>=0){
+    const error=new Error('This trade draft conflicts with an existing journal row');
+    error.code='TRADE_DRAFT_ID_CONFLICT';
+    DataStore._lastTradeSyncError=error;
+    return {tradeSaved:false,attachmentsSaved:false,error};
+  }
+  if(Number.isInteger(previousDraftTrade?.version))trade.version=previousDraftTrade.version;
+  if(existingDraftIndex>=0)trades[existingDraftIndex]=trade;
+  else trades.unshift(trade);
+
+  const synced=await DataStore.saveTrade(trade);
+  if(!synced){
+    if(existingDraftIndex>=0)trades[existingDraftIndex]=previousDraftTrade;
+    else trades=trades.filter(item=>String(item?.id)!==String(trade.id));
+    // createVpsDataAdapter already performs the only safe lost-response
+    // recovery: an ambiguous transport/5xx failure plus an exact canonical
+    // trade fingerprint. A generic 4xx/409 or same-ID occupant must never be
+    // treated as this draft, because attaching its screenshots would corrupt
+    // another trade.
+    return {tradeSaved:false,attachmentsSaved:false};
+  }
+  _tradeDraftCommittedId=String(trade.id);
+
+  try{
+    await persistPendingTradeScreenshots(trade);
+  }catch(error){
+    DataStore._lastTradeSyncWarning=error;
+    try{ await reloadCommittedTradeKeepingScreenshotDraft(trade.id); }
+    catch{ restorePendingScreenshotPreviews(trade); }
+    refreshAll();
+    return {
+      tradeSaved:true,
+      attachmentsSaved:false,
+      remaining:Number(error?.remaining)||pendingTradeScreenshotDraft.length||1,
+      error,
+    };
+  }
+  return {tradeSaved:true,attachmentsSaved:true};
+}
+
+function finishNewTradeSave(result){
+  if(!result?.tradeSaved){
+    showToast(tradeSaveFailureMessage(DataStore._lastTradeSyncError),'error');
+    return false;
+  }
+  if(!result.attachmentsSaved){
+    const remaining=Number(result.remaining)||1;
+    showToast(`Trade saved, but ${remaining} screenshot${remaining===1?'':'s'} could not be uploaded. The form is still open; check your connection and press Save trade to retry.`,'error');
+    return false;
+  }
+  _tradeDraftId=null;
+  _tradeDraftCommittedId=null;
+  resetPendingTradeScreenshotDraft();
+  closeModal('trade-modal',{force:true});
+  editId=null;
+  refreshAll();
+  showToast('Trade logged','success');
+  return true;
+}
 
 function renderScreenshotPreviews(){
   const preview = document.getElementById('ss-preview');
@@ -8731,19 +8940,21 @@ function compressImage(file){
 }
 
 // Upload a compressed screenshot through the selected complete data provider.
-async function uploadScreenshotFile(file){
+async function uploadScreenshotFile(file,context={}){
+  const generation=context.generation??_tradeModalGeneration;
+  const targetTradeId=context.targetTradeId==null?null:String(context.targetTradeId);
   const blob = await compressImage(file);
-  if(window._dataMode==='vps' && window._vpsData && editId){
-    const uploadFile=new File([blob],file.name,{type:blob.type||'image/jpeg'});
-    const result=await window._vpsData.screenshots.upload(String(editId),uploadFile);
-    const stored=result?.screenshot||result?.file||result;
-    const fileId=stored?.fileId||stored?.id;
-    return {
-      ...stored,
-      fileId:fileId||null,
-      src:stored?.src||stored?.url||(fileId?window._vpsData.screenshots.url(fileId):''),
-      name:stored?.name||file.name,
-    };
+  if(generation!==_tradeModalGeneration||!document.getElementById('trade-modal')?.classList.contains('open')){
+    const error=new Error('Screenshot preparation belongs to a closed trade form');
+    error.code='STALE_SCREENSHOT_DRAFT';
+    throw error;
+  }
+  const uploadFile=new File([blob],file.name,{type:blob.type||'image/jpeg'});
+  if(window._dataMode==='vps' && window._vpsData){
+    // Existing trades can upload immediately. A new trade queues the actual
+    // File until its create request returns a canonical ID.
+    if(targetTradeId)return uploadVpsScreenshotFile(targetTradeId,uploadFile);
+    return queuePendingTradeScreenshotFile(uploadFile);
   }
   const uid = window._fbAuth?.currentUser?.uid;
 
@@ -8769,6 +8980,10 @@ async function uploadScreenshotFile(file){
 }
 
 function handleFileSelect(files){
+  const uploadContext={
+    generation:_tradeModalGeneration,
+    targetTradeId:editId==null?null:String(editId),
+  };
   const selected=Array.from(files);
   const supported=selected.filter(isSupportedScreenshotFile);
   const rejected=selected.length-supported.length;
@@ -8802,10 +9017,10 @@ function handleFileSelect(files){
   toAdd.forEach(async (file, idx)=>{
     let screenshot = null;
     try{
-      screenshot = await uploadScreenshotFile(file);
+      screenshot = await uploadScreenshotFile(file,uploadContext);
     } catch(err){
       console.error('Screenshot upload failed:', err.message);
-      showToast('Screenshot upload failed: '+err.message, 'error');
+      if(err?.code!=='STALE_SCREENSHOT_DRAFT')showToast('Screenshot upload failed: '+err.message, 'error');
     }
     if(screenshot) currentScreenshots.push(screenshot);
     loaded++;
@@ -8836,6 +9051,16 @@ function addImageUrl(){
 
 async function removeScreenshot(i){
   const screenshot=currentScreenshots[i];
+  if(isPendingTradeScreenshot(screenshot)){
+    const draftIndex=pendingTradeScreenshotDraft.findIndex(item=>item.id===screenshot.pendingScreenshotId);
+    if(draftIndex>=0){
+      const [item]=pendingTradeScreenshotDraft.splice(draftIndex,1);
+      revokePendingTradeScreenshot(item);
+    }
+    currentScreenshots.splice(i,1);
+    renderScreenshotPreviews();
+    return;
+  }
   const fileId=screenshot?.fileId||(isPrivateVpsScreenshot(screenshot)?screenshot?.id:null);
   if(window._dataMode==='vps'&&window._vpsData&&editId&&fileId){
     try{
@@ -9481,6 +9706,30 @@ async function hmAddScreenshots(tradeId, files){
   if(supported.length<selected.length)showToast(`${selected.length-supported.length} file(s) skipped — use PNG, JPG or WebP`,'error');
   const toAdd = supported.slice(0, remaining);
   if(!toAdd.length) return;
+
+  if(window._dataMode==='vps'&&window._vpsData){
+    const failures=[];
+    for(const file of toAdd){
+      const idempotencyKey=crypto.randomUUID();
+      try{
+        const blob=await compressImage(file);
+        const uploadFile=new File([blob],file.name,{type:blob.type||'image/jpeg'});
+        const stored=await uploadVpsScreenshotFile(t.id,uploadFile,{idempotencyKey});
+        t.screenshots.push(stored);
+      }catch(error){ failures.push(error); }
+    }
+    DataStore._knownTrades.set(String(t.id),JSON.stringify(t));
+    if(failures.length){
+      // Some uploads can commit before another fails. Reloading shows every
+      // canonical file while never rolling a successful private object back.
+      try{ await DataStore.loadFromFirestore({forceServer:true}); }catch{}
+      renderHeatmap();
+      showToast(`${failures.length} screenshot${failures.length===1?'':'s'} could not be uploaded. Check your connection and retry.`,'error');
+    }else renderHeatmap();
+    if(toAdd.length < supported.length) showToast(`Max 5 screenshots — ${supported.length-toAdd.length} skipped`,'error');
+    return;
+  }
+
   const previous=[...t.screenshots];
   try{
     const additions=await Promise.all(toAdd.map(file=>new Promise((resolve,reject)=>{

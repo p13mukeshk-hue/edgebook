@@ -272,6 +272,11 @@ const browserDataMigrationSource = sourceBetween('async function migrateBrowserL
 const migrationExportSource = sourceBetween('function exportMigrationBundle', 'function importSettings');
 const dataStoreSource = sourceBetween('const DataStore =', 'function readBrowserJson');
 const tradeSaveSource = sourceBetween('async function saveTrade', '/* ═══ END TRADE FORM ═══ */');
+const screenshotDraftUploadSource = sourceBetween('async function persistPendingTradeScreenshots', 'function restorePendingScreenshotPreviews');
+const newTradeScreenshotPersistenceSource = sourceBetween('async function persistNewTradeWithScreenshotDraft', 'function renderScreenshotPreviews');
+const screenshotSelectionSource = sourceBetween('async function uploadScreenshotFile', 'function handleFileSelect');
+const heatmapScreenshotSource = sourceBetween('async function hmAddScreenshots', '/* ══════════════════════════════════════════════════════\n   CSV IMPORT MODULE');
+const closeModalSource = sourceBetween('function closeModal', 'function showConfirm');
 const duplicateResolutionSource = sourceBetween('async function resolveDup', 'function showManualDupModal');
 const jsonImportSource = sourceBetween('function importTradesJSON', 'function csvFormulaSafeText');
 const csvImportCommitSource = sourceBetween('async function csvImportTrades', 'let ddRange');
@@ -280,13 +285,14 @@ requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]
 requireMatch(dataStoreSource, /async _syncVpsTrades\(items\)[\s\S]*?const results=await Promise\.allSettled\(pending\);[\s\S]*?return failed\.length===0;/, 'trade save awaits every VPS mutation');
 requireMatch(dataStoreSource, /saveTrade\(trade\)\{[\s\S]{0,700}?_syncVpsTrades\(\[trade\]\)/, 'trade modal persists only its owned mutation');
 requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrade\((?:trades\[i\]|trade)\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(/, 'manual trade success waits for targeted persistence');
-requireMatch(tradeSaveSource, /if\(!synced\)[\s\S]*?loadFromFirestore\(\{forceServer:true\}\)[\s\S]*?String\(item\.id\)===String\(trade\.id\)[\s\S]*?delayed confirmation/, 'committed trade recovery closes a false-failure create');
+rejectMatch(newTradeScreenshotPersistenceSource, /if\(!synced\)[\s\S]{0,500}?reloadCommittedTradeKeepingScreenshotDraft/, 'unsafe same-ID recovery after failed trade create');
 requireMatch(dataStoreSource, /_lastTradeSyncWarning=null[\s\S]*?promoteTradeScreenshots[\s\S]*?catch\(error\)[\s\S]*?_lastTradeSyncWarning=error[\s\S]*?const results=await Promise\.allSettled/, 'screenshot post-processing cannot misreport a committed trade as unsaved');
 requireMatch(tradeSaveSource, /if\(_tradeSaveInFlight\)return;[\s\S]*?_tradeSaveInFlight=true;[\s\S]*?finally[\s\S]*?_tradeSaveInFlight=false/, 'manual trade submit has an in-flight double-click lock');
-requireMatch(tradeSaveSource, /id:editId\|\|_tradeDraftId\|\|\(_tradeDraftId=Date\.now\(\)\)/, 'manual trade retries retain a stable idempotency ID');
+requireMatch(tradeSaveSource, /id:editId\|\|_tradeDraftId\|\|\(_tradeDraftId=crypto\.randomUUID\(\)\)/, 'manual trade retries retain a stable collision-resistant idempotency ID');
 requireMatch(tradeSaveSource, /await loadManualDuplicateCandidates\(\)[\s\S]*?findLocalDuplicate\(trade,duplicateCandidates\)/, 'manual trade duplicate check uses the authoritative VPS list');
 requireMatch(duplicateResolutionSource, /duplicateNumericClose\(existing\.entry,incoming\.entry,\.005\)[\s\S]*?duplicateNumericClose\(existing\.exit,incoming\.exit,\.005\)[\s\S]*?duplicateNumericClose\(existing\.size,incoming\.size,\.02\)/, 'manual duplicate check covers near entry exit and size values');
-requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousWriteError\(error\)[\s\S]*?api\.get\(`\/trades\/\$\{encodeURIComponent\(trade\.id\)\}`\)/, 'lost trade-create response reconciliation');
+requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousCreateError\(error\)[\s\S]*?api\.get\([\s\S]*?encodeURIComponent\(trade\.id\)[\s\S]*?tradeCreateFingerprint\(current\) === tradeCreateFingerprint\(trade\)/, 'lost trade-create response reconciliation');
+requireMatch(dataAdapter, /tradeCreateFingerprint[\s\S]*?pnl:[\s\S]*?entryTime:[\s\S]*?psychology:[\s\S]*?brokerData:/, 'complete normalized trade-create recovery fingerprint');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
 requireMatch(csvImportCommitSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite[\s\S]*?return;[\s\S]*?closeModal/, 'CSV import waits for persistence before closing');
@@ -762,6 +768,17 @@ requireMatch(app, /accept=["']image\/png,image\/jpeg,image\/webp["']/, 'restrict
 requireMatch(app, /SCREENSHOT_MIME_TYPES=new Set\(\[['"]image\/png['"],['"]image\/jpeg['"],['"]image\/webp['"]\]\)/, 'screenshot runtime MIME allowlist');
 requireMatch(app, /const pendingScreenshots=\(trade\.screenshots\|\|\[\]\)\.filter/, 'screenshot promotion on existing and new trades');
 rejectMatch(app, /pendingScreenshots\s*=\s*!exists\s*\?/, 'new-trade-only screenshot promotion');
+requireMatch(app, /pendingTradeScreenshotDraft\s*=\s*\[\][\s\S]*?queuePendingTradeScreenshotFile/, 'new-trade screenshot retains its File in a modal draft');
+requireMatch(app, /const idempotencyKey=crypto\.randomUUID\(\)[\s\S]*?pendingTradeScreenshotDraft\.push\(item\)/, 'new-trade screenshot retains a stable upload idempotency key');
+requireMatch(screenshotDraftUploadSource, /uploadVpsScreenshotFile\(trade\.id,item\.file,\{idempotencyKey:item\.idempotencyKey\}\)/, 'new-trade screenshot uploads the retained File with its stable key after canonical create');
+rejectMatch(screenshotDraftUploadSource, /fetch\s*\(/, 'data or blob fetch in new-trade screenshot upload');
+requireMatch(newTradeScreenshotPersistenceSource, /previousDraftTrade\?\.version[\s\S]*?trade\.version=previousDraftTrade\.version/, 'attachment retry carries canonical optimistic-concurrency version');
+requireMatch(newTradeScreenshotPersistenceSource, /attachmentsSaved:false[\s\S]*?form is still open/, 'failed attachment keeps the new-trade form recoverable');
+requireMatch(newTradeScreenshotPersistenceSource, /attachmentsSaved:true[\s\S]*?if\(!result\.attachmentsSaved\)[\s\S]*?return false;[\s\S]*?closeModal\(['"]trade-modal['"],\{force:true\}\)/, 'new-trade modal closes only after every pending attachment succeeds');
+requireMatch(screenshotSelectionSource, /const generation=context\.generation[\s\S]*?const targetTradeId=context\.targetTradeId[\s\S]*?generation!==_tradeModalGeneration[\s\S]*?uploadVpsScreenshotFile\(targetTradeId,uploadFile\)/, 'screenshot selection binds modal generation and target trade before compression');
+rejectMatch(screenshotSelectionSource, /uploadVpsScreenshotFile\(editId|screenshots\.upload\(String\(editId\)/, 'mutable edit ID after asynchronous screenshot compression');
+requireMatch(heatmapScreenshotSource, /const uploadFile=new File[\s\S]*?uploadVpsScreenshotFile\(t\.id,uploadFile,\{idempotencyKey\}\)[\s\S]*?loadFromFirestore\(\{forceServer:true\}\)/, 'heatmap performs direct private upload with partial-success reconciliation');
+requireMatch(closeModalSource, /pendingTradeScreenshotDraft\.length[\s\S]*?Discard pending screenshots[\s\S]*?discardPending:true/, 'trade modal requires explicit confirmation before discarding pending files');
 
 // cTrader keeps official read-only OAuth as the primary route. An explicitly
 // enabled Remote MCP compatibility route accepts the old copied configuration
@@ -1679,6 +1696,159 @@ try {
 }
 
 try {
+  // Model the critical create -> attachment failure -> Save retry path without
+  // executing the large form reader. The first write creates once, failure
+  // keeps the modal/draft open, retry carries canonical version and uploads
+  // the same File/key, and only then may the modal close.
+  const canonicalTrade = { id: 'draft-trade-1', symbol: 'GOLD', entry: 100, version: 1, screenshots: [] };
+  const retainedFile = { name: 'chart.jpg' };
+  const retainedKey = '11111111-1111-4111-8111-111111111111';
+  let tradeWrites = 0;
+  let uploadAttempts = 0;
+  let closeCalls = 0;
+  let refreshCalls = 0;
+  let retryMode = false;
+  const draft = { id: 'draft-1', file: retainedFile, previewUrl: 'blob:fixture', idempotencyKey: retainedKey, name: retainedFile.name };
+  const fixtureSource = `
+    let trades=globalThis.seedTrades;
+    let currentScreenshots=[{pendingScreenshotId:'draft-1',src:'blob:fixture',name:'chart.jpg'}];
+    let pendingTradeScreenshotDraft=[globalThis.seedDraft];
+    let _tradeDraftId='draft-trade-1';
+    let _tradeDraftCommittedId=null;
+    let editId=null;
+    function syncCurrentScreenshotsToTrade(trade){ trade.screenshots=[...currentScreenshots]; const live=trades.find(item=>String(item.id)===String(trade.id)); if(live&&live!==trade)live.screenshots=[...currentScreenshots]; DataStore._knownTrades.set(String(trade.id),JSON.stringify(live||trade)); }
+    function revokePendingTradeScreenshot(){}
+    ${screenshotDraftUploadSource}
+    function restorePendingScreenshotPreviews(canonicalTrade){ currentScreenshots=[...(canonicalTrade.screenshots||[]),...pendingTradeScreenshotDraft.map(item=>({pendingScreenshotId:item.id,src:item.previewUrl,name:item.name}))]; }
+    async function reloadCommittedTradeKeepingScreenshotDraft(tradeId){ const committed=trades.find(item=>String(item.id)===String(tradeId)); if(committed)restorePendingScreenshotPreviews(committed); return committed||null; }
+    ${newTradeScreenshotPersistenceSource}
+  `;
+  const { exports: persistence } = evaluateSecurityFixture(
+    fixtureSource,
+    {
+      seedTrades: [],
+      seedDraft: draft,
+      window: { _dataMode: 'vps', _vpsData: { screenshots: { url: id => `/api/files/${id}` } } },
+      crypto: { randomUUID: () => retainedKey },
+      DataStore: {
+        _uid: 'user-1',
+        _knownTrades: new Map(),
+        _lastTradeSyncError: null,
+        _lastTradeSyncWarning: null,
+        async saveTrade(trade) {
+          tradeWrites += 1;
+          if (tradeWrites === 1) {
+            Object.assign(trade, canonicalTrade);
+            this._knownTrades.set(String(trade.id), JSON.stringify(trade));
+            persistence?.setTrades?.([trade]);
+            return true;
+          }
+          if (trade.version !== 1) throw new Error('retry lost canonical version');
+          return true;
+        },
+        async loadFromFirestore() {},
+      },
+      async uploadVpsScreenshotFile(tradeId, file, options) {
+        uploadAttempts += 1;
+        if (tradeId !== canonicalTrade.id || file !== retainedFile || options?.idempotencyKey !== retainedKey) {
+          throw new Error('attachment retry changed its target, File, or idempotency key');
+        }
+        if (!retryMode) throw new Error('temporary upload failure');
+        return { id: 'file-1', fileId: 'file-1', src: '/api/files/file-1', name: file.name };
+      },
+      renderScreenshotPreviews() {},
+      refreshAll() { refreshCalls += 1; },
+      tradeSaveFailureMessage: () => 'failed',
+      showToast() {},
+      resetPendingTradeScreenshotDraft() {},
+      closeModal(id) { if (id === 'trade-modal') closeCalls += 1; },
+      URL: { revokeObjectURL() {} },
+    },
+    '{persistNewTradeWithScreenshotDraft,finishNewTradeSave,setTrades:value=>{trades=value},getState:()=>({trades,currentScreenshots,pendingTradeScreenshotDraft})}',
+  );
+  const intended = { id: canonicalTrade.id, symbol: canonicalTrade.symbol, entry: canonicalTrade.entry, screenshots: [{ pendingScreenshotId: 'draft-1', src: 'blob:fixture', name: 'chart.jpg' }] };
+  const first = await persistence.persistNewTradeWithScreenshotDraft(intended);
+  persistence.finishNewTradeSave(first);
+  if (!first.tradeSaved || first.attachmentsSaved || tradeWrites !== 1 || uploadAttempts !== 1 || closeCalls !== 0 || persistence.getState().pendingTradeScreenshotDraft.length !== 1) {
+    failures.push('Failed new-trade screenshot upload did not keep one durable trade and a recoverable open draft');
+  }
+  retryMode = true;
+  const retry = { ...intended, screenshots: [...persistence.getState().currentScreenshots] };
+  const second = await persistence.persistNewTradeWithScreenshotDraft(retry);
+  persistence.finishNewTradeSave(second);
+  if (!second.attachmentsSaved || tradeWrites !== 2 || uploadAttempts !== 2 || closeCalls !== 1 || persistence.getState().pendingTradeScreenshotDraft.length !== 0 || refreshCalls < 1) {
+    failures.push('New-trade screenshot retry duplicated the trade, changed its upload key, or closed before attachment success');
+  }
+} catch (error) {
+  failures.push(`New-trade screenshot retry fixture failed: ${error.message}`);
+}
+
+try {
+  // A failed write against a stable ID that belongs to a different trade must
+  // not be reclassified as success and must never receive this draft's image.
+  let uploadCalls = 0;
+  let closeCalls = 0;
+  const fixtureSource = `
+    let trades=[{id:'occupied-id',symbol:'SILVER',entry:200,version:9,screenshots:[]}];
+    let currentScreenshots=[{pendingScreenshotId:'draft-1',src:'blob:fixture',name:'chart.jpg'}];
+    let pendingTradeScreenshotDraft=[{id:'draft-1',file:{name:'chart.jpg'},previewUrl:'blob:fixture',idempotencyKey:'22222222-2222-4222-8222-222222222222',name:'chart.jpg'}];
+    let _tradeDraftId='occupied-id'; let _tradeDraftCommittedId=null; let editId=null;
+    function syncCurrentScreenshotsToTrade(){}
+    function revokePendingTradeScreenshot(){}
+    ${screenshotDraftUploadSource}
+    function restorePendingScreenshotPreviews(){}
+    async function reloadCommittedTradeKeepingScreenshotDraft(){ return trades[0]; }
+    ${newTradeScreenshotPersistenceSource}
+  `;
+  const { exports: collision } = evaluateSecurityFixture(
+    fixtureSource,
+    {
+      window: { _dataMode: 'vps', _vpsData: { screenshots: { url: id => `/api/files/${id}` } } },
+      DataStore: { _uid: 'user-1', _knownTrades: new Map(), _lastTradeSyncError: { status: 409 }, _lastTradeSyncWarning: null, saveTrade: async () => false },
+      uploadVpsScreenshotFile: async () => { uploadCalls += 1; },
+      renderScreenshotPreviews() {}, refreshAll() {}, tradeSaveFailureMessage: () => 'conflict', showToast() {},
+      resetPendingTradeScreenshotDraft() {}, closeModal() { closeCalls += 1; }, URL: { revokeObjectURL() {} },
+    },
+    '{persistNewTradeWithScreenshotDraft,finishNewTradeSave}',
+  );
+  const result = await collision.persistNewTradeWithScreenshotDraft({ id: 'occupied-id', symbol: 'GOLD', entry: 100, screenshots: [] });
+  collision.finishNewTradeSave(result);
+  if (result.tradeSaved || uploadCalls !== 0 || closeCalls !== 0) failures.push('Same-ID conflicting trade received an unrelated screenshot draft');
+} catch (error) {
+  failures.push(`Screenshot stable-ID collision fixture failed: ${error.message}`);
+}
+
+try {
+  // Compression is asynchronous. If modal A closes and modal B opens before
+  // it finishes, A's completion must be rejected and never target B's trade.
+  let resolveCompression;
+  let uploadCalls = 0;
+  const compression = new Promise(resolve => { resolveCompression = resolve; });
+  const { exports: selection } = evaluateSecurityFixture(
+    `let _tradeModalGeneration=1; ${screenshotSelectionSource}`,
+    {
+      compressImage: () => compression,
+      document: { getElementById: () => ({ classList: { contains: () => true } }) },
+      File: class FixtureFile { constructor(parts, name, options) { this.parts=parts; this.name=name; this.type=options?.type; } },
+      window: { _dataMode: 'vps', _vpsData: {} },
+      uploadVpsScreenshotFile: async () => { uploadCalls += 1; },
+      queuePendingTradeScreenshotFile: () => { uploadCalls += 1; },
+    },
+    '{uploadScreenshotFile,setGeneration:value=>{_tradeModalGeneration=value}}',
+  );
+  const pending = selection.uploadScreenshotFile({ name: 'a.jpg' }, { generation: 1, targetTradeId: 'trade-a' });
+  selection.setGeneration(2);
+  resolveCompression({ type: 'image/jpeg' });
+  let staleError = null;
+  try { await pending; } catch (error) { staleError = error; }
+  if (staleError?.code !== 'STALE_SCREENSHOT_DRAFT' || uploadCalls !== 0) {
+    failures.push('A closed trade modal uploaded its late screenshot into a newer modal');
+  }
+} catch (error) {
+  failures.push(`Screenshot modal-generation fixture failed: ${error.message}`);
+}
+
+try {
   const document = makeFakeDocument();
   const heatmapCellSource = sourceBetween('function hmHeatClass', 'function renderHeatmap');
   const { exports: heatmapCell } = evaluateSecurityFixture(
@@ -2243,6 +2413,34 @@ if (!rejectedUnprovenHistoricalStart) {
   failures.push('Historical-preview recovery accepted a canonical row without the exact client request ID');
 }
 
+// Screenshot uploads replay the exact multipart request after an ambiguous
+// response. The stable UUID survives the retry so the server can return its
+// already-owned file instead of creating a second row/object.
+const screenshotCalls = [];
+const screenshotRequestId = '55555555-5555-4555-8555-555555555555';
+const screenshotFile = new Blob(['chart-fixture'], { type: 'image/png' });
+let loseScreenshotResponse = true;
+const screenshotData = createVpsDataAdapter({
+  async post(requestPath, body, options) {
+    screenshotCalls.push({ requestPath, body, options });
+    if (loseScreenshotResponse) {
+      loseScreenshotResponse = false;
+      const error = new Error('screenshot response lost after commit');
+      error.code = 'NETWORK_ERROR';
+      throw error;
+    }
+    return { file: { id: 'file-1', tradeRecordId: 'trade-1' } };
+  },
+});
+const recoveredScreenshot = await screenshotData.screenshots.upload('trade-1', screenshotFile, {
+  idempotencyKey: screenshotRequestId,
+});
+if (recoveredScreenshot?.file?.id !== 'file-1' || screenshotCalls.length !== 2 ||
+    screenshotCalls.some(call => call.options?.headers?.['idempotency-key'] !== screenshotRequestId) ||
+    screenshotCalls.some(call => !(call.body instanceof FormData))) {
+  failures.push('Lost screenshot response did not replay the exact stable idempotency request');
+}
+
 // Verify exact response wrappers and optimistic concurrency propagation.
 const contractCalls = [];
 const contractApi = {
@@ -2325,6 +2523,64 @@ const recoveredTradeCreate = createVpsDataAdapter({
 const recoveredTrade = await recoveredTradeCreate.trades.create(lostResponseTrade);
 if (recoveredTrade?.trade?.id !== 'browser-draft-1' || tradeCreatePosts !== 1 || tradeCreateRecoveryReads !== 1 || tradeCreateHeader !== 'trade:browser-draft-1') {
   failures.push('Lost trade-create response was not reconciled with the stable idempotency ID');
+}
+
+// Recovery must compare every normalized outbound user field. A same-ID row
+// that differs only in a previously omitted financial, journal, timing,
+// provenance, or broker field is not proof that this request committed.
+const richLostTrade = {
+  ...lostResponseTrade,
+  pnl: 600,
+  entryTime: '10:05:30',
+  exitTime: '10:25:45',
+  source: 'manual',
+  sourceSystem: 'manual',
+  ingestionMethod: 'manual',
+  psychology: { confidence: 8, preTradeThought: 'patient' },
+  custom: { setupGrade: 'A' },
+  brokerData: { providerRef: 'verified-1' },
+};
+for (const [label, canonicalChange] of [
+  ['P&L', { pnl: 601 }],
+  ['psychology', { psychology: { confidence: 2, preTradeThought: 'patient' } }],
+  ['time', { entryTime: '10:06' }],
+  ['source', { source: 'csv', sourceSystem: 'csv', ingestionMethod: 'csv' }],
+  ['broker data', { brokerData: { providerRef: 'different' } }],
+]) {
+  let recoveryReads = 0;
+  const data = createVpsDataAdapter({
+    async post() {
+      const error = new Error('create response lost after commit');
+      error.code = 'NETWORK_ERROR';
+      throw error;
+    },
+    async get() {
+      recoveryReads += 1;
+      return { trade: { ...richLostTrade, ...canonicalChange, version: 1 } };
+    },
+  });
+  let rejected = false;
+  try { await data.trades.create(richLostTrade); }
+  catch (error) { rejected = error?.latestTrade != null; }
+  if (!rejected || recoveryReads !== 1) {
+    failures.push(`Lost trade-create recovery accepted a same-ID row with different ${label}`);
+  }
+}
+
+let conflictRecoveryReads = 0;
+const conflictingTradeCreate = createVpsDataAdapter({
+  async post() {
+    const error = new Error('idempotency conflict');
+    error.status = 409;
+    throw error;
+  },
+  async get() { conflictRecoveryReads += 1; return { trade: lostResponseTrade }; },
+});
+let createConflictRejected = false;
+try { await conflictingTradeCreate.trades.create(lostResponseTrade); }
+catch (error) { createConflictRejected = error?.status === 409; }
+if (!createConflictRejected || conflictRecoveryReads !== 0) {
+  failures.push('Trade-create recovery treated a deterministic 409 conflict as an ambiguous commit');
 }
 
 // A network error after commit is reconciled by reading the authoritative

@@ -18,6 +18,14 @@ const MAX_HISTORICAL_PREVIEW_ELAPSED_MS = 10 * 60 * 1_000;
 
 type JsonRecord = Record<string, unknown>;
 
+const ACCOUNT_ID_KEYS = [
+  "accountId",
+  "account_id",
+  "ctidTraderAccountId",
+  "ctidTradingAccountId",
+  "traderAccountId",
+] as const;
+
 type HistoricalFetchBudget = {
   deadline: number;
   requestCount: number;
@@ -233,6 +241,28 @@ function optionalCents(object: JsonRecord, keys: readonly string[]): number | nu
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function accountHistoryMismatch(): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+    "cTrader returned history for a different account",
+    false,
+    true,
+  );
+}
+
+function accountIds(objects: readonly JsonRecord[]): string[] {
+  const values: string[] = [];
+  for (const object of objects) {
+    for (const key of ACCOUNT_ID_KEYS) {
+      const value = object[key];
+      if (value === null || value === undefined || value === "") continue;
+      const normalized = textValue(value, "accountId");
+      if (normalized !== null) values.push(normalized);
+    }
+  }
+  return values;
+}
+
 function side(value: unknown): "BUY" | "SELL" {
   const normalized = typeof value === "string" ? value.trim().toUpperCase() : value;
   if (normalized === "BUY" || normalized === 1 || normalized === "1") return "BUY";
@@ -295,9 +325,13 @@ function normalizeDeal(value: unknown): McpDeal {
   );
   const statusValue = firstValue(raw, ["dealStatus", "deal_status", "status"]);
   const parsedStatus = statusValue === null ? null : Number(statusValue);
-  const accountId = textValue(firstValue(raw, [
-    "accountId", "account_id", "ctidTraderAccountId", "traderAccountId",
-  ]), "accountId");
+  const explicitAccountIds = accountIds(
+    Object.keys(canonical).length > 0 ? [envelope, canonical] : [raw],
+  );
+  const accountId = explicitAccountIds[0] ?? null;
+  if (explicitAccountIds.some((value) => value !== accountId)) {
+    throw accountHistoryMismatch();
+  }
   const pnlCents = optionalCents(raw, ["netPnlCents", "netProfitCents"]);
   const role: McpDeal["role"] = ["ENTRY", "OPEN", "OPENING"].includes(roleText)
     ? "OPEN"
@@ -500,6 +534,13 @@ function unwrapFirstObject(value: unknown): JsonRecord {
   return root;
 }
 
+function accountMetadataObjects(value: unknown): JsonRecord[] {
+  if (Array.isArray(value)) return [objectValue(value[0])];
+  const root = objectValue(value);
+  const selected = unwrapFirstObject(value);
+  return selected === root ? [root] : [root, selected];
+}
+
 function firstText(objects: readonly JsonRecord[], keys: readonly string[]): string | null {
   for (const object of objects) {
     for (const key of keys) {
@@ -527,6 +568,25 @@ function firstText(objects: readonly JsonRecord[], keys: readonly string[]): str
     }
   }
   return null;
+}
+
+function verifiedAccountAttribution(
+  objects: readonly JsonRecord[],
+  expectedAccountId: string,
+  mismatch: () => CTraderSyncError,
+): boolean {
+  const explicit = accountIds(objects);
+  if (explicit.some((value) => value !== expectedAccountId)) throw mismatch();
+  return explicit.length > 0;
+}
+
+function historyResponseHasVerifiedAccount(value: unknown, expectedAccountId: string): boolean {
+  if (Array.isArray(value)) return false;
+  return verifiedAccountAttribution(
+    [objectValue(value)],
+    expectedAccountId,
+    accountHistoryMismatch,
+  );
 }
 
 function accountCurrency(objects: readonly JsonRecord[]): string | null {
@@ -1046,17 +1106,16 @@ export class CTraderMcpSyncEngine {
       }
       const balance = unwrapFirstObject(balanceRaw);
       const accountInfo = unwrapFirstObject(accountInfoRaw);
-      const detectedAccount = firstText([balance, accountInfo], [
-        "accountId", "account_id", "ctidTraderAccountId", "traderAccountId",
-      ]);
-      if (detectedAccount !== null && detectedAccount !== connection.external_account_id) {
-        throw new CTraderSyncError(
+      const sessionAccountVerified = verifiedAccountAttribution(
+        [...accountMetadataObjects(balanceRaw), ...accountMetadataObjects(accountInfoRaw)],
+        connection.external_account_id,
+        () => new CTraderSyncError(
           "CTRADER_MCP_ACCOUNT_MISMATCH",
           "The cTrader credential no longer belongs to this connected account",
           false,
           true,
-        );
-      }
+        ),
+      );
       const symbols = normalizeSymbols(symbolsRaw);
       const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
       const cursorBefore = safeCursor(connection.sync_cursor);
@@ -1071,7 +1130,14 @@ export class CTraderMcpSyncEngine {
       }
       const now = Date.now();
       const from = historyStart(this.config, cursorBefore, providerMetadata, now);
-      const fetched = await this.fetchDeals(client, connection.external_account_id, from, now, heartbeat);
+      const fetched = await this.fetchDeals(
+        client,
+        connection.external_account_id,
+        from,
+        now,
+        heartbeat,
+        { sessionAccountVerified },
+      );
       const currency = accountCurrency([balance, accountInfo, providerMetadata]);
       const result = await this.persist({
         connection,
@@ -1177,17 +1243,16 @@ export class CTraderMcpSyncEngine {
       }
       const balance = unwrapFirstObject(balanceRaw);
       const accountInfo = unwrapFirstObject(accountInfoRaw);
-      const detectedAccount = firstText([balance, accountInfo], [
-        "accountId", "account_id", "ctidTraderAccountId", "traderAccountId",
-      ]);
-      if (detectedAccount !== null && detectedAccount !== historicalImport.external_account_id) {
-        throw new CTraderSyncError(
+      const sessionAccountVerified = verifiedAccountAttribution(
+        [...accountMetadataObjects(balanceRaw), ...accountMetadataObjects(accountInfoRaw)],
+        historicalImport.external_account_id,
+        () => new CTraderSyncError(
           "CTRADER_MCP_ACCOUNT_MISMATCH",
           "The cTrader credential no longer belongs to the historical import account",
           false,
           true,
-        );
-      }
+        ),
+      );
       const symbols = normalizeSymbols(symbolsRaw);
       const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
       const fetched = await this.fetchHistoricalPreviewDeals(
@@ -1197,6 +1262,7 @@ export class CTraderMcpSyncEngine {
         throughTimestamp,
         heartbeat,
         previewDeadline,
+        sessionAccountVerified,
       );
       const currency = accountCurrency([
         balance,
@@ -1328,14 +1394,22 @@ export class CTraderMcpSyncEngine {
     fromTimestamp: number,
     toTimestamp: number,
     heartbeat: () => Promise<void>,
-    splitIncompletePages = false,
-    absoluteDeadline: number | null = null,
-    maximumWindowMs = MAX_HISTORY_WINDOW_MS,
-    sharedBudget: HistoricalFetchBudget | null = null,
+    options: {
+      splitIncompletePages?: boolean;
+      absoluteDeadline?: number | null;
+      maximumWindowMs?: number;
+      sharedBudget?: HistoricalFetchBudget | null;
+      sessionAccountVerified?: boolean;
+    } = {},
   ): Promise<McpDeal[]> {
+    const {
+      splitIncompletePages = false,
+      absoluteDeadline = null,
+      maximumWindowMs = MAX_HISTORY_WINDOW_MS,
+      sharedBudget = null,
+      sessionAccountVerified = false,
+    } = options;
     const byId = new Map<string, McpDeal>();
-    let sawAnyDeal = false;
-    let sawMatchingAccount = false;
     const budget = sharedBudget ?? {
       deadline: absoluteDeadline ?? Date.now() + MAX_HISTORICAL_PREVIEW_ELAPSED_MS,
       requestCount: 0,
@@ -1390,33 +1464,46 @@ export class CTraderMcpSyncEngine {
         return;
       }
       assertCompleteHistoryPage(raw);
+      // cTrader Remote MCP issues one token per trading account and the
+      // account is verified on this same MCP session before history is read.
+      // Its history shape may follow ProtoOADealListRes, where account
+      // attribution lives on the response rather than on each ProtoOADeal.
+      // Honour either shape, while failing closed on every explicit mismatch.
+      const responseAccountVerified = historyResponseHasVerifiedAccount(raw, accountId);
       const rows = unwrapArray(raw, ["deals", "data", "result", "items", "history"], "deal history");
       for (const row of rows) {
         if (splitIncompletePages) {
           budget.processedDeals += 1;
           enforcePreviewBudget(depth);
         }
-        const deal = normalizeDeal(row);
+        const normalizedDeal = normalizeDeal(row);
         if (
-          deal.executionTimestamp < start
-          || (splitIncompletePages ? deal.executionTimestamp >= end : deal.executionTimestamp > end)
+          normalizedDeal.executionTimestamp < start
+          || (splitIncompletePages ? normalizedDeal.executionTimestamp >= end : normalizedDeal.executionTimestamp > end)
         ) {
           throw new CTraderSyncError(
             "CTRADER_MCP_DEAL_OUTSIDE_WINDOW",
-            `cTrader deal ${deal.dealId} falls outside the immutable requested history window`,
+            `cTrader deal ${normalizedDeal.dealId} falls outside the immutable requested history window`,
             false,
           );
         }
-        sawAnyDeal = true;
-        if (deal.accountId === null) {
+        if (normalizedDeal.accountId !== null && normalizedDeal.accountId !== accountId) {
+          throw accountHistoryMismatch();
+        }
+        if (
+          normalizedDeal.accountId === null
+          && !responseAccountVerified
+          && !sessionAccountVerified
+        ) {
           throw new CTraderSyncError(
             "CTRADER_MCP_ACCOUNT_ATTRIBUTION_MISSING",
-            `cTrader deal ${deal.dealId} has no account attribution`,
+            `cTrader deal ${normalizedDeal.dealId} has no account attribution`,
             false,
           );
         }
-        if (deal.accountId !== accountId) continue;
-        sawMatchingAccount = true;
+        const deal: McpDeal = normalizedDeal.accountId === null
+          ? { ...normalizedDeal, accountId }
+          : normalizedDeal;
         const previous = byId.get(deal.dealId);
         if (previous && json(canonicalStoredDeal(previous)) !== json(canonicalStoredDeal(deal))) {
           throw new CTraderSyncError(
@@ -1436,14 +1523,6 @@ export class CTraderMcpSyncEngine {
       await fetchWindow(cursor, end);
       cursor = end;
     }
-    if (sawAnyDeal && !sawMatchingAccount) {
-      throw new CTraderSyncError(
-        "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
-        "cTrader returned history for a different account",
-        false,
-        true,
-      );
-    }
     return [...byId.values()].sort((left, right) =>
       left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
   }
@@ -1455,6 +1534,7 @@ export class CTraderMcpSyncEngine {
     toTimestamp: number,
     heartbeat: () => Promise<void>,
     deadline: number,
+    sessionAccountVerified: boolean,
   ): Promise<McpDeal[]> {
     const budget: HistoricalFetchBudget = { deadline, requestCount: 0, processedDeals: 0 };
     const fullRangePlan = await this.fetchDeals(
@@ -1463,10 +1543,13 @@ export class CTraderMcpSyncEngine {
       fromTimestamp,
       toTimestamp,
       heartbeat,
-      true,
-      deadline,
-      MAX_HISTORY_WINDOW_MS,
-      budget,
+      {
+        splitIncompletePages: true,
+        absoluteDeadline: deadline,
+        maximumWindowMs: MAX_HISTORY_WINDOW_MS,
+        sharedBudget: budget,
+        sessionAccountVerified,
+      },
     );
     const partitionPlan = await this.fetchDeals(
       client,
@@ -1474,10 +1557,13 @@ export class CTraderMcpSyncEngine {
       fromTimestamp,
       toTimestamp,
       heartbeat,
-      true,
-      deadline,
-      60 * 60 * 1_000,
-      budget,
+      {
+        splitIncompletePages: true,
+        absoluteDeadline: deadline,
+        maximumWindowMs: 60 * 60 * 1_000,
+        sharedBudget: budget,
+        sessionAccountVerified,
+      },
     );
     const partitionById = new Map(partitionPlan.map((deal) => [deal.dealId, deal]));
     const consistent = fullRangePlan.length === partitionPlan.length

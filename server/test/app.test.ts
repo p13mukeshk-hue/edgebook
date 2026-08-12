@@ -82,7 +82,7 @@ describe("public server contract", () => {
     const uploadRoot = await mkdtemp(path.join(tmpdir(), "edgebook-ready-"));
     const deps = dependencies();
     deps.query.mockImplementation(async (sql: unknown) => ({
-      rows: String(sql).includes("schema_migrations") ? [{ applied: 6 }] : [{ ready: 1 }],
+      rows: String(sql).includes("schema_migrations") ? [{ applied: 7 }] : [{ ready: 1 }],
       rowCount: 1,
       command: "SELECT",
       oid: 0,
@@ -93,7 +93,7 @@ describe("public server contract", () => {
     expect(ready.statusCode).toBe(200);
 
     deps.query.mockImplementation(async (sql: unknown) => ({
-      rows: String(sql).includes("schema_migrations") ? [{ applied: 5 }] : [{ ready: 1 }],
+      rows: String(sql).includes("schema_migrations") ? [{ applied: 6 }] : [{ ready: 1 }],
       rowCount: 1,
       command: "SELECT",
       oid: 0,
