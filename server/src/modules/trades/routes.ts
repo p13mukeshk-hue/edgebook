@@ -619,20 +619,50 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>("/api/trades/:id/restore", protectedWrite, async (request) => {
     const auth = request.auth!;
     const expectedVersion = requireExpectedVersion(parseExpectedVersion(request.headers["if-match"]));
-    const result = await app.db.query<{ id: string }>(
-      `UPDATE trades SET deleted_at=NULL, row_version=row_version+1
-       WHERE user_id=$1 AND (id::text=$2 OR legacy_firebase_doc_id=$2)
-         AND row_version=$3
-       RETURNING id`,
-      [auth.user.id, request.params.id, expectedVersion],
-    );
-    const updated = result.rows[0];
-    if (!updated) {
-      const exists = await findTrade(app, auth.user.id, request.params.id);
-      if (exists) throw conflict("Trade changed in another session; reload and retry");
-      throw notFound("Trade");
-    }
-    const row = await findTrade(app, auth.user.id, updated.id);
+    const restoredId = await withTransaction(app.db, async (client) => {
+      const target = await client.query<{ id: string; row_version: number }>(
+        `SELECT id, row_version FROM trades
+         WHERE user_id=$1 AND (id::text=$2 OR legacy_firebase_doc_id=$2)
+         FOR UPDATE`,
+        [auth.user.id, request.params.id],
+      );
+      const trade = target.rows[0];
+      if (!trade) throw notFound("Trade");
+      if (trade.row_version !== expectedVersion) {
+        throw conflict("Trade changed in another session; reload and retry");
+      }
+      const suppressed = await client.query<{ blocked: boolean }>(
+        `SELECT true AS blocked
+         FROM ctrader_reconciliation_candidates candidate
+         JOIN ctrader_reconciliation_resolutions resolution
+           ON resolution.user_id=candidate.user_id
+          AND resolution.broker_connection_id=candidate.broker_connection_id
+          AND resolution.import_id=candidate.import_id
+          AND resolution.candidate_id=candidate.id
+         WHERE candidate.user_id=$1 AND candidate.manual_trade_id=$2
+           AND candidate.status='suppressed'
+           AND candidate.resolution_action='suppress_deleted'
+           AND resolution.action='suppress_deleted'
+         LIMIT 1`,
+        [auth.user.id, trade.id],
+      );
+      if (suppressed.rows[0]?.blocked) {
+        throw new AppError(
+          409,
+          "CTRADER_SUPPRESSED_TRADE_RESTORE_BLOCKED",
+          "This trade suppresses a matched cTrader position and cannot be restored without a reviewed suppression reversal",
+        );
+      }
+      const result = await client.query<{ id: string }>(
+        `UPDATE trades SET deleted_at=NULL, row_version=row_version+1
+         WHERE id=$1 AND user_id=$2 AND row_version=$3
+         RETURNING id`,
+        [trade.id, auth.user.id, expectedVersion],
+      );
+      if (!result.rows[0]) throw conflict("Trade changed in another session; reload and retry");
+      return result.rows[0].id;
+    });
+    const row = await findTrade(app, auth.user.id, restoredId);
     if (!row) throw new Error("Failed to reload restored trade");
     const response = mapTrade(row);
     await publishBestEffort(app, auth.user.id, "trade.restored", response);
@@ -641,41 +671,154 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete<{ Params: { id: string } }>("/api/trades/:id/permanent", protectedWrite, async (request, reply) => {
     const auth = request.auth!;
-    const existing = await findTrade(app, auth.user.id, request.params.id);
-    if (!existing) throw notFound("Trade");
     const expectedVersion = requireExpectedVersion(parseExpectedVersion(request.headers["if-match"]));
     const confirmation = request.headers["x-confirm-permanent-delete"];
     const confirmationValue = Array.isArray(confirmation) ? confirmation[0] : confirmation;
-    const publicId = existing.legacy_firebase_doc_id ?? existing.id;
-    if (confirmationValue !== publicId) {
-      throw new AppError(400, "DELETE_CONFIRMATION_REQUIRED", "Confirm permanent deletion with the trade ID");
-    }
-    if (existing.deleted_at === null) {
-      throw conflict("Archive the trade before permanently deleting it");
-    }
-    const files = await app.db.query<{ storage_key: string }>(
-      "SELECT storage_key FROM file_objects WHERE user_id=$1 AND trade_id=$2",
-      [auth.user.id, existing.id],
-    );
-    const deleted = await app.db.query<{ id: string }>(
-      `DELETE FROM trades
-       WHERE id=$1 AND user_id=$2 AND deleted_at IS NOT NULL
-         AND row_version=$3
-       RETURNING id`,
-      [existing.id, auth.user.id, expectedVersion],
-    );
-    if (!deleted.rows[0]) {
-      const current = await findTrade(app, auth.user.id, existing.id);
-      if (current) throw conflict("Trade changed in another session; reload and retry");
-      throw notFound("Trade");
-    }
-    const removals = await Promise.allSettled(files.rows.map(async (file) => {
-      await app.screenshotStorage.remove(file.storage_key);
-      await app.db.query("UPDATE file_deletion_queue SET completed_at=now(),last_error=NULL WHERE storage_key=$1", [file.storage_key]);
+    type PurgeIdentity = QueryResultRow & {
+      id: string;
+      legacy_firebase_doc_id: string | null;
+      row_version: number;
+      deleted_at: Date | string | null;
+      source_system: string;
+      trade_connection_id: string | null;
+      trade_external_key: string | null;
+      link_connection_id: string | null;
+      link_external_key: string | null;
+    };
+    const purged = await withTransaction(app.db, async (client) => {
+      // Resolve the provider lock without first taking a row lock. cTrader sync,
+      // reconciliation, and purge all serialize on this exact connection key.
+      const discovered = await client.query<PurgeIdentity>(
+        `SELECT t.id, t.legacy_firebase_doc_id, t.row_version, t.deleted_at,
+                t.source_system,
+                t.broker_connection_id AS trade_connection_id,
+                t.external_trade_key AS trade_external_key,
+                link.broker_connection_id AS link_connection_id,
+                link.external_trade_key AS link_external_key
+         FROM trades t
+         LEFT JOIN ctrader_trade_links link
+           ON link.user_id=t.user_id AND link.trade_id=t.id
+         WHERE t.user_id=$1
+           AND (t.id::text=$2 OR t.legacy_firebase_doc_id=$2)
+         LIMIT 1`,
+        [auth.user.id, request.params.id],
+      );
+      const initial = discovered.rows[0];
+      if (!initial) throw notFound("Trade");
+      if (
+        initial.trade_connection_id !== null
+        && initial.link_connection_id !== null
+        && initial.trade_connection_id !== initial.link_connection_id
+      ) {
+        throw new AppError(409, "TRADE_BROKER_IDENTITY_CONFLICT", "Trade broker identity changed; reload and retry");
+      }
+      const connectionId = initial.trade_connection_id ?? initial.link_connection_id;
+      if (connectionId !== null) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [connectionId]);
+      }
+
+      // Lock and re-read only after the provider lock. If this initially looked
+      // manual but reconciliation linked it in between, abort rather than purge
+      // without serializing on the newly bound connection.
+      const locked = await client.query<PurgeIdentity>(
+        `SELECT t.id, t.legacy_firebase_doc_id, t.row_version, t.deleted_at,
+                t.source_system,
+                t.broker_connection_id AS trade_connection_id,
+                t.external_trade_key AS trade_external_key,
+                link.broker_connection_id AS link_connection_id,
+                link.external_trade_key AS link_external_key
+         FROM trades t
+         LEFT JOIN ctrader_trade_links link
+           ON link.user_id=t.user_id AND link.trade_id=t.id
+         WHERE t.user_id=$1 AND t.id=$2
+         FOR UPDATE OF t`,
+        [auth.user.id, initial.id],
+      );
+      const trade = locked.rows[0];
+      if (!trade) throw notFound("Trade");
+      if (
+        trade.trade_connection_id !== null
+        && trade.link_connection_id !== null
+        && trade.trade_connection_id !== trade.link_connection_id
+      ) {
+        throw new AppError(409, "TRADE_BROKER_IDENTITY_CONFLICT", "Trade broker identity changed; reload and retry");
+      }
+      const lockedConnectionId = trade.trade_connection_id ?? trade.link_connection_id;
+      if (lockedConnectionId !== connectionId) {
+        throw new AppError(409, "TRADE_BROKER_IDENTITY_CHANGED", "Trade broker identity changed; reload and retry");
+      }
+      if (trade.row_version !== expectedVersion) {
+        throw conflict("Trade changed in another session; reload and retry");
+      }
+      const publicId = trade.legacy_firebase_doc_id ?? trade.id;
+      if (confirmationValue !== publicId) {
+        throw new AppError(400, "DELETE_CONFIRMATION_REQUIRED", "Confirm permanent deletion with the trade ID");
+      }
+      if (trade.deleted_at === null) {
+        throw conflict("Archive the trade before permanently deleting it");
+      }
+      if (
+        trade.trade_external_key !== null
+        && trade.link_external_key !== null
+        && trade.trade_external_key !== trade.link_external_key
+      ) {
+        throw new AppError(409, "TRADE_BROKER_IDENTITY_CONFLICT", "Trade broker identity changed; reload and retry");
+      }
+      const providerExternalKey = trade.link_external_key
+        ?? (trade.source_system === "ctrader" ? trade.trade_external_key : null);
+      const files = await client.query<{ storage_key: string }>(
+        `SELECT storage_key FROM file_objects
+         WHERE user_id=$1 AND trade_id=$2
+         ORDER BY storage_key
+         FOR UPDATE`,
+        [auth.user.id, trade.id],
+      );
+      const deleted = await client.query<{ id: string }>(
+        `DELETE FROM trades
+         WHERE id=$1 AND user_id=$2 AND deleted_at IS NOT NULL
+           AND row_version=$3
+         RETURNING id`,
+        [trade.id, auth.user.id, expectedVersion],
+      );
+      if (!deleted.rows[0]) throw conflict("Trade changed in another session; reload and retry");
+
+      // Both protections are trigger-backed and transactional. Refuse to commit
+      // a purge if either its future-sync tombstone or durable file cleanup job
+      // was not produced by the cascades.
+      if (lockedConnectionId !== null && providerExternalKey !== null) {
+        const tombstone = await client.query<{ exists: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM ctrader_trade_tombstones
+             WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+           ) AS exists`,
+          [auth.user.id, lockedConnectionId, providerExternalKey],
+        );
+        if (tombstone.rows[0]?.exists !== true) {
+          throw new Error("Permanent trade purge did not preserve its cTrader tombstone");
+        }
+      }
+      const storageKeys = files.rows.map((file) => file.storage_key);
+      if (storageKeys.length > 0) {
+        const queued = await client.query<{ storage_key: string }>(
+          `SELECT storage_key FROM file_deletion_queue
+           WHERE storage_key=ANY($1::text[]) AND completed_at IS NULL
+           FOR UPDATE`,
+          [storageKeys],
+        );
+        const queuedKeys = new Set(queued.rows.map((row) => row.storage_key));
+        if (storageKeys.some((storageKey) => !queuedKeys.has(storageKey))) {
+          throw new Error("Permanent trade purge did not enqueue all file deletions");
+        }
+      }
+      return { id: trade.id, publicId, storageKeys };
+    });
+    const removals = await Promise.allSettled(purged.storageKeys.map(async (storageKey) => {
+      await app.screenshotStorage.remove(storageKey);
+      await app.db.query("UPDATE file_deletion_queue SET completed_at=now(),last_error=NULL WHERE storage_key=$1", [storageKey]);
     }));
     const failures = removals.filter((result) => result.status === "rejected").length;
-    if (failures > 0) request.log.error({ tradeId: existing.id, failures }, "Some screenshot files require orphan cleanup");
-    await publishBestEffort(app, auth.user.id, "trade.purged", { id: existing.legacy_firebase_doc_id ?? existing.id, recordId: existing.id });
+    if (failures > 0) request.log.error({ tradeId: purged.id, failures }, "Some screenshot files require orphan cleanup");
+    await publishBestEffort(app, auth.user.id, "trade.purged", { id: purged.publicId, recordId: purged.id });
     return reply.code(204).send();
   });
 }

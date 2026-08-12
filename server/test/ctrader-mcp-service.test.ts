@@ -179,6 +179,43 @@ describe("cTrader MCP connection service", () => {
     expect(database.connect).not.toHaveBeenCalled();
   });
 
+  it("rejects oversized or control-bearing provider currency before metadata persistence", async () => {
+    const { service, database, mcp } = harness();
+    mcp.validateConfiguration.mockResolvedValueOnce({
+      bearerToken: "secret-session-bound-mcp-token",
+      balance: { accountId: "5032134", currency: "U".repeat(2 * 1024 * 1024), environment: "live" },
+      symbols: [{ id: "1", name: "XAU/USD" }],
+      historyProbe: [],
+      accountInfo: { createdAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await expect(service.connectMcp({
+      auth,
+      configuration: `Bearer ${"x".repeat(40)}`,
+      environment: "live",
+      accountId: "5032134",
+      mappedLegacyAccountId: null,
+      label: null,
+    })).rejects.toMatchObject({ statusCode: 502, code: "CTRADER_PROVIDER_METADATA_INVALID" });
+    expect(database.connect).not.toHaveBeenCalled();
+
+    mcp.validateConfiguration.mockResolvedValueOnce({
+      bearerToken: "secret-session-bound-mcp-token",
+      balance: { accountId: "5032134", currency: "U\u0000D", environment: "live" },
+      symbols: [{ id: "1", name: "XAU/USD" }],
+      historyProbe: [],
+      accountInfo: { createdAt: "2026-01-01T00:00:00.000Z" },
+    });
+    await expect(service.connectMcp({
+      auth,
+      configuration: `Bearer ${"x".repeat(40)}`,
+      environment: "live",
+      accountId: "5032134",
+      mappedLegacyAccountId: null,
+      label: null,
+    })).rejects.toMatchObject({ statusCode: 502, code: "CTRADER_PROVIDER_METADATA_INVALID" });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
   it("rejects a selected environment that contradicts authenticated MCP metadata", async () => {
     const { service, database } = harness();
     await expect(service.connectMcp({

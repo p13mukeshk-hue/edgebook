@@ -1079,7 +1079,46 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .ctrader-mcp-ack{display:flex;align-items:flex-start;gap:9px;margin-top:14px;padding:11px 12px;border:1px solid rgba(245,166,35,.28);border-radius:9px;background:var(--amber-bg);color:var(--text2);font-size:11px;line-height:1.5;cursor:pointer}
 .ctrader-mcp-ack input{margin-top:2px;accent-color:var(--accent);flex-shrink:0}
 .ctrader-connect-actions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin:10px 20px 16px}
+.ctrader-history-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-top:1px solid var(--border);background:rgba(108,99,255,.035);font-size:11px;color:var(--text2);flex-wrap:wrap}
+.ctrader-history-summary strong{color:var(--text);font-weight:600}
+.ctrader-history-modal-card{width:min(920px,calc(100vw - 28px));max-height:calc(100vh - 32px);overflow:auto;background:var(--bg2);border:1px solid var(--border2);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.35)}
+.ctrader-history-head{position:sticky;top:0;z-index:2;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px;border-bottom:1px solid var(--border);background:var(--bg2)}
+.ctrader-history-body{padding:18px 20px}
+.ctrader-history-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ctrader-history-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.ctrader-history-field label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px}
+.ctrader-history-field input{width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:9px 11px;font-size:12px;color:var(--text);outline:none}
+.ctrader-history-field input:focus{border-color:var(--accent)}
+.ctrader-history-note{margin-top:13px;padding:11px 12px;border:1px solid var(--border);border-radius:9px;background:var(--bg3);font-size:11px;color:var(--text2);line-height:1.55}
+.ctrader-history-note.warning{border-color:rgba(245,166,35,.28);background:var(--amber-bg)}
+.ctrader-history-ack{display:flex;align-items:flex-start;gap:9px;margin-top:13px;padding:11px 12px;border:1px solid rgba(108,99,255,.24);border-radius:9px;background:rgba(108,99,255,.06);font-size:11px;color:var(--text2);line-height:1.55;cursor:pointer}
+.ctrader-history-ack input{margin-top:2px;accent-color:var(--accent);flex-shrink:0}
+.ctrader-history-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:16px 0 10px;flex-wrap:wrap}
+.ctrader-history-counts{display:flex;gap:6px;flex-wrap:wrap}
+.ctrader-history-pill{padding:4px 8px;border:1px solid var(--border);border-radius:999px;background:var(--bg3);font-size:10px;color:var(--text2)}
+.ctrader-review-list{display:grid;gap:12px}
+.ctrader-review-card{border:1px solid var(--border2);border-radius:11px;background:var(--bg3);overflow:hidden}
+.ctrader-review-card.deleted{border-color:rgba(255,94,106,.32)}
+.ctrader-review-card.ambiguous{border-color:rgba(245,166,35,.34)}
+.ctrader-review-card.high-confidence{border-color:rgba(34,201,135,.3)}
+.ctrader-review-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:12px 14px;border-bottom:1px solid var(--border)}
+.ctrader-review-title{font-size:13px;font-weight:600;color:var(--text)}
+.ctrader-review-sub{font-size:10px;color:var(--text3);margin-top:3px;line-height:1.45}
+.ctrader-review-badge{padding:3px 8px;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.35px;text-transform:uppercase;background:var(--amber-bg);color:var(--amber);white-space:nowrap}
+.ctrader-review-card.deleted .ctrader-review-badge{background:var(--red-bg);color:var(--red)}
+.ctrader-review-card.high-confidence .ctrader-review-badge{background:var(--green-bg);color:var(--green)}
+.ctrader-review-columns{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border)}
+.ctrader-review-column{padding:12px 14px;background:var(--bg3);min-width:0}
+.ctrader-review-column h5{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin:0 0 8px}
+.ctrader-review-fact{display:grid;grid-template-columns:minmax(82px,.45fr) minmax(0,1fr);gap:8px;margin:5px 0;font-size:11px;line-height:1.45}
+.ctrader-review-fact span:first-child{color:var(--text3)}
+.ctrader-review-fact span:last-child{color:var(--text);overflow-wrap:anywhere;white-space:pre-wrap}
+.ctrader-review-reasons{padding:10px 14px;border-top:1px solid var(--border);font-size:10px;color:var(--text2);line-height:1.55}
+.ctrader-review-actions{display:flex;align-items:center;gap:7px;padding:11px 14px;border-top:1px solid var(--border);flex-wrap:wrap}
+.ctrader-review-actions .btn-ghost,.ctrader-review-actions .btn-accent{font-size:10px;padding:6px 9px}
+.ctrader-review-status{margin-left:auto;font-size:10px;color:var(--text3)}
 @media(max-width:620px){.ctrader-mcp-grid{grid-template-columns:1fr}.ctrader-mcp-field.full{grid-column:auto}}
+@media(max-width:680px){.ctrader-history-grid,.ctrader-review-columns{grid-template-columns:1fr}.ctrader-history-head,.ctrader-history-body{padding-left:14px;padding-right:14px}.ctrader-review-status{width:100%;margin-left:0}}
 /* ── Duplicate resolution modal ───────────────────────────────────────── */
 .dup-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
 .dup-card{background:var(--bg3);border:1px solid var(--border2);border-radius:12px;padding:16px}
@@ -2020,6 +2059,38 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
                   </div>
                   <div id="ctrader-vps-picker-error" class="ctrader-vps-message error" style="display:none;margin:12px 0 0"></div>
                   <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px"><button class="btn-ghost" onclick="closeVpsCtraderPicker()">Cancel</button><button id="ctrader-vps-picker-submit" class="btn-accent" onclick="createVpsCtraderConnection()"><i class="fa-solid fa-link"></i> Connect selected account</button></div>
+                </div>
+              </div>
+
+              <!-- Historical cTrader imports are staged for review. They never become visible journal trades until the user resolves each candidate. -->
+              <div id="ctrader-history-modal" class="ctrader-vps-only" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:530;align-items:center;justify-content:center" role="dialog" aria-modal="true" aria-labelledby="ctrader-history-title">
+                <div class="ctrader-history-modal-card">
+                  <div class="ctrader-history-head">
+                    <div><div id="ctrader-history-title" style="font-size:16px;font-weight:600;color:var(--text)">Import earlier cTrader trades</div><div id="ctrader-history-account" style="font-size:11px;color:var(--text3);margin-top:4px"></div></div>
+                    <button class="modal-close" type="button" onclick="closeCtraderHistoryModal()" aria-label="Close historical import"><i class="fa-solid fa-xmark"></i></button>
+                  </div>
+                  <div class="ctrader-history-body">
+                    <section id="ctrader-history-request">
+                      <div class="ctrader-history-grid">
+                        <div class="ctrader-history-field"><label for="ctrader-history-date">Start date</label><input id="ctrader-history-date" type="date" autocomplete="off"></div>
+                        <div class="ctrader-history-field"><label for="ctrader-history-time">Start time</label><input id="ctrader-history-time" type="time" step="60" value="00:00" autocomplete="off"></div>
+                        <div class="ctrader-history-field" style="grid-column:1/-1"><label for="ctrader-history-timezone">Timezone (IANA name)</label><input id="ctrader-history-timezone" type="text" list="ctrader-history-timezones" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Asia/Kolkata"><datalist id="ctrader-history-timezones"><option value="Asia/Kolkata"><option value="UTC"><option value="Europe/London"><option value="America/New_York"><option value="Asia/Dubai"><option value="Asia/Singapore"><option value="Australia/Sydney"></datalist></div>
+                      </div>
+                      <div class="ctrader-history-note"><i class="fa-solid fa-shield-halved" style="color:var(--green);margin-right:5px"></i> This creates a staged preview. It does not publish trades, overwrite manual entries, or change dashboard totals. You will review every possible match individually.</div>
+                      <div id="ctrader-history-boundary-preview" class="ctrader-history-note" role="status"><i class="fa-solid fa-clock" style="margin-right:5px"></i> Choose a valid local date, time, and timezone to see the exact import boundary.</div>
+                      <label class="ctrader-history-ack" for="ctrader-history-flat-ack"><input id="ctrader-history-flat-ack" type="checkbox"><span><strong>Required: the exact cTrader account shown above had no open positions at this historical date and time.</strong> This is a new boundary-specific statement. It does not modify or reuse the “flat when connected” statement made for the current connection.</span></label>
+                      <div id="ctrader-history-lineage-warning" class="ctrader-history-note warning"><i class="fa-solid fa-triangle-exclamation" style="color:var(--amber);margin-right:5px"></i> This historical statement is required because role-less deals cannot be reconstructed safely before the current connection proof. If you cannot make it, cancel this preview: existing unproven executions stay execution-only and Edgebook will not guess them into journal positions or analytics. Missing provider size or P&amp;L can remain execution-only even after the statement.</div>
+                      <div id="ctrader-history-error" class="ctrader-vps-message error" role="alert" style="display:none;margin:12px 0 0"></div>
+                      <div style="display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:16px;flex-wrap:wrap"><button class="btn-ghost" type="button" onclick="closeCtraderHistoryModal()">Cancel</button><button id="ctrader-history-start" class="btn-accent" type="button" onclick="startCtraderHistoricalPreview()"><i class="fa-solid fa-clock-rotate-left"></i> Create safe preview</button></div>
+                    </section>
+                    <section id="ctrader-history-review" style="display:none">
+                      <div id="ctrader-history-status" class="ctrader-history-note" role="status"></div>
+                      <div class="ctrader-history-toolbar"><div id="ctrader-history-counts" class="ctrader-history-counts"></div><button id="ctrader-history-refresh" class="btn-ghost" type="button" onclick="refreshCtraderHistoricalReview()"><i class="fa-solid fa-rotate"></i> Refresh</button></div>
+                      <div id="ctrader-history-review-error" class="ctrader-vps-message error" role="alert" style="display:none;margin:0 0 12px"></div>
+                      <div id="ctrader-history-candidates" class="ctrader-review-list"></div>
+                      <div style="display:flex;justify-content:flex-end;margin-top:16px"><button class="btn-ghost" type="button" onclick="closeCtraderHistoryModal()">Close review</button></div>
+                    </section>
+                  </div>
                 </div>
               </div>
 
@@ -4242,7 +4313,7 @@ function showManualDupModal(incomingTrade, existingTrade){
 }
 
 // ── VPS CTRADER CONNECTIONS ───────────────────────────────────────────────
-const vpsCtraderState={oauthEnabled:null,mcpEnabled:null,pending:null,connections:[],statuses:new Map(),callbackHandled:false,message:null,messageType:'success'};
+const vpsCtraderState={oauthEnabled:null,mcpEnabled:null,pending:null,connections:[],statuses:new Map(),callbackHandled:false,message:null,messageType:'success',history:{connectionId:null,session:null,candidates:[],requestKey:null,resolutionKeys:new Map(),busy:false}};
 let vpsCtraderLoadPromise=null;
 
 function escapeHtml(value){
@@ -4354,6 +4425,17 @@ function ctraderConnectionCard(connection,status){
       ? `${awaitingReview} cTrader position${awaitingReview===1?' is':'s are'} safely retained as broker executions but excluded from the journal and analytics because cTrader did not provide enough verified size or opening data. Edgebook did not guess financial values; these positions stay out of totals until cTrader exposes complete data or a verified review workflow is available.`
       : ''
   );
+  const historySummary=status?.historicalImport||status?.historicalImportSummary||current?.historicalImport||current?.historicalImportSummary||null;
+  const historyCounters=historySummary?.counters||historySummary?.counts||{};
+  const historyPending=Math.max(0,Number(historyCounters.pending??historyCounters.awaitingReview??historySummary?.pendingCount??0));
+  const historyStatus=String(historySummary?.status||'').toLowerCase();
+  const historyBusy=['queued','fetching','processing','running'].includes(historyStatus);
+  const historyActionLabel=historyPending>0?'Review earlier trades':'Import earlier trades';
+  const historySummaryText=historyBusy
+    ? 'Earlier history is being fetched into a protected review preview.'
+    : historyPending>0
+      ? `${historyPending} historical candidate${historyPending===1?'':'s'} waiting for your decision. Nothing pending is included in journal totals.`
+      : 'Need older history? Fetch it into a protected preview before adding anything to the journal.';
   const reconnectAction=isMcpConnection&&vpsCtraderState.mcpEnabled
     ? '<button class="btn-accent" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-arrow-rotate-right"></i> Reconnect</button>'
     : vpsCtraderState.oauthEnabled
@@ -4367,6 +4449,7 @@ function ctraderConnectionCard(connection,status){
       <div class="broker-account-card-actions"><span style="font-size:10px;padding:3px 9px;border-radius:14px;background:${stateBg};color:${stateColor}">${busy?'<i class="fa-solid fa-spinner fa-spin"></i> ':''}${stateText}</span>${reauth?reconnectAction:`<button class="btn-ghost" onclick="syncVpsCtraderConnection(${idArg},this)" ${busy?'disabled':''}><i class="fa-solid fa-rotate"></i> Sync now</button><button class="btn-ghost" onclick="disconnectVpsCtraderConnection(${idArg})" style="color:var(--red)"><i class="fa-solid fa-unlink"></i></button>`}</div>
     </div>
     <div style="padding:10px 16px;font-size:11px;color:var(--text3);line-height:1.7"><div><i class="fa-regular fa-clock"></i> Last sync: ${escapeCtraderText(formatCtraderWhen(current.lastSyncAt))}${counterText}</div><div><i class="fa-solid fa-plug"></i> Connection: ${escapeCtraderText(authModeLabel)}</div><div><i class="fa-solid fa-shield-halved"></i> ${isMcpConnection?'Edgebook invokes read tools only; the cTrader Remote MCP token itself remains trading-capable.':'Official OAuth uses read-only account access.'}</div><div><i class="fa-solid fa-wallet"></i> Edgebook account: ${escapeCtraderText(mappedAccount?.name||'Not mapped')}</div>${current.accountCurrency?`<div><i class="fa-solid fa-coins"></i> Account currency: ${escapeCtraderText(current.accountCurrency)}</div>`:''}${warningText?`<div style="margin-top:6px;color:var(--amber)"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeCtraderText(warningText)}</div>`:''}${error?`<div style="margin-top:6px;color:var(--red)"><i class="fa-solid fa-circle-exclamation"></i> ${escapeCtraderText(error)}</div>`:''}</div>
+    ${reauth?'':`<div class="ctrader-history-summary"><div><strong>${escapeCtraderText(historyActionLabel)}</strong><div style="margin-top:2px;color:var(--text3)">${escapeCtraderText(historySummaryText)}</div></div><button class="btn-ghost" type="button" onclick="openCtraderHistoryModal(${idArg})" ${historyBusy?'disabled':''}>${historyBusy?'<i class="fa-solid fa-spinner fa-spin"></i> Preparing preview':`<i class="fa-solid fa-clock-rotate-left"></i> ${escapeCtraderText(historyActionLabel)}`}</button></div>`}
   </div>`;
 }
 function renderVpsCtraderPanel(){
@@ -4532,6 +4615,311 @@ async function createVpsCtraderConnection(){
     await loadVpsCtraderConnections();
   }catch(error){errorEl.textContent=error.message;errorEl.style.display='block';}
   finally{button.disabled=false;button.innerHTML='<i class="fa-solid fa-link"></i> Connect selected account';}
+}
+function ctraderHistoryRequestId(){
+  if(globalThis.crypto?.randomUUID)return crypto.randomUUID();
+  const bytes=new Uint8Array(16);for(let index=0;index<bytes.length;index++)bytes[index]=Math.floor(Math.random()*256);
+  bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const hex=[...bytes].map(value=>value.toString(16).padStart(2,'0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+function ctraderHistorySession(payload){
+  return payload?.historicalImport||payload?.import||payload?.session||null;
+}
+function ctraderHistoryCandidates(payload){
+  if(Array.isArray(payload))return payload;
+  for(const key of ['candidates','reconciliationCandidates','items'])if(Array.isArray(payload?.[key]))return payload[key];
+  return [];
+}
+function ctraderHistoryBoundaryParts(instant,timeZone){
+  const formatter=new Intl.DateTimeFormat('en-CA',{timeZone,calendar:'gregory',numberingSystem:'latn',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+  const values={};
+  formatter.formatToParts(new Date(instant)).forEach(part=>{if(part.type!=='literal')values[part.type]=part.value;});
+  return {year:Number(values.year),month:Number(values.month),day:Number(values.day),hour:Number(values.hour),minute:Number(values.minute),second:Number(values.second)};
+}
+function resolveCtraderHistoryBoundary(boundaryLocal,timeZone){
+  const match=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(boundaryLocal||''));
+  if(!match)throw new Error('Choose a complete date and time.');
+  const expected={year:Number(match[1]),month:Number(match[2]),day:Number(match[3]),hour:Number(match[4]),minute:Number(match[5]),second:Number(match[6]||0)};
+  const naive=Date.UTC(expected.year,expected.month-1,expected.day,expected.hour,expected.minute,expected.second);
+  const normalized=new Date(naive);
+  if(normalized.getUTCFullYear()!==expected.year||normalized.getUTCMonth()+1!==expected.month||normalized.getUTCDate()!==expected.day||normalized.getUTCHours()!==expected.hour||normalized.getUTCMinutes()!==expected.minute)throw new Error('Choose a valid calendar date and time.');
+  const zone=String(timeZone||'').trim();
+  try{new Intl.DateTimeFormat('en',{timeZone:zone}).format();}catch{throw new Error('Enter a valid IANA timezone such as Asia/Kolkata.');}
+  const offsets=new Set();
+  for(let sample=naive-36*60*60*1000;sample<=naive+36*60*60*1000;sample+=3*60*60*1000){
+    const wall=ctraderHistoryBoundaryParts(sample,zone);
+    offsets.add(Date.UTC(wall.year,wall.month-1,wall.day,wall.hour,wall.minute,wall.second)-sample);
+  }
+  const candidates=[];
+  for(const offset of offsets){
+    const instant=naive-offset;
+    const wall=ctraderHistoryBoundaryParts(instant,zone);
+    if(Object.keys(expected).every(key=>wall[key]===expected[key])&&!candidates.includes(instant))candidates.push(instant);
+  }
+  if(candidates.length===0)throw new Error('That local time does not exist in this timezone because of a clock change. Choose another time.');
+  if(candidates.length>1)throw new Error('That local time occurs twice in this timezone because of a clock change. Choose an unambiguous time.');
+  const instant=candidates[0];
+  const offsetMinutes=Math.round((naive-instant)/60000);
+  const sign=offsetMinutes>=0?'+':'-';
+  const absolute=Math.abs(offsetMinutes);
+  const offsetLabel=`UTC${sign}${String(Math.floor(absolute/60)).padStart(2,'0')}:${String(absolute%60).padStart(2,'0')}`;
+  return {boundaryAt:new Date(instant).toISOString(),boundaryLocal:String(boundaryLocal),timeZone:zone,offsetLabel};
+}
+function updateCtraderHistoryBoundaryPreview(){
+  const preview=document.getElementById('ctrader-history-boundary-preview');
+  if(!preview)return null;
+  const date=document.getElementById('ctrader-history-date')?.value||'';
+  const time=document.getElementById('ctrader-history-time')?.value||'';
+  const timeZone=document.getElementById('ctrader-history-timezone')?.value.trim()||'';
+  try{
+    const boundary=resolveCtraderHistoryBoundary(`${date}T${time}`,timeZone);
+    preview.textContent=`Exact boundary: ${date} ${time} ${timeZone} (${boundary.offsetLabel}) = ${boundary.boundaryAt}. The server will independently validate this instant.`;
+    preview.style.color='var(--text2)';
+    return boundary;
+  }catch(error){
+    preview.textContent=error.message;
+    preview.style.color=date||timeZone?'var(--amber)':'var(--text3)';
+    return null;
+  }
+}
+function ctraderHistoryConnection(){
+  const id=String(vpsCtraderState.history.connectionId||'');
+  return vpsCtraderState.connections.find(connection=>String(connection.id)===id)||null;
+}
+async function openCtraderHistoryModal(connectionId){
+  if(window._dataMode!=='vps'||!window._vpsData?.ctrader)return;
+  const connection=vpsCtraderState.connections.find(item=>String(item.id)===String(connectionId));
+  if(!connection){showToast('That cTrader connection is no longer available.','error');return;}
+  const openedConnectionId=String(connectionId);
+  vpsCtraderState.history.connectionId=openedConnectionId;
+  vpsCtraderState.history.session=null;
+  vpsCtraderState.history.candidates=[];
+  vpsCtraderState.history.requestKey=null;
+  const accountTitle=connection.label||connection.brokerTitleShort||'cTrader';
+  document.getElementById('ctrader-history-account').textContent=`${accountTitle} · Account ${connection.ctidTraderAccountId} · ${String(connection.environment||'unknown').toUpperCase()} environment`;
+  const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone||'Asia/Kolkata';
+  document.getElementById('ctrader-history-date').value='';
+  document.getElementById('ctrader-history-time').value='00:00';
+  document.getElementById('ctrader-history-timezone').value=localZone;
+  document.getElementById('ctrader-history-flat-ack').checked=false;
+  document.getElementById('ctrader-history-error').style.display='none';
+  document.getElementById('ctrader-history-review-error').style.display='none';
+  document.getElementById('ctrader-history-request').style.display='block';
+  document.getElementById('ctrader-history-review').style.display='none';
+  for(const inputId of ['ctrader-history-date','ctrader-history-time','ctrader-history-timezone'])document.getElementById(inputId).oninput=()=>{vpsCtraderState.history.requestKey=null;updateCtraderHistoryBoundaryPreview();};
+  document.getElementById('ctrader-history-flat-ack').onchange=()=>{vpsCtraderState.history.requestKey=null;};
+  updateCtraderHistoryBoundaryPreview();
+  document.getElementById('ctrader-history-modal').style.display='flex';
+  try{
+    const current=await window._vpsData.ctrader.historicalPreview(connectionId);
+    if(String(vpsCtraderState.history.connectionId)!==openedConnectionId)return;
+    const session=ctraderHistorySession(current);
+    const status=String(session?.status||'').toLowerCase();
+    if(session&&status&&!['cancelled','expired','failed'].includes(status)){
+      vpsCtraderState.history.session=session;
+      await showCtraderHistoricalReview(current);
+    }
+  }catch(error){if(error?.status!==404)console.warn('Historical preview lookup failed:',error.message);}
+}
+function closeCtraderHistoryModal(){
+  const modal=document.getElementById('ctrader-history-modal');
+  if(modal)modal.style.display='none';
+}
+async function startCtraderHistoricalPreview(){
+  if(vpsCtraderState.history.busy)return;
+  const boundary=updateCtraderHistoryBoundaryPreview();
+  const errorEl=document.getElementById('ctrader-history-error');
+  if(!boundary){errorEl.textContent='Correct the historical boundary before continuing.';errorEl.style.display='block';return;}
+  const connection=ctraderHistoryConnection();
+  if(!connection){errorEl.textContent='The cTrader connection is no longer available.';errorEl.style.display='block';return;}
+  const acknowledged=document.getElementById('ctrader-history-flat-ack').checked===true;
+  if(!acknowledged){errorEl.textContent='Confirm that this exact cTrader account had no open positions at the selected historical boundary. Without that statement, Edgebook cannot safely reconstruct role-less earlier trades.';errorEl.style.display='block';return;}
+  const requestFingerprint=[connection.id,boundary.boundaryAt,boundary.boundaryLocal,boundary.timeZone,acknowledged].join('|');
+  if(vpsCtraderState.history.requestKey?.fingerprint!==requestFingerprint)vpsCtraderState.history.requestKey={fingerprint:requestFingerprint,key:ctraderHistoryRequestId()};
+  const flatText='You are explicitly stating that this exact account was flat at this boundary. Missing provider size or P&L may still remain execution-only.';
+  showConfirm('Create protected history preview?',`${connection.label||'cTrader'} account ${connection.ctidTraderAccountId} (${String(connection.environment||'unknown').toUpperCase()}) from ${boundary.boundaryLocal.replace('T',' ')} ${boundary.timeZone} (${boundary.offsetLabel}; ${boundary.boundaryAt}). ${flatText}`,async()=>{
+    const button=document.getElementById('ctrader-history-start');
+    vpsCtraderState.history.busy=true;button.disabled=true;button.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Creating preview…';errorEl.style.display='none';
+    try{
+      const payload=await window._vpsData.ctrader.startHistoricalPreview(connection.id,{
+        boundaryLocal:boundary.boundaryLocal,
+        timeZone:boundary.timeZone,
+        boundaryAt:boundary.boundaryAt,
+        acknowledgeNoOpenPositionsAtBoundary:acknowledged,
+        clientRequestId:vpsCtraderState.history.requestKey.key,
+      });
+      vpsCtraderState.history.session=ctraderHistorySession(payload);
+      await showCtraderHistoricalReview(payload);
+      showToast(payload?.recoveredAfterAmbiguousResponse?'Historical preview was already created; its confirmed server state is shown.':'Historical preview started. Existing journal content is unchanged.','success');
+    }catch(error){
+      if(error?.status===409){
+        try{await refreshCtraderHistoricalReview();errorEl.textContent='A historical preview already exists or changed elsewhere. Its latest server state is shown for review.';errorEl.style.display='block';}
+        catch{errorEl.textContent='The preview changed elsewhere. Refresh the broker panel and try again.';errorEl.style.display='block';}
+      }else{errorEl.textContent=error?.message||'The historical preview could not be created.';errorEl.style.display='block';}
+    }finally{vpsCtraderState.history.busy=false;button.disabled=false;button.innerHTML='<i class="fa-solid fa-clock-rotate-left"></i> Create safe preview';}
+  });
+}
+function ctraderCandidateClass(candidate){
+  const raw=String(candidate?.classification||candidate?.matchType||candidate?.kind||'').toLowerCase();
+  const manual=candidate?.manualTrade||candidate?.manual||candidate?.matchedManualTrade||null;
+  if(manual?.deletedAt||manual?.deleted===true||raw.includes('deleted'))return 'deleted';
+  if(raw.includes('execution')||raw.includes('incomplete')||candidate?.projectionEligible===false)return 'execution-only';
+  if(raw.includes('ambiguous')||raw.includes('multiple')||candidate?.ambiguous===true)return 'ambiguous';
+  if(raw.includes('high')||raw.includes('exact')||candidate?.confidence==='high'||Number(candidate?.confidence)>=.9)return 'high-confidence';
+  if(raw.includes('unmatched')||!manual)return 'unmatched';
+  return 'ambiguous';
+}
+function ctraderCandidateStatus(candidate){return String(candidate?.status||candidate?.resolution?.status||'pending').toLowerCase();}
+function ctraderReviewValue(value){
+  if(value==null||value==='')return '—';
+  if(Array.isArray(value))return value.length?value.map(item=>typeof item==='object'?JSON.stringify(item):String(item)).join(', '):'—';
+  if(typeof value==='object'){try{return JSON.stringify(value);}catch{return '[Saved data]';}}
+  return String(value);
+}
+function ctraderDifferenceSummaries(value){
+  if(Array.isArray(value))return value.map(ctraderReviewValue);
+  if(value&&typeof value==='object')return Object.entries(value).sort(([left],[right])=>left.localeCompare(right)).map(([field,difference])=>{
+    if(difference&&typeof difference==='object'&&!Array.isArray(difference)){
+      const manual='manual' in difference?ctraderReviewValue(difference.manual):('existing' in difference?ctraderReviewValue(difference.existing):null);
+      const broker='broker' in difference?ctraderReviewValue(difference.broker):('incoming' in difference?ctraderReviewValue(difference.incoming):null);
+      if(manual!==null||broker!==null)return `${field}: manual ${manual??'—'}, broker ${broker??'—'}`;
+    }
+    return `${field}: ${ctraderReviewValue(difference)}`;
+  });
+  return [];
+}
+function appendCtraderReviewFact(parent,label,value){
+  const row=document.createElement('div');row.className='ctrader-review-fact';
+  const name=document.createElement('span');name.textContent=label;
+  const detail=document.createElement('span');detail.textContent=ctraderReviewValue(value);
+  row.append(name,detail);parent.append(row);
+}
+function ctraderManualSummary(candidate){return candidate?.manualTrade||candidate?.manual||candidate?.matchedManualTrade||null;}
+function ctraderBrokerSummary(candidate){return candidate?.brokerTrade||candidate?.broker||candidate?.stagedBrokerTrade||candidate?.executionGroup||null;}
+function ctraderCandidateAllowedActions(candidate,classification){
+  if(!Array.isArray(candidate?.allowedActions))return [];
+  const classificationActions={
+    'high-confidence':new Set(['link_manual','publish_separate','reject']),
+    ambiguous:new Set(['publish_separate','reject']),
+    unmatched:new Set(['publish_separate','reject']),
+    deleted:new Set(['suppress_deleted','reject']),
+    'execution-only':new Set(['reject']),
+  };
+  const allowedByUi=classificationActions[classification]||new Set();
+  return [...new Set(candidate.allowedActions.map(String).filter(action=>allowedByUi.has(action)))];
+}
+function renderCtraderCandidate(candidate){
+  const classification=ctraderCandidateClass(candidate);
+  const manual=ctraderManualSummary(candidate);
+  const broker=ctraderBrokerSummary(candidate);
+  const card=document.createElement('article');card.className=`ctrader-review-card ${classification}`;
+  const head=document.createElement('div');head.className='ctrader-review-card-head';
+  const heading=document.createElement('div');
+  const title=document.createElement('div');title.className='ctrader-review-title';title.textContent=broker?.symbol||manual?.symbol||candidate?.symbol||'Historical cTrader execution';
+  const sub=document.createElement('div');sub.className='ctrader-review-sub';sub.textContent=`Candidate ${candidate?.id||'pending ID'} · ${ctraderCandidateStatus(candidate)}`;
+  heading.append(title,sub);
+  const badge=document.createElement('span');badge.className='ctrader-review-badge';badge.textContent=classification.replace('-',' ');
+  head.append(heading,badge);card.append(head);
+  const columns=document.createElement('div');columns.className='ctrader-review-columns';
+  const brokerColumn=document.createElement('div');brokerColumn.className='ctrader-review-column';const brokerTitle=document.createElement('h5');brokerTitle.textContent=classification==='execution-only'?'Broker-provided execution data (incomplete)':'Broker-provided facts';brokerColumn.append(brokerTitle);
+  for(const [label,value] of [['Position / deal',broker?.positionId||broker?.externalTradeKey||broker?.dealId],['Date / time',broker?.entryAt||broker?.date||candidate?.boundaryAt],['Symbol',broker?.symbol],['Direction',broker?.direction],['Entry',broker?.entryPrice??broker?.entry],['Exit',broker?.exitPrice??broker?.exit],['Size',broker?.quantityLots??broker?.quantity??broker?.size],['P&L',broker?.pnl]])appendCtraderReviewFact(brokerColumn,label,value);
+  const manualColumn=document.createElement('div');manualColumn.className='ctrader-review-column';const manualTitle=document.createElement('h5');manualTitle.textContent=manual?.deletedAt||manual?.deleted?'Protected deleted manual record':'Existing manual journal (preserved)';manualColumn.append(manualTitle);
+  if(manual){
+    const preserved=value=>value===true?'Saved and preserved':value===false?'None saved':'Protected';
+    for(const [label,value] of [['Trade ID',manual.id||manual.recordId],['Date',manual.date||manual.tradeDate],['Strategy',preserved(manual.hasStrategy)],['Emotion',preserved(manual.hasEmotion)],['Notes',preserved(manual.hasNotes)],['Psychology',preserved(manual.hasPsychology)],['Custom fields',Number.isFinite(Number(manual.customFieldCount))?`${Number(manual.customFieldCount)} saved and preserved`:'Protected'],['Screenshots',manual.screenshotCount??0]])appendCtraderReviewFact(manualColumn,label,value);
+  }else appendCtraderReviewFact(manualColumn,'Match','No manual journal record matched deterministically');
+  columns.append(brokerColumn,manualColumn);card.append(columns);
+  const reasons=document.createElement('div');reasons.className='ctrader-review-reasons';
+  const reasonList=Array.isArray(candidate?.reasons)?candidate.reasons:[];
+  const differenceList=ctraderDifferenceSummaries(candidate?.differences);
+  reasons.textContent=`Why: ${reasonList.length?reasonList.map(ctraderReviewValue).join(' · '):'No deterministic match reason was supplied.'}${differenceList.length?` Differences: ${differenceList.map(ctraderReviewValue).join(' · ')}`:''}`;
+  card.append(reasons);
+  const actions=document.createElement('div');actions.className='ctrader-review-actions';
+  const actionLabels={link_manual:'Link broker facts + keep manual journal',publish_separate:'Keep separate / publish broker',suppress_deleted:'Suppress because manually deleted',reject:'Exclude from this import',leave_pending:'Leave pending'};
+  const allowed=ctraderCandidateAllowedActions(candidate,classification);
+  const candidateStatus=ctraderCandidateStatus(candidate);
+  if(candidateStatus==='pending'){
+    for(const action of ['link_manual','publish_separate','suppress_deleted','reject','leave_pending']){
+      if(action!=='leave_pending'&&!allowed.includes(action))continue;
+      const button=document.createElement('button');button.type='button';button.className=action==='link_manual'?'btn-accent':'btn-ghost';button.textContent=actionLabels[action];
+      button.addEventListener('click',()=>confirmCtraderCandidateResolution(candidate,action));actions.append(button);
+    }
+  }
+  const resolutionAction=String(candidate?.resolutionAction||candidate?.resolvedAction||candidate?.action||'');
+  const status=document.createElement('span');status.className='ctrader-review-status';status.textContent=candidateStatus!=='pending'
+    ? (resolutionAction==='reject'?'Excluded from this import. No journal trade was changed.':'This candidate already has a saved decision.')
+    : classification==='deleted'?'Deleted manual rows stay protected unless you explicitly suppress or exclude the broker copy.':classification==='high-confidence'?'Linking keeps this manual trade ID, journal text, custom fields, and screenshots.':'No automatic merge is available for this candidate.';
+  actions.append(status);card.append(actions);return card;
+}
+function renderCtraderHistoricalReview(payload){
+  const session=ctraderHistorySession(payload)||vpsCtraderState.history.session||{};
+  const candidates=ctraderHistoryCandidates(payload);
+  const hasCandidateArray=Array.isArray(payload)||['candidates','reconciliationCandidates','items'].some(key=>Array.isArray(payload?.[key]));
+  if(hasCandidateArray)vpsCtraderState.history.candidates=candidates;
+  vpsCtraderState.history.session=session;
+  const list=vpsCtraderState.history.candidates;
+  const status=String(session.status||'pending').toLowerCase();
+  const boundaryLocal=session.boundaryLocal?String(session.boundaryLocal).replace('T',' '):'the selected boundary';
+  const exact=session.boundaryAt?` (${session.boundaryAt})`:'';
+  document.getElementById('ctrader-history-status').textContent=['queued','fetching','processing','running'].includes(status)
+    ? `Preview is ${status}. Earlier executions from ${boundaryLocal} ${session.timeZone||''}${exact} are being staged; journal rows and analytics remain unchanged.`
+    : `Preview ${status}. Review each staged candidate from ${boundaryLocal} ${session.timeZone||''}${exact}. Nothing pending is included in dashboard totals.`;
+  const counts={pending:0,high:0,ambiguous:0,deleted:0,execution:0};
+  list.forEach(candidate=>{const candidateStatus=ctraderCandidateStatus(candidate);if(candidateStatus==='pending')counts.pending++;const kind=ctraderCandidateClass(candidate);if(kind==='high-confidence')counts.high++;else if(kind==='deleted')counts.deleted++;else if(kind==='execution-only')counts.execution++;else counts.ambiguous++;});
+  const countEl=document.getElementById('ctrader-history-counts');countEl.replaceChildren();
+  for(const [label,value] of [['Pending',counts.pending],['High confidence',counts.high],['Ambiguous / unmatched',counts.ambiguous],['Deleted manual protected',counts.deleted],['Execution-only',counts.execution]]){const pill=document.createElement('span');pill.className='ctrader-history-pill';pill.textContent=`${label}: ${value}`;countEl.append(pill);}
+  const container=document.getElementById('ctrader-history-candidates');container.replaceChildren();
+  if(!list.length){const empty=document.createElement('div');empty.className='ctrader-history-note';empty.textContent=['queued','fetching','processing','running'].includes(status)?'The preview is still running. Refresh shortly; no trade has been published.':'No review candidates were returned. Any incomplete role-less executions remain safely outside the journal.';container.append(empty);}
+  else list.forEach(candidate=>container.append(renderCtraderCandidate(candidate)));
+  document.getElementById('ctrader-history-request').style.display='none';document.getElementById('ctrader-history-review').style.display='block';
+}
+async function showCtraderHistoricalReview(initialPayload=null){
+  document.getElementById('ctrader-history-request').style.display='none';document.getElementById('ctrader-history-review').style.display='block';
+  if(initialPayload)renderCtraderHistoricalReview(initialPayload);
+  return refreshCtraderHistoricalReview();
+}
+async function refreshCtraderHistoricalReview(){
+  const connectionId=String(vpsCtraderState.history.connectionId||'');if(!connectionId)return;
+  const expectedImportId=vpsCtraderState.history.session?.id?String(vpsCtraderState.history.session.id):null;
+  const button=document.getElementById('ctrader-history-refresh');const errorEl=document.getElementById('ctrader-history-review-error');
+  if(button){button.disabled=true;button.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Refreshing…';}errorEl.style.display='none';
+  try{
+    const current=await window._vpsData.ctrader.historicalPreview(connectionId);
+    if(String(vpsCtraderState.history.connectionId)!==connectionId)return null;
+    const session=ctraderHistorySession(current);vpsCtraderState.history.session=session;
+    let payload=current;
+    if(!ctraderHistoryCandidates(current).length&&session?.id)payload=await window._vpsData.ctrader.historicalCandidates(connectionId,session.id);
+    if(String(vpsCtraderState.history.connectionId)!==connectionId)return null;
+    const payloadSession=ctraderHistorySession(payload)||session;
+    if(expectedImportId&&payloadSession?.id&&String(payloadSession.id)!==expectedImportId)return null;
+    renderCtraderHistoricalReview({...payload,historicalImport:payloadSession});
+    return payload;
+  }catch(error){errorEl.textContent=error?.message||'Could not refresh the historical review.';errorEl.style.display='block';throw error;}
+  finally{if(button){button.disabled=false;button.innerHTML='<i class="fa-solid fa-rotate"></i> Refresh';}}
+}
+function confirmCtraderCandidateResolution(candidate,action){
+  const labels={link_manual:'Link broker execution?',publish_separate:'Publish as a separate broker trade?',suppress_deleted:'Suppress this broker copy?',reject:'Exclude this staged candidate?',leave_pending:'Leave this candidate pending?'};
+  const messages={link_manual:'The existing manual trade ID, psychology, strategy, notes, custom fields, and screenshots are preserved. Only verified broker identity and facts are linked.',publish_separate:'The manual row remains unchanged. This broker trade becomes a separate journal row only after confirmation.',suppress_deleted:'The deleted manual row remains deleted and protected. This matching broker copy will be suppressed so history sync cannot resurrect it.',reject:'No journal trade will be created, linked, deleted, or edited. Only this staged candidate is excluded from this historical import, and the import can finish once all remaining candidates have a decision.',leave_pending:'No journal record changes. You can return to this review later.'};
+  showConfirm(labels[action]||'Resolve candidate?',messages[action]||'Confirm this reconciliation decision.',()=>action==='leave_pending'?showToast('Candidate left pending. No journal data changed.','info'):resolveCtraderCandidate(candidate,action));
+}
+async function resolveCtraderCandidate(candidate,action){
+  const connectionId=vpsCtraderState.history.connectionId;const candidateId=String(candidate?.id||'');if(!connectionId||!candidateId)return;
+  const keyId=`${candidateId}:${action}`;let clientRequestId=vpsCtraderState.history.resolutionKeys.get(keyId);if(!clientRequestId){clientRequestId=ctraderHistoryRequestId();vpsCtraderState.history.resolutionKeys.set(keyId,clientRequestId);}
+  const errorEl=document.getElementById('ctrader-history-review-error');
+  const buttons=[...document.querySelectorAll('.ctrader-review-actions button')];buttons.forEach(button=>button.disabled=true);errorEl.style.display='none';
+  try{
+    const result=await window._vpsData.ctrader.resolveHistoricalCandidate(connectionId,candidateId,{action,version:Number.isInteger(candidate?.version)?candidate.version:null,importId:vpsCtraderState.history.session?.id||null,clientRequestId});
+    vpsCtraderState.history.resolutionKeys.delete(keyId);
+    showToast(result?.recoveredAfterAmbiguousResponse?'The decision was already saved; confirmed server state is now shown.':action==='reject'?'Candidate excluded from this import. No journal trade changed.':'Review decision saved.','success');
+    try{await refreshCtraderHistoricalReview();}
+    catch{errorEl.textContent='The decision was saved, but the latest import status could not be refreshed. Use Refresh to load the confirmed server state.';errorEl.style.display='block';}
+    try{await loadVpsCtraderConnections();}catch{}
+  }catch(error){
+    if(error?.status===409){errorEl.textContent='This candidate changed or was resolved elsewhere. The latest server state has been reloaded.';try{await refreshCtraderHistoricalReview();}catch{}}
+    else errorEl.textContent=error?.message||'The review decision was not saved. Your stable retry key was retained.';
+    errorEl.style.display='block';
+  }finally{buttons.forEach(button=>button.disabled=false);}
 }
 async function syncVpsCtraderConnection(id,button){
   const original=button?.innerHTML;if(button){button.disabled=true;button.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Queueing…';}

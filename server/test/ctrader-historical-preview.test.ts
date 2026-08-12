@@ -1,0 +1,947 @@
+import path from "node:path";
+import type { PoolClient, QueryResult } from "pg";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadConfig } from "../src/config.js";
+import { AesGcmTokenCipher, connectionTokenAad } from "../src/ctrader/crypto.js";
+import {
+  CTraderMcpSyncEngine,
+  type CTraderMcpReadClientLike,
+} from "../src/ctrader/mcp-sync.js";
+import { CTraderSyncError, type CTraderSyncResult } from "../src/ctrader/sync.js";
+import { CTraderWorker } from "../src/ctrader/worker.js";
+import type { Database } from "../src/db/database.js";
+import type { EventBus } from "../src/events/event-bus.js";
+
+const userId = "00000000-0000-4000-8000-000000000002";
+const connectionId = "00000000-0000-4000-8000-000000000090";
+const otherConnectionId = "00000000-0000-4000-8000-000000000091";
+const importId = "00000000-0000-4000-8000-000000000092";
+const mappedAccountId = "00000000-0000-4000-8000-000000000093";
+const boundary = new Date("2026-08-11T00:00:00.000Z");
+const through = new Date("2026-08-12T12:00:00.000Z");
+const now = new Date("2026-08-12T12:01:00.000Z");
+
+function result(rows: unknown[] = []): QueryResult {
+  return { rows, rowCount: rows.length, command: "SELECT", oid: 0, fields: [] } as QueryResult;
+}
+
+function config() {
+  return loadConfig({
+    NODE_ENV: "test",
+    PUBLIC_ORIGIN: "http://localhost:3210",
+    DATABASE_URL: "postgresql://localhost/unused",
+    GOOGLE_CLIENT_ID: "test-client.apps.googleusercontent.com",
+    SESSION_PEPPER: "p".repeat(48),
+    COOKIE_SECURE: "false",
+    UPLOAD_ROOT: path.resolve("test-uploads"),
+    CTRADER_MCP_ENABLED: "true",
+    CTRADER_ENCRYPTION_KEYS: JSON.stringify({ 1: Buffer.alloc(32, 17).toString("base64url") }),
+    CTRADER_ACTIVE_KEY_VERSION: "1",
+    CTRADER_TRADING_TIME_ZONE: "UTC",
+  });
+}
+
+function deal(overrides: Record<string, unknown> = {}) {
+  return {
+    dealId: "1001",
+    positionId: "9001",
+    orderId: "8001",
+    tradeSide: "BUY",
+    dealType: "ENTRY",
+    symbolId: "41",
+    symbolName: "XAU/USD",
+    accountId: "5050060",
+    filledVolume: "1000",
+    executionPrice: 2_000,
+    executionTimestamp: new Date("2026-08-11T10:00:00.000Z").getTime(),
+    dealStatus: 2,
+    ...overrides,
+  };
+}
+
+function closedPosition(withPnl = true): unknown[] {
+  return [
+    deal(),
+    deal({
+      dealId: "1002",
+      orderId: "8002",
+      tradeSide: "SELL",
+      dealType: "EXIT",
+      executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-11T11:00:00.000Z").getTime(),
+      ...(withPnl ? { netPnlCents: 2_500 } : {}),
+    }),
+  ];
+}
+
+type ManualRow = {
+  id: string;
+  row_version: number;
+  deleted_at: Date | string | null;
+  symbol: string;
+  direction: "Long" | "Short";
+  entry_price: string;
+  exit_price: string | null;
+  quantity: string;
+  pnl: string | null;
+  trade_date: string;
+  entry_at: string | null;
+  exit_at: string | null;
+};
+
+function manual(id: string, overrides: Partial<ManualRow> = {}): ManualRow {
+  return {
+    id,
+    row_version: 3,
+    deleted_at: null,
+    symbol: "XAU/USD",
+    direction: "Long",
+    entry_price: "2000",
+    exit_price: "2010",
+    quantity: "0.1",
+    pnl: "25",
+    trade_date: "2026-08-11",
+    entry_at: null,
+    exit_at: null,
+    ...overrides,
+  };
+}
+
+function harness(options: {
+  deals?: unknown[];
+  symbols?: unknown[];
+  manualRows?: ManualRow[];
+  importStatus?: "queued" | "running" | "review" | "completed";
+  existingExecutionIds?: string[];
+  identityConflict?: Record<string, unknown>;
+  floorKind?: string;
+  advanceClockOnConnect?: boolean;
+} = {}) {
+  const appConfig = config();
+  const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
+  let status = options.importStatus ?? "running";
+  let counters: Record<string, unknown> = {};
+  const queries: Array<{ sql: string; values: readonly unknown[] }> = [];
+  const executionIds = new Map<string, string>();
+  for (const [index, id] of (options.existingExecutionIds ?? []).entries()) {
+    executionIds.set(id, `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`);
+  }
+  const candidateRows: Array<{ sql: string; values: readonly unknown[] }> = [];
+  let importedStatus: string | null = null;
+  const transactionClient = {
+    query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+      queries.push({ sql, values });
+      if (sql.includes("SELECT import.status, import.counters")) {
+        return result([{
+          status,
+          counters,
+          token_generation: "1",
+          connected: true,
+          sync_cursor: { version: 1, syncedThroughTimestamp: 1234 },
+        }]);
+      }
+      if (sql.includes("SELECT external_execution_id FROM trade_executions")) {
+        return result([...executionIds.keys()].map((external_execution_id) => ({ external_execution_id })));
+      }
+      if (sql.includes("INSERT INTO trade_executions")) {
+        const externalId = String(values[3]);
+        let id = executionIds.get(externalId);
+        if (!id) {
+          id = `00000000-0000-4000-8000-${String(200 + executionIds.size).padStart(12, "0")}`;
+          executionIds.set(externalId, id);
+        }
+        return result([{ id }]);
+      }
+      if (sql.includes("SELECT id FROM trade_executions")) {
+        const id = executionIds.get(String(values[2]));
+        return result(id ? [{ id }] : []);
+      }
+      if (sql.includes("FROM trades") && sql.includes("broker_connection_id IS NULL")) {
+        return result(options.manualRows ?? []);
+      }
+      if (sql.includes("AS existing_trade_id")) {
+        return result([{
+          existing_trade_id: null,
+          existing_trade_deleted_at: null,
+          existing_link_trade_id: null,
+          tombstoned: false,
+          ...options.identityConflict,
+        }]);
+      }
+      if (sql.includes("INSERT INTO ctrader_reconciliation_candidates")) {
+        candidateRows.push({ sql, values });
+        return result([]);
+      }
+      if (sql.includes("UPDATE ctrader_historical_imports SET") && sql.includes("counters=")) {
+        importedStatus = String(values[0]);
+        counters = JSON.parse(String(values[1])) as Record<string, unknown>;
+        status = importedStatus as typeof status;
+        return result([{ id: importId }]);
+      }
+      return result([]);
+    }),
+    release: vi.fn(),
+  } as unknown as PoolClient;
+  const database = {
+    query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+      queries.push({ sql, values });
+      if (sql.includes("FROM ctrader_historical_imports import")) {
+        if (values[0] !== importId || values[1] !== connectionId) return result([]);
+        return result([{
+          id: importId,
+          user_id: userId,
+          broker_connection_id: connectionId,
+          external_account_id: "5050060",
+          provider_environment: "live",
+          boundary_at: boundary,
+          through_at: through,
+          normal_history_floor_at_request: through,
+          normal_history_floor_kind_at_request: options.floorKind ?? "connection_time_empty_attested",
+          boundary_local: "2026-08-11T00:00",
+          time_zone: "UTC",
+          no_open_positions_attested: true,
+          attestation_version: 1,
+          attestation_purpose: "historical_preview_reconciliation",
+          status,
+          counters,
+          connected: true,
+          access_token_ciphertext: cipher.encrypt("secret", connectionTokenAad(connectionId, "access")),
+          encryption_key_version: 1,
+          token_generation: "1",
+          sync_cursor: { version: 1, syncedThroughTimestamp: 1234 },
+          provider_metadata: {
+            historyFloorTimestamp: through.getTime(),
+            historyFloorKind: options.floorKind ?? "connection_time_empty_attested",
+            historyReadValidated: true,
+            noOpenPositionsAttestation: {
+              version: 1,
+              userId,
+              connectionId,
+              accountId: "5050060",
+              environment: "live",
+              boundaryTimestamp: through.getTime(),
+            },
+          },
+          mapped_account_id: mappedAccountId,
+          legacy_mapped_account_id: "legacy-collision",
+        }]);
+      }
+      return result([]);
+    }),
+    connect: vi.fn(async () => {
+      if (options.advanceClockOnConnect) {
+        vi.setSystemTime(new Date(now.getTime() + 10 * 60 * 1_000 + 1));
+      }
+      return transactionClient;
+    }),
+    end: vi.fn(async () => undefined),
+  } as unknown as Database;
+  const readClient = {
+    getBalance: vi.fn(async () => ({ accountId: "5050060", currency: "USD" })),
+    getSymbols: vi.fn(async () => options.symbols ?? [
+      { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" },
+    ]),
+    getAccountInfo: vi.fn(async () => ({})),
+    getDeals: vi.fn(async (request: { fromTimestamp: string; toTimestamp: string }) => {
+      const from = Date.parse(request.fromTimestamp);
+      const to = Date.parse(request.toTimestamp);
+      return (options.deals ?? closedPosition()).filter((row) => {
+        const value = row as Record<string, unknown>;
+        const rawTimestamp = value.executionTimestamp;
+        const executedAt = typeof rawTimestamp === "number" ? rawTimestamp : Number(rawTimestamp);
+        return Number.isFinite(executedAt) && executedAt >= from && executedAt <= to;
+      });
+    }),
+    close: vi.fn(async () => undefined),
+  } satisfies CTraderMcpReadClientLike;
+  const events = { publish: vi.fn(async () => ({ id: 1 })) } as unknown as EventBus;
+  const engine = new CTraderMcpSyncEngine(database, appConfig, cipher, events, () => readClient);
+  return { engine, database, readClient, queries, candidateRows, getStatus: () => importedStatus };
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("CTraderMcpSyncEngine historical preview", () => {
+  it("stages a unique manual match without touching the normal cursor or visible trades", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, queries, candidateRows } = harness({
+      deals: closedPosition(false),
+      manualRows: [manual("00000000-0000-4000-8000-000000000301")],
+    });
+
+    const preview = await engine.previewHistoricalImport(importId, connectionId);
+
+    expect(preview.cursorBefore).toEqual({ version: 1, syncedThroughTimestamp: 1234 });
+    expect(preview.cursorAfter).toEqual(preview.cursorBefore);
+    expect(queries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
+    expect(queries.some(({ sql }) => sql.includes("UPDATE broker_connections SET"))).toBe(false);
+    const values = candidateRows[0]?.values;
+    expect(values?.[8]).toBe("high_confidence");
+    expect(values?.[6]).toBe("00000000-0000-4000-8000-000000000301");
+    const candidateData = JSON.parse(String(values?.[12])) as { allowedActions: string[]; publishBlockedReason: string };
+    expect(candidateData.allowedActions).toEqual(["link_manual", "reject"]);
+    expect(candidateData.publishBlockedReason).toBe("closed_provider_pnl_unavailable");
+    expect(JSON.parse(String(values?.[13]))).toMatchObject({ pnl: null, quantityLots: "0.1" });
+  });
+
+  it("stages missing authoritative lot size as execution-only without guessed trade values", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows } = harness({
+      symbols: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+      manualRows: [manual("00000000-0000-4000-8000-000000000302")],
+    });
+
+    await engine.previewHistoricalImport(importId, connectionId);
+
+    const values = candidateRows[0]?.values;
+    expect(values?.[8]).toBe("execution_only");
+    expect(JSON.parse(String(values?.[10]))).toContain("CTRADER_MCP_LOT_SIZE_UNAVAILABLE");
+    expect(values?.[13]).toBeNull();
+  });
+
+  it("rejects conflicting duplicate provider symbol specifications", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      symbols: [
+        { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" },
+        { id: "41", name: "BTC/USD", lotSize: 1, symbolCategory: "Crypto" },
+      ],
+    });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_SYMBOL_CONFLICT",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates exact canonical duplicate symbol specifications", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const specification = { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" };
+    const { engine, candidateRows } = harness({ symbols: [specification, { ...specification }] });
+    await engine.previewHistoricalImport(importId, connectionId);
+    expect(candidateRows).toHaveLength(1);
+  });
+
+  it("rejects mixed symbol identities inside one provider position", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows } = harness({
+      symbols: [
+        { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" },
+        { id: "42", name: "BTC/USD", lotSize: 1, symbolCategory: "Crypto" },
+      ],
+      deals: [
+        deal(),
+        deal({ dealId: "1002", symbolId: "42", tradeSide: "SELL", dealType: "EXIT" }),
+      ],
+    });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_POSITION_SYMBOL_MISMATCH",
+    });
+    expect(candidateRows).toHaveLength(0);
+  });
+
+  it("rejects unsafe aggregate money rather than overflowing provider P&L", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows } = harness({
+      deals: [
+        deal(),
+        deal({
+          dealId: "1002",
+          tradeSide: "SELL",
+          dealType: "EXIT",
+          filledVolume: "500",
+          netPnlCents: Number.MAX_SAFE_INTEGER,
+        }),
+        deal({
+          dealId: "1003",
+          tradeSide: "SELL",
+          dealType: "EXIT",
+          filledVolume: "500",
+          netPnlCents: 1,
+        }),
+      ],
+    });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_NUMERIC_OVERFLOW",
+    });
+    expect(candidateRows).toHaveLength(0);
+  });
+
+  it("rejects oversized provider account metadata before persistence amplification", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, database } = harness();
+    readClient.getBalance.mockResolvedValue({ accountId: "5050060", currency: "X".repeat(4 * 1024 * 1024) });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_METADATA_INVALID",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when cTrader returns a deal outside the exact immutable half-open window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database, readClient } = harness();
+    readClient.getDeals.mockResolvedValue([deal({ executionTimestamp: through.getTime() })]);
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_DEAL_OUTSIDE_WINDOW",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("bounds recursive incomplete-page splitting and fails closed on a saturated provider", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, database } = harness();
+    readClient.getDeals.mockResolvedValue({ deals: [], hasMore: true });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+    });
+    expect(readClient.getDeals.mock.calls.length).toBeLessThanOrEqual(35);
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "full-range plan", omitFromFull: true },
+    { label: "partition plan", omitFromFull: false },
+  ])("detects a deal missing from the $label", async ({ omitFromFull }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, database } = harness();
+    const rows = closedPosition();
+    readClient.getDeals.mockImplementation(async (request) => {
+      const from = Date.parse(request.fromTimestamp);
+      const to = Date.parse(request.toTimestamp);
+      const isFullRange = to - from > 60 * 60 * 1_000;
+      const selected = (omitFromFull === isFullRange ? rows.slice(0, 1) : rows).filter((row) => {
+        const executedAt = Number((row as Record<string, unknown>).executionTimestamp);
+        return executedAt >= from && executedAt <= to;
+      });
+      return selected;
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_INCOMPLETE",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("accepts reordered but canonically identical dual-plan history", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, candidateRows } = harness();
+    const rows = closedPosition();
+    readClient.getDeals.mockImplementation(async (request) => {
+      const from = Date.parse(request.fromTimestamp);
+      const to = Date.parse(request.toTimestamp);
+      return [...rows].reverse().filter((row) => {
+        const executedAt = Number((row as Record<string, unknown>).executionTimestamp);
+        return executedAt >= from && executedAt <= to;
+      });
+    });
+    await engine.previewHistoricalImport(importId, connectionId);
+    expect(candidateRows).toHaveLength(1);
+  });
+
+  it("rejects a canonical payload discrepancy between validation plans", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, database } = harness();
+    const rows = closedPosition();
+    readClient.getDeals.mockImplementation(async (request) => {
+      const from = Date.parse(request.fromTimestamp);
+      const to = Date.parse(request.toTimestamp);
+      const isFullRange = to - from > 60 * 60 * 1_000;
+      return rows.filter((row) => {
+        const executedAt = Number((row as Record<string, unknown>).executionTimestamp);
+        return executedAt >= from && executedAt <= to;
+      }).map((row) => isFullRange ? row : {
+        ...(row as Record<string, unknown>),
+        executionPrice: String((row as Record<string, unknown>).dealId) === "1001" ? 2_001 : 2_010,
+      });
+    });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_INCOMPLETE",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("shares the 128-request budget across the full and partition validation plans", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, database } = harness({ deals: [] });
+    readClient.getDeals.mockImplementation(async (request) => {
+      const duration = Date.parse(request.toTimestamp) - Date.parse(request.fromTimestamp) + 1;
+      return duration > 34 * 60 * 1_000 ? { deals: [], hasMore: true } : [];
+    });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+    });
+    expect(readClient.getDeals.mock.calls.length).toBeLessThanOrEqual(128);
+    expect(readClient.getDeals.mock.calls.length).toBeGreaterThan(100);
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("fails an import that exceeds its absolute elapsed deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, database } = harness({ deals: [] });
+    readClient.getDeals.mockImplementation(async () => {
+      vi.setSystemTime(new Date(now.getTime() + 10 * 60 * 1_000 + 1));
+      return [];
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+      retryable: false,
+    });
+    expect(readClient.getDeals).toHaveBeenCalledTimes(1);
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("rolls back when the absolute deadline expires during persistence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows } = harness({ advanceClockOnConnect: true });
+    // Advancing when the transaction client is checked out leaves fetch valid
+    // but makes the first persistence deadline check fail atomically.
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+    });
+    expect(candidateRows).toHaveLength(0);
+  });
+
+  it("rejects more than 250 staged positions before any candidate is inserted", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const deals = Array.from({ length: 251 }, (_, index) => deal({
+      dealId: String(10_000 + index),
+      positionId: String(20_000 + index),
+      executionTimestamp: boundary.getTime() + 1_000 + index,
+    }));
+    const { engine, candidateRows } = harness({ deals });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+    });
+    expect(candidateRows).toHaveLength(0);
+  });
+
+  it("rejects more than 5,000 unique executions before persistence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const deals = Array.from({ length: 5_001 }, (_, index) => deal({
+      dealId: String(30_000 + index),
+      executionTimestamp: boundary.getTime() + 1_000 + index,
+    }));
+    const { engine, database } = harness({ deals });
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "deleted",
+      rows: [manual("00000000-0000-4000-8000-000000000303", { deleted_at: now })],
+      classification: "deleted_manual",
+    },
+    {
+      label: "ambiguous",
+      rows: [
+        manual("00000000-0000-4000-8000-000000000304"),
+        manual("00000000-0000-4000-8000-000000000305"),
+      ],
+      classification: "ambiguous",
+    },
+  ])("keeps $label manual matches in explicit review", async ({ rows, classification }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows } = harness({ manualRows: rows });
+    await engine.previewHistoricalImport(importId, connectionId);
+    expect(candidateRows[0]?.values[8]).toBe(classification);
+  });
+
+  it("uses a normalized account mapping exclusively and treats the legacy mapping as fallback only", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, queries } = harness();
+    await engine.previewHistoricalImport(importId, connectionId);
+    const manualQuery = queries.find(({ sql }) =>
+      sql.includes("FROM trades") && sql.includes("broker_connection_id IS NULL"));
+    expect(manualQuery?.sql).toContain("$4::uuid IS NULL AND $5::text IS NOT NULL");
+    expect(manualQuery?.values[3]).toBe(mappedAccountId);
+    expect(manualQuery?.values[4]).toBe("legacy-collision");
+  });
+
+  it("rejects an import requested through a different broker connection", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness();
+    await expect(engine.previewHistoricalImport(importId, otherConnectionId)).rejects.toMatchObject({
+      code: "CTRADER_HISTORICAL_IMPORT_NOT_FOUND",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each(["registration", "connection_time"])(
+    "rejects %s as an unsafe cross-floor historical stitching proof",
+    async (floorKind) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      const { engine, database } = harness({ floorKind });
+      await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+        code: "CTRADER_HISTORICAL_BOUNDARY_CHANGED",
+      });
+      expect(database.connect).not.toHaveBeenCalled();
+    },
+  );
+
+  it("is retry-safe after review commit and does not fetch or persist twice", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, readClient, queries } = harness();
+    await engine.previewHistoricalImport(importId, connectionId);
+    const firstFetchCount = readClient.getDeals.mock.calls.length;
+    await engine.previewHistoricalImport(importId, connectionId);
+    expect(firstFetchCount).toBeGreaterThan(1);
+    expect(readClient.getDeals).toHaveBeenCalledTimes(firstFetchCount);
+    expect(queries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"))).toHaveLength(2);
+  });
+
+  it("completes an empty immutable window instead of leaving an unresolvable active review", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, getStatus } = harness({ deals: [] });
+    await engine.previewHistoricalImport(importId, connectionId);
+    expect(getStatus()).toBe("completed");
+  });
+
+  it.each([
+    {
+      label: "tombstoned",
+      conflict: { tombstoned: true },
+      reason: "broker_tombstone_exists",
+    },
+    {
+      label: "already imported",
+      conflict: { existing_trade_id: "00000000-0000-4000-8000-000000000399" },
+      reason: "already_imported_normal_sync",
+    },
+  ])("does not resurrect or republish a $label broker identity", async ({ conflict, reason }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows, queries } = harness({ identityConflict: conflict });
+    await engine.previewHistoricalImport(importId, connectionId);
+    const values = candidateRows[0]?.values;
+    expect(candidateRows[0]?.sql).toContain("'execution_only'");
+    expect(JSON.parse(String(values?.[6]))).toContain(reason);
+    expect(candidateRows[0]?.sql).toContain("projected_trade, status");
+    expect(candidateRows[0]?.sql).toContain("$8::jsonb,NULL,'pending'");
+    expect(queries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
+  });
+});
+
+describe("CTraderWorker historical preview dispatch", () => {
+  function workerResult(): CTraderSyncResult {
+    return {
+      userId,
+      connectionId,
+      cursorBefore: { syncedThroughTimestamp: 1234 },
+      cursorAfter: { syncedThroughTimestamp: 1234 },
+      counters: {
+        inserted: 2,
+        updated: 0,
+        fetchedDeals: 2,
+        insertedExecutions: 2,
+        updatedExecutions: 0,
+        insertedTrades: 0,
+        updatedTrades: 0,
+        unchangedTrades: 0,
+        archivedTradesPreserved: 0,
+        tombstonesPreserved: 0,
+        positionsProjected: 1,
+        positionsAwaitingReview: 0,
+      },
+    };
+  }
+
+  function workerHarness(preview: () => Promise<CTraderSyncResult>) {
+    const queries: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const database = {
+      query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+        queries.push({ sql, values });
+        return result();
+      }),
+      connect: vi.fn(),
+      end: vi.fn(async () => undefined),
+    } as unknown as Database;
+    const official = { syncConnection: vi.fn(async () => workerResult()) };
+    const mcp = {
+      syncConnection: vi.fn(async () => workerResult()),
+      previewHistoricalImport: vi.fn(preview),
+    };
+    const worker = new CTraderWorker(database, config(), official, mcp, {
+      info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    });
+    const lockClient = { query: vi.fn(async () => result()), release: vi.fn() } as unknown as PoolClient;
+    const run = {
+      id: "00000000-0000-4000-8000-000000000094",
+      broker_connection_id: connectionId,
+      attempt_count: 1,
+      connection_mode: "mcp_read" as const,
+      sync_type: "historical_preview",
+      historical_import_user_id: userId,
+      historical_import_id: importId,
+    };
+    return { worker, lockClient, run, queries, official, mcp };
+  }
+
+  it("dispatches historical_preview to the isolated MCP preview method", async () => {
+    const { worker, lockClient, run, queries, official, mcp } = workerHarness(async () => workerResult());
+    await (worker as unknown as {
+      executeRun(run: typeof run, client: PoolClient): Promise<void>;
+    }).executeRun(run, lockClient);
+
+    expect(mcp.previewHistoricalImport).toHaveBeenCalledWith(importId, connectionId, expect.any(Function));
+    expect(mcp.syncConnection).not.toHaveBeenCalled();
+    expect(official.syncConnection).not.toHaveBeenCalled();
+    const succeeded = queries.find(({ sql }) => sql.includes("status='succeeded'"));
+    expect(succeeded?.values[0]).toBe(JSON.stringify({ syncedThroughTimestamp: 1234 }));
+    expect(succeeded?.values[1]).toBe(JSON.stringify({ syncedThroughTimestamp: 1234 }));
+  });
+
+  it("fails only the import workflow and does not stamp the normal connection error metadata", async () => {
+    const failure = new CTraderSyncError(
+      "CTRADER_HISTORICAL_IMPORT_INVALID",
+      "Historical import cannot be staged",
+      false,
+    );
+    const { worker, lockClient, run, queries } = workerHarness(async () => { throw failure; });
+    await (worker as unknown as {
+      executeRun(run: typeof run, client: PoolClient): Promise<void>;
+    }).executeRun(run, lockClient);
+
+    expect(queries.some(({ sql }) =>
+      sql.includes("UPDATE ctrader_historical_imports SET") && sql.includes("status='failed'"))).toBe(true);
+    expect(queries.some(({ sql }) => sql.includes("UPDATE broker_connections SET"))).toBe(false);
+  });
+
+  it("acknowledges a committed preview after the worker dies before run finalization", async () => {
+    const queries: string[] = [];
+    const database = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes("UPDATE sync_runs run SET") && sql.includes("import.status IN ('review','completed')")) {
+          return result([{ id: "00000000-0000-4000-8000-000000000094" }]);
+        }
+        return result([]);
+      }),
+      connect: vi.fn(),
+      end: vi.fn(async () => undefined),
+    } as unknown as Database;
+    const worker = new CTraderWorker(database, config(), null, null, {
+      info: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    });
+
+    await (worker as unknown as { recoverStaleRuns(): Promise<void> }).recoverStaleRuns();
+
+    const acknowledgement = queries.find((sql) =>
+      sql.includes("UPDATE sync_runs run SET") && sql.includes("import.status IN ('review','completed')"));
+    expect(acknowledgement).toContain("status='succeeded'");
+    expect(acknowledgement).toContain("counters=import.counters");
+    expect(acknowledgement).toContain("cursor_before=connection.sync_cursor");
+  });
+});
+
+describe("normal MCP sync after reviewed reconciliation", () => {
+  const connection = {
+    id: connectionId,
+    user_id: userId,
+    external_account_id: "5050060",
+    provider_environment: "live",
+    connected: true,
+    access_token_ciphertext: "ciphertext",
+    encryption_key_version: 1,
+    token_generation: "1",
+    sync_cursor: {},
+    provider_metadata: {},
+    mapped_account_id: mappedAccountId,
+    legacy_mapped_account_id: null,
+  };
+  const projection = {
+    positionId: "9001",
+    symbolId: "41",
+    symbol: "XAU/USD",
+    asset: "cm" as const,
+    direction: "Long" as const,
+    entryPrice: "2000",
+    exitPrice: "2010",
+    quantityLots: "0.1",
+    pnl: null,
+    isOpen: false,
+    tradeDate: "2026-08-11",
+    entryAt: "2026-08-11T10:00:00.000Z",
+    exitAt: "2026-08-11T11:00:00.000Z",
+    entryTime: "10:00:00",
+    exitTime: "11:00:00",
+    brokerData: { provider: "ctrader", classification: {} },
+  };
+  const counters = {
+    inserted: 0,
+    updated: 0,
+    fetchedDeals: 0,
+    insertedExecutions: 0,
+    updatedExecutions: 0,
+    insertedTrades: 0,
+    updatedTrades: 0,
+    unchangedTrades: 0,
+    archivedTradesPreserved: 0,
+    tombstonesPreserved: 0,
+    positionsProjected: 0,
+    positionsAwaitingReview: 0,
+  };
+
+  function bareEngine() {
+    const appConfig = config();
+    const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
+    const database = { query: vi.fn(), connect: vi.fn(), end: vi.fn() } as unknown as Database;
+    return new CTraderMcpSyncEngine(
+      database,
+      appConfig,
+      cipher,
+      { publish: vi.fn() } as unknown as EventBus,
+    );
+  }
+
+  it("enriches a linked manual row while preserving manual P&L when provider P&L is unavailable", async () => {
+    const queries: Array<{ sql: string; values: readonly unknown[] }> = [];
+    const client = {
+      query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+        queries.push({ sql, values });
+        if (sql.includes("FROM ctrader_trade_links link") && sql.includes("JOIN trades trade")) {
+          return result([{ id: "00000000-0000-4000-8000-000000000401", deleted_at: null }]);
+        }
+        if (sql.includes("UPDATE trades SET")) {
+          return result([{ id: "00000000-0000-4000-8000-000000000401" }]);
+        }
+        return result([]);
+      }),
+    } as unknown as PoolClient;
+    const engine = bareEngine();
+
+    await (engine as unknown as {
+      upsertProjection(
+        client: PoolClient,
+        connection: typeof connection,
+        projection: typeof projection,
+        counters: typeof counters,
+      ): Promise<void>;
+    }).upsertProjection(client, connection, projection, { ...counters });
+
+    const update = queries.find(({ sql }) => sql.includes("UPDATE trades SET"));
+    expect(update?.sql).toContain("pnl=COALESCE($9::numeric,pnl)");
+    expect(update?.values[8]).toBeNull();
+    expect(update?.sql).not.toContain("strategy=");
+    expect(update?.sql).not.toContain("psychology=");
+    expect(update?.sql).not.toContain("custom_fields=");
+  });
+
+  it("never nulls or quarantines a linked manual row when a later projection is incomplete", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        return result([]);
+      }),
+    } as unknown as PoolClient;
+    const engine = bareEngine();
+
+    await (engine as unknown as {
+      quarantineProjection(
+        client: PoolClient,
+        connection: typeof connection,
+        positionId: string,
+        reason: string,
+      ): Promise<void>;
+    }).quarantineProjection(client, connection, "9001", "CTRADER_MCP_LOT_SIZE_UNAVAILABLE");
+
+    expect(queries[0]).toContain("NOT EXISTS");
+    expect(queries[0]).toContain("FROM ctrader_trade_links link");
+    expect(queries[0]).toContain("link.trade_id=trades.id");
+  });
+
+  it("withholds only positions that still have a pending historical review", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        return sql.includes("ctrader_reconciliation_candidates")
+          ? result([{ exists: true }])
+          : result([{ exists: false }]);
+      }),
+    } as unknown as PoolClient;
+    const engine = bareEngine();
+
+    const suppressed = await (engine as unknown as {
+      positionSuppressed(
+        client: PoolClient,
+        connection: typeof connection,
+        positionId: string,
+        counters: typeof counters,
+      ): Promise<boolean>;
+    }).positionSuppressed(client, connection, "9001", { ...counters });
+
+    expect(suppressed).toBe(true);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("candidate.status='pending'");
+    expect(queries[0]).toContain("import.status IN ('queued','running','review')");
+  });
+
+  it("atomically refuses a normal projection when a purge tombstone wins the interleaving", async () => {
+    const queries: string[] = [];
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes("FROM ctrader_trade_links link") && sql.includes("JOIN trades trade")) return result([]);
+        if (sql.includes("SELECT id, deleted_at FROM trades")) return result([]);
+        // Simulate the tombstone committing after the early lookups but before
+        // the guarded INSERT statement evaluates its NOT EXISTS predicate.
+        if (sql.includes("INSERT INTO trades")) return result([]);
+        if (sql.includes("SELECT EXISTS") && sql.includes("ctrader_trade_tombstones")) {
+          return result([{ exists: true }]);
+        }
+        return result([]);
+      }),
+    } as unknown as PoolClient;
+    const engine = bareEngine();
+    const mutableCounters = { ...counters };
+
+    await (engine as unknown as {
+      upsertProjection(
+        client: PoolClient,
+        connection: typeof connection,
+        projection: typeof projection,
+        counters: typeof counters,
+      ): Promise<void>;
+    }).upsertProjection(client, connection, { ...projection, pnl: "25" }, mutableCounters);
+
+    const insert = queries.find((sql) => sql.includes("INSERT INTO trades"));
+    expect(insert).toContain("WHERE NOT EXISTS");
+    expect(insert).toContain("ctrader_trade_tombstones");
+    expect(insert).toContain("DO UPDATE SET");
+    expect(insert?.match(/NOT EXISTS/g)?.length).toBe(2);
+    expect(mutableCounters.tombstonesPreserved).toBe(1);
+    expect(mutableCounters.insertedTrades).toBe(0);
+    expect(queries.some((sql) => sql.includes("UPDATE trade_executions SET trade_id"))).toBe(false);
+  });
+});

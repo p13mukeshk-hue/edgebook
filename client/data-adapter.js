@@ -350,6 +350,85 @@ export function createVpsDataAdapter(api) {
       status: id => api.get(`/ctrader/connections/${encodeURIComponent(id)}/status`),
       sync: id => api.post(`/ctrader/connections/${encodeURIComponent(id)}/sync`, {}),
       disconnect: id => api.post(`/ctrader/connections/${encodeURIComponent(id)}/disconnect`, {}),
+      async startHistoricalPreview(id, {
+        boundaryLocal,
+        timeZone,
+        boundaryAt,
+        acknowledgeNoOpenPositionsAtBoundary = false,
+        clientRequestId,
+      }) {
+        const connectionId = encodeURIComponent(id);
+        const body = {
+          boundaryLocal,
+          timeZone,
+          boundaryAt,
+          acknowledgeNoOpenPositionsAtBoundary: acknowledgeNoOpenPositionsAtBoundary === true,
+          clientRequestId,
+        };
+        const options = clientRequestId ? { headers: { 'idempotency-key': clientRequestId } } : {};
+        try {
+          return await api.post(`/ctrader/connections/${connectionId}/historical-imports`, body, options);
+        } catch (error) {
+          if (clientRequestId && isAmbiguousWriteError(error)) {
+            try {
+              const latest = await api.get(`/ctrader/connections/${connectionId}/historical-imports/current`);
+              const session = latest?.historicalImport ?? latest?.import ?? latest?.session ?? null;
+              const sameRequest = session?.clientRequestId === clientRequestId;
+              if (sameRequest) return { ...latest, recoveredAfterAmbiguousResponse: true };
+              error.latestHistoricalImport = session;
+            } catch {
+              // Preserve the original response uncertainty when the canonical
+              // import session cannot be read either.
+            }
+          }
+          throw error;
+        }
+      },
+      historicalPreview: id => api.get(`/ctrader/connections/${encodeURIComponent(id)}/historical-imports/current`),
+      historicalCandidates: (id, importId = null) => {
+        const query = new URLSearchParams();
+        if (importId) query.set('importId', importId);
+        const suffix = query.toString();
+        return api.get(`/ctrader/connections/${encodeURIComponent(id)}/reconciliation${suffix ? `?${suffix}` : ''}`);
+      },
+      async resolveHistoricalCandidate(id, candidateId, {
+        action,
+        version,
+        importId = null,
+        clientRequestId,
+      }) {
+        const connectionId = encodeURIComponent(id);
+        const encodedCandidateId = encodeURIComponent(candidateId);
+        const body = { action, version, importId, clientRequestId };
+        const headers = {};
+        if (Number.isInteger(version) && version > 0) headers['if-match'] = `"${version}"`;
+        if (clientRequestId) headers['idempotency-key'] = clientRequestId;
+        try {
+          return await api.post(
+            `/ctrader/connections/${connectionId}/reconciliation/${encodedCandidateId}/resolve`,
+            body,
+            { headers },
+          );
+        } catch (error) {
+          if (clientRequestId && isAmbiguousWriteError(error)) {
+            try {
+              const latest = await api.get(`/ctrader/connections/${connectionId}/reconciliation${importId ? `?${new URLSearchParams({ importId })}` : ''}`);
+              const candidates = pickArray(latest, 'candidates');
+              const current = candidates.find(candidate => String(candidate?.id) === String(candidateId));
+              const resolution = current?.resolutionAction ?? current?.resolution?.action ?? null;
+              const resolvedRequest = current?.resolutionClientRequestId ?? current?.resolution?.clientRequestId ?? null;
+              if (resolution === action && resolvedRequest === clientRequestId) {
+                return { candidate: current, recoveredAfterAmbiguousResponse: true };
+              }
+              error.latestCandidate = current ?? null;
+            } catch {
+              // The original mutation result remains unknown; the UI retains
+              // its stable request key and can retry after a later refresh.
+            }
+          }
+          throw error;
+        }
+      },
     },
     screenshots: {
       async upload(tradeId, file) {

@@ -10,6 +10,24 @@ import type { CTraderBrokerService } from "./service.js";
 const stateSchema = z.string().regex(/^[A-Za-z0-9_-]{40,200}$/);
 const authCodeSchema = z.string().min(1).max(4_096);
 const connectionIdSchema = z.string().uuid();
+const historicalImportIdSchema = z.string().uuid();
+const reconciliationCandidateIdSchema = z.string().uuid();
+const clientRequestIdSchema = z.string().uuid();
+const idempotencyKeySchema = z.string().trim().min(8).max(200).regex(/^[A-Za-z0-9:_-]+$/);
+const historicalImportSchema = z.object({
+  boundaryLocal: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/),
+  timeZone: z.string().trim().min(1).max(100),
+  boundaryAt: z.string().datetime({ offset: true }),
+  acknowledgeNoOpenPositionsAtBoundary: z.literal(true),
+  clientRequestId: clientRequestIdSchema,
+}).strict();
+const reconciliationQuerySchema = z.object({ importId: historicalImportIdSchema }).strict();
+const resolveCandidateSchema = z.object({
+  action: z.enum(["link_manual", "publish_separate", "suppress_deleted", "reject"]),
+  version: z.number().int().min(1),
+  importId: historicalImportIdSchema,
+  clientRequestId: clientRequestIdSchema,
+}).strict();
 const createConnectionSchema = z.object({
   grantId: z.string().uuid(),
   ctidTraderAccountId: z.string().regex(/^(?:0|[1-9]\d{0,19})$/),
@@ -179,6 +197,89 @@ export async function registerCTraderRoutes(
       const id = connectionIdSchema.parse(request.params.id);
       const queued = await enabledService().queueManualSync(request.auth!.user.id, id);
       return reply.code(202).send(queued);
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/ctrader/connections/:id/historical-imports",
+    {
+      ...protectedWrite,
+      config: { rateLimit: { max: 3, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      const body = historicalImportSchema.parse(request.body);
+      const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
+      if (idempotencyKey !== body.clientRequestId) {
+        throw new AppError(409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key must match clientRequestId");
+      }
+      const historicalImport = await enabledService().startHistoricalImport({
+        auth: request.auth!,
+        connectionId,
+        boundaryLocal: body.boundaryLocal,
+        timeZone: body.timeZone,
+        boundaryAt: body.boundaryAt,
+        acknowledgeNoOpenPositionsAtBoundary: true,
+        clientRequestId: body.clientRequestId,
+        idempotencyKey,
+      });
+      return reply.code(historicalImport.replayed ? 200 : 202).send({ historicalImport });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/ctrader/connections/:id/historical-imports/current",
+    protectedRead,
+    async (request, reply) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      reply.header("Cache-Control", "no-store");
+      return { historicalImport: await enabledService().currentHistoricalImport(request.auth!.user.id, connectionId) };
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { importId?: string } }>(
+    "/api/ctrader/connections/:id/reconciliation",
+    protectedRead,
+    async (request, reply) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      const query = reconciliationQuerySchema.parse(request.query);
+      reply.header("Cache-Control", "no-store");
+      return enabledService().listReconciliationCandidates(
+        request.auth!.user.id,
+        connectionId,
+        query.importId,
+      );
+    },
+  );
+
+  app.post<{ Params: { id: string; candidateId: string } }>(
+    "/api/ctrader/connections/:id/reconciliation/:candidateId/resolve",
+    protectedWrite,
+    async (request) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      const candidateId = reconciliationCandidateIdSchema.parse(request.params.candidateId);
+      const body = resolveCandidateSchema.parse(request.body);
+      const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
+      if (idempotencyKey !== body.clientRequestId) {
+        throw new AppError(409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key must match clientRequestId");
+      }
+      const ifMatch = request.headers["if-match"];
+      if (ifMatch === undefined) {
+        throw new AppError(428, "PRECONDITION_REQUIRED", "If-Match is required to resolve a candidate");
+      }
+      if (ifMatch !== `\"${body.version}\"` && ifMatch !== String(body.version)) {
+        throw new AppError(409, "VERSION_CONFLICT", "The reconciliation candidate changed; reload before deciding");
+      }
+      return enabledService().resolveReconciliationCandidate({
+        auth: request.auth!,
+        connectionId,
+        candidateId,
+        importId: body.importId,
+        action: body.action,
+        expectedVersion: body.version,
+        clientRequestId: body.clientRequestId,
+        idempotencyKey,
+      });
     },
   );
 

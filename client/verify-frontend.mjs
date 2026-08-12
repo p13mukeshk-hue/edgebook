@@ -786,10 +786,17 @@ requireMatch(app, /html\[data-auth-mode="vps"\] \.ctrader-legacy-only\{display:n
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/start['"]/, 'same-origin cTrader OAuth start route');
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/pending['"]/, 'same-origin cTrader OAuth pending route');
 requireMatch(dataAdapter, /['"]\/ctrader\/mcp\/connect['"]/, 'same-origin cTrader Remote MCP connection route');
+requireMatch(dataAdapter, /\/historical-imports['"`]/, 'same-origin staged cTrader historical-import route');
+requireMatch(dataAdapter, /\/historical-imports\/current/, 'canonical cTrader historical-import recovery route');
+requireMatch(dataAdapter, /\/reconciliation\/\$\{encodedCandidateId\}\/resolve/, 'same-origin cTrader reconciliation route');
+requireMatch(dataAdapter, /startHistoricalPreview[\s\S]*?['"]idempotency-key['"][\s\S]*?recoveredAfterAmbiguousResponse/, 'historical preview lost-response reconciliation');
+requireMatch(dataAdapter, /resolveHistoricalCandidate[\s\S]*?['"]if-match['"][\s\S]*?['"]idempotency-key['"][\s\S]*?recoveredAfterAmbiguousResponse/, 'historical decision concurrency and lost-response reconciliation');
 rejectMatch(dataAdapter, /https?:\/\//i, 'absolute URL in VPS data adapter');
 
 const ctraderMcpModalSource = sourceBetween('<!-- VPS cTrader Remote MCP compatibility.', '<!-- VPS cTrader OAuth account picker');
 const ctraderMcpSubmitSource = sourceBetween('function clearVpsCtraderMcpForm', 'function openVpsCtraderPicker');
+const ctraderHistoryModalSource = sourceBetween('<!-- Historical cTrader imports are staged for review.', '<div class="s-section" style="margin-top:16px">');
+const ctraderHistoryUiSource = sourceBetween('function ctraderHistoryRequestId', 'async function syncVpsCtraderConnection');
 requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-configuration"[\s\S]*?<\/textarea>/, 'full copied Remote MCP configuration field');
 requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-account-id"[^>]*inputmode="numeric"/, 'optional numeric cTrader account ID');
 requireMatch(ctraderMcpModalSource, /id="ctrader-mcp-environment"[\s\S]*?value="live"[\s\S]*?value="demo"/, 'explicit cTrader live or demo environment selection');
@@ -802,6 +809,20 @@ requireMatch(ctraderMcpSubmitSource, /if\(!requestBody\.acknowledgeTradingCreden
 requireMatch(ctraderMcpSubmitSource, /document\.getElementById\(['"]ctrader-mcp-configuration['"]\)\.value=['"]['"]/, 'Remote MCP configuration cleared after submission');
 rejectMatch(ctraderMcpSubmitSource, /localStorage|sessionStorage|console\.(?:log|warn|error)/, 'Remote MCP secret persistence or logging');
 requireMatch(app, /current\.authMode\|\|current\.mode[\s\S]*?Remote MCP compatibility[\s\S]*?Official OAuth/, 'cTrader connection mode rendering');
+requireMatch(ctraderHistoryModalSource, /Import earlier cTrader trades[\s\S]*?Start date[\s\S]*?Timezone \(IANA name\)/, 'historical import boundary controls');
+requireMatch(ctraderHistoryModalSource, /Required:[\s\S]*?no open positions[\s\S]*?does not modify or reuse[\s\S]*?flat when connected/, 'separate required historical lineage statement');
+requireMatch(ctraderHistoryModalSource, /staged preview[\s\S]*?does not publish trades[\s\S]*?change dashboard totals/, 'non-publishing historical preview explanation');
+requireMatch(ctraderHistoryModalSource, /role-less deals cannot be reconstructed safely[\s\S]*?execution-only[\s\S]*?will not guess/, 'historical execution-only safety explanation');
+requireMatch(ctraderHistoryUiSource, /if\(!acknowledged\)[\s\S]*?return;/, 'required historical boundary acknowledgement enforcement');
+requireMatch(ctraderHistoryUiSource, /Exact boundary:[\s\S]*?boundary\.boundaryAt[\s\S]*?server will independently validate/, 'exact historical instant preview');
+requireMatch(ctraderHistoryUiSource, /classificationActions=\{[\s\S]*?deleted:new Set\(\[['"]suppress_deleted['"],['"]reject['"]\]\)[\s\S]*?['"]execution-only['"]:new Set\(\[['"]reject['"]\]\)/, 'classification-scoped historical actions');
+requireMatch(ctraderHistoryUiSource, /if\(!Array\.isArray\(candidate\?\.allowedActions\)\)return \[\]/, 'historical actions fail closed without server authorization');
+requireMatch(ctraderHistoryUiSource, /action===['"]leave_pending['"]\?showToast[\s\S]*?:resolveCtraderCandidate/, 'leave-pending is a non-mutating client decision');
+requireMatch(ctraderHistoryUiSource, /reject:['"]Exclude from this import['"][\s\S]*?allowed\.includes\(action\)/, 'server-authorized historical exclusion control');
+requireMatch(ctraderHistoryUiSource, /reject:['"]No journal trade will be created, linked, deleted, or edited\.[\s\S]*?Only this staged candidate is excluded from this historical import/, 'non-destructive historical exclusion confirmation');
+requireMatch(ctraderHistoryUiSource, /manual\.hasNotes[\s\S]*?manual\.hasPsychology[\s\S]*?customFieldCount[\s\S]*?screenshotCount/, 'privacy-preserving manual journal summary shown in historical review');
+requireMatch(ctraderHistoryUiSource, /entryPrice\?\?broker\?\.entry[\s\S]*?exitPrice\?\?broker\?\.exit[\s\S]*?quantityLots\?\?broker\?\.quantity/, 'canonical broker projection fields shown in historical review');
+requireMatch(ctraderHistoryUiSource, /function ctraderDifferenceSummaries[\s\S]*?Object\.entries\(value\)[\s\S]*?manual[\s\S]*?broker/, 'object-shaped reconciliation differences shown safely');
 
 try {
   const elements = new Map([
@@ -894,6 +915,156 @@ try {
   }
 } catch (error) {
   failures.push(`cTrader execution-quarantine card fixture failed: ${error.message}`);
+}
+
+try {
+  const boundarySource = sourceBetween('function ctraderHistoryBoundaryParts', 'function ctraderHistoryConnection');
+  const { exports: boundaryFixture } = evaluateSecurityFixture(
+    boundarySource,
+    { document: { getElementById: () => null } },
+    '{resolveCtraderHistoryBoundary}',
+  );
+  const indiaBoundary = boundaryFixture.resolveCtraderHistoryBoundary('2026-08-11T00:00', 'Asia/Kolkata');
+  if (indiaBoundary.boundaryAt !== '2026-08-10T18:30:00.000Z' || indiaBoundary.offsetLabel !== 'UTC+05:30') {
+    failures.push('Historical boundary did not resolve the requested India local instant exactly');
+  }
+  for (const [local, label] of [['2026-03-08T02:30', 'nonexistent'], ['2026-11-01T01:30', 'ambiguous']]) {
+    let rejected = false;
+    try { boundaryFixture.resolveCtraderHistoryBoundary(local, 'America/New_York'); }
+    catch (error) { rejected = label === 'nonexistent' ? /does not exist/.test(error.message) : /occurs twice/.test(error.message); }
+    if (!rejected) failures.push(`Historical boundary accepted a ${label} DST wall time`);
+  }
+} catch (error) {
+  failures.push(`cTrader historical-boundary fixture failed: ${error.message}`);
+}
+
+try {
+  const candidateSource = sourceBetween('function ctraderCandidateClass', 'function renderCtraderHistoricalReview');
+  const candidateDocument = makeFakeDocument();
+  const candidateConfirmations = [];
+  const { context, exports: candidateFixture } = evaluateSecurityFixture(
+    candidateSource,
+    {
+      document: candidateDocument,
+      confirmCtraderCandidateResolution: (candidate, action) => candidateConfirmations.push({ candidate, action }),
+    },
+    '{renderCtraderCandidate,ctraderCandidateAllowedActions}',
+  );
+  const baseCandidate = {
+    id: maliciousIdentifier,
+    version: 3,
+    status: 'pending',
+    reasons: [maliciousMarkup],
+    differences: {
+      entryPrice: { manual: '1.24', broker: maliciousMarkup },
+      quantityLots: { existing: '0.10', incoming: '0.12' },
+    },
+    brokerTrade: {
+      symbol: maliciousMarkup,
+      positionId: maliciousIdentifier,
+      entryPrice: '1.25',
+      exitPrice: '1.30',
+      quantityLots: '0.12',
+    },
+    manualTrade: {
+      id: maliciousIdentifier,
+      hasStrategy: true,
+      hasEmotion: true,
+      hasNotes: true,
+      hasPsychology: true,
+      customFieldCount: 3,
+      screenshotCount: 2,
+    },
+  };
+  const deletedCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'deleted_manual',
+    manualTrade: { ...baseCandidate.manualTrade, deletedAt: '2026-08-11T01:00:00Z' },
+    // Even an inconsistent or stale server payload cannot expose link/publish
+    // for a protected deleted-manual classification.
+    allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted'],
+  });
+  const ambiguousCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'ambiguous',
+    allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted'],
+  });
+  const failClosedCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'high_confidence',
+  });
+  const executionOnlyCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'execution_only',
+    manualTrade: null,
+    // Only reject is valid for an incomplete execution, even if a stale or
+    // malicious payload advertises publishing and suppression too.
+    allowedActions: ['publish_separate', 'suppress_deleted', 'reject'],
+  });
+  const unmatchedCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'unmatched',
+    manualTrade: null,
+    // Exclusion appears only because the server explicitly authorized it.
+    allowedActions: ['link_manual', 'suppress_deleted', 'reject'],
+  });
+  const excludedCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'execution_only',
+    status: 'rejected',
+    resolutionAction: 'reject',
+    manualTrade: null,
+    allowedActions: ['reject'],
+  });
+  const collect = (element, predicate, output = []) => {
+    if (predicate(element)) output.push(element);
+    for (const child of element?.children || []) collect(child, predicate, output);
+    return output;
+  };
+  const buttonLabels = card => collect(card, element => element?.tagName === 'BUTTON').map(button => button.textContent);
+  const deletedButtons = buttonLabels(deletedCard);
+  const ambiguousButtons = buttonLabels(ambiguousCard);
+  const failClosedButtons = buttonLabels(failClosedCard);
+  const executionOnlyButtons = buttonLabels(executionOnlyCard);
+  const unmatchedButtons = buttonLabels(unmatchedCard);
+  const excludedButtons = buttonLabels(excludedCard);
+  if (deletedButtons.join('|') !== 'Suppress because manually deleted|Leave pending') {
+    failures.push('Deleted-manual historical candidate exposed an unsafe action');
+  }
+  if (ambiguousButtons.join('|') !== 'Keep separate / publish broker|Leave pending') {
+    failures.push('Ambiguous historical candidate exposed link or suppression');
+  }
+  if (failClosedButtons.join('|') !== 'Leave pending') {
+    failures.push('Historical candidate actions did not fail closed without server allowedActions');
+  }
+  if (executionOnlyButtons.join('|') !== 'Exclude from this import|Leave pending') {
+    failures.push('Execution-only historical candidate did not expose only its server-authorized exclusion decision');
+  }
+  if (unmatchedButtons.join('|') !== 'Exclude from this import|Leave pending') {
+    failures.push('Unmatched historical candidate did not expose only its server-authorized exclusion decision');
+  }
+  if (excludedButtons.length !== 0 || !collect(excludedCard, element => /Excluded from this import\. No journal trade was changed\./.test(element?.textContent || '')).length) {
+    failures.push('Completed historical exclusion still exposed actions or omitted its non-destructive saved state');
+  }
+  for (const card of [executionOnlyCard, unmatchedCard]) {
+    const excludeButton = collect(card, element => element?.tagName === 'BUTTON').find(button => button.textContent === 'Exclude from this import');
+    excludeButton?.listeners.get('click')?.();
+  }
+  if (candidateConfirmations.length !== 2 || candidateConfirmations.some(call => call.action !== 'reject')) {
+    failures.push('Server-authorized exclusion buttons did not request an explicit reject confirmation');
+  }
+  if (candidateDocument.created.some(element => element._innerHtmlWrites > 0) || context.__edgebookXss) {
+    failures.push('Historical candidate renderer used executable HTML for untrusted broker/manual values');
+  }
+  const allText = candidateDocument.created.map(element => element.textContent).join('\n');
+  if (!allText.includes(maliciousMarkup)) {
+    failures.push('Historical candidate fixture did not exercise malicious broker/manual text');
+  }
+  for (const expected of ['1.25', '1.30', '0.12', 'entryPrice: manual 1.24, broker', '3 saved and preserved', 'Saved and preserved']) {
+    if (!allText.includes(expected)) failures.push(`Historical candidate omitted canonical review value: ${expected}`);
+  }
+} catch (error) {
+  failures.push(`cTrader historical-candidate security fixture failed: ${error.message}`);
 }
 
 try {
@@ -1949,6 +2120,127 @@ for (const expectedPath of [
   '/ctrader/connections/connection-1/disconnect',
 ]) {
   if (!ctraderCalls.some(call => call.path === expectedPath)) failures.push(`Missing cTrader adapter call ${expectedPath}`);
+}
+
+// Historical preview and per-candidate decisions retain one idempotency key
+// across a lost response, then accept only the matching canonical server row.
+const historicalCalls = [];
+let canonicalHistoricalImport = null;
+let omitCanonicalHistoricalRequestId = false;
+let canonicalHistoricalCandidate = {
+  id: 'candidate-1',
+  version: 3,
+  status: 'pending',
+  allowedActions: ['link_manual'],
+};
+let omitCanonicalResolutionRequestId = false;
+const historicalApi = {
+  async get(requestPath) {
+    historicalCalls.push({ method: 'GET', path: requestPath });
+    if (requestPath.endsWith('/historical-imports/current')) return { historicalImport: canonicalHistoricalImport };
+    if (requestPath.includes('/reconciliation?')) return { historicalImport: canonicalHistoricalImport, candidates: [canonicalHistoricalCandidate] };
+    return {};
+  },
+  async post(requestPath, body, options) {
+    historicalCalls.push({ method: 'POST', path: requestPath, body: JSON.parse(JSON.stringify(body)), options });
+    if (requestPath.endsWith('/historical-imports')) {
+      canonicalHistoricalImport = {
+        id: 'import-1',
+        status: 'queued',
+        ...body,
+        clientRequestId: omitCanonicalHistoricalRequestId ? null : body.clientRequestId,
+      };
+      const error = new Error('historical preview response lost after commit');
+      error.code = 'NETWORK_ERROR';
+      throw error;
+    }
+    if (requestPath.endsWith('/candidate-1/resolve')) {
+      canonicalHistoricalCandidate = {
+        ...canonicalHistoricalCandidate,
+        status: 'linked',
+        version: 4,
+        resolutionAction: body.action,
+        resolutionClientRequestId: omitCanonicalResolutionRequestId ? null : body.clientRequestId,
+      };
+      const error = new Error('historical decision response lost after commit');
+      error.status = 500;
+      throw error;
+    }
+    return {};
+  },
+};
+const historicalData = createVpsDataAdapter(historicalApi);
+const historyRequestId = '11111111-1111-4111-8111-111111111111';
+const historyBoundary = {
+  boundaryLocal: '2026-08-11T00:00',
+  timeZone: 'Asia/Kolkata',
+  boundaryAt: '2026-08-10T18:30:00.000Z',
+  acknowledgeNoOpenPositionsAtBoundary: true,
+  clientRequestId: historyRequestId,
+};
+const recoveredHistory = await historicalData.ctrader.startHistoricalPreview('connection-1', historyBoundary);
+const resolutionRequestId = '22222222-2222-4222-8222-222222222222';
+const recoveredResolution = await historicalData.ctrader.resolveHistoricalCandidate('connection-1', 'candidate-1', {
+  action: 'link_manual',
+  version: 3,
+  importId: 'import-1',
+  clientRequestId: resolutionRequestId,
+});
+const historyPost = historicalCalls.find(call => call.method === 'POST' && call.path.endsWith('/historical-imports'));
+const resolutionPost = historicalCalls.find(call => call.method === 'POST' && call.path.endsWith('/candidate-1/resolve'));
+if (!recoveredHistory?.recoveredAfterAmbiguousResponse || recoveredHistory?.historicalImport?.clientRequestId !== historyRequestId ||
+    historyPost?.options?.headers?.['idempotency-key'] !== historyRequestId || historyPost?.body?.boundaryAt !== historyBoundary.boundaryAt ||
+    historyPost?.body?.acknowledgeNoOpenPositionsAtBoundary !== true) {
+  failures.push('Lost historical-preview response was not reconciled by exact boundary, acknowledgement, and idempotency key');
+}
+if (!recoveredResolution?.recoveredAfterAmbiguousResponse || recoveredResolution?.candidate?.status !== 'linked' ||
+    resolutionPost?.options?.headers?.['idempotency-key'] !== resolutionRequestId || resolutionPost?.options?.headers?.['if-match'] !== '"3"' ||
+    resolutionPost?.body?.action !== 'link_manual') {
+  failures.push('Lost historical decision response was not reconciled with idempotency and optimistic concurrency');
+}
+
+// A canonical row without the exact resolution request ID is not proof that
+// this ambiguous write committed; it may be an older decision from elsewhere.
+canonicalHistoricalCandidate = {
+  ...canonicalHistoricalCandidate,
+  status: 'linked',
+  resolutionAction: 'link_manual',
+  resolutionClientRequestId: null,
+};
+omitCanonicalResolutionRequestId = true;
+let rejectedUnprovenResolution = false;
+try {
+  await historicalData.ctrader.resolveHistoricalCandidate('connection-1', 'candidate-1', {
+    action: 'link_manual',
+    version: 3,
+    importId: 'import-1',
+    clientRequestId: '33333333-3333-4333-8333-333333333333',
+  });
+} catch (error) {
+  rejectedUnprovenResolution = error?.latestCandidate?.resolutionClientRequestId === null;
+}
+if (!rejectedUnprovenResolution) {
+  failures.push('Historical decision recovery accepted a canonical row without the exact client request ID');
+}
+
+// Matching boundary data alone cannot prove which historical-start request
+// committed after a lost response; only the server's exact request ID can.
+canonicalHistoricalImport = {
+  ...canonicalHistoricalImport,
+  clientRequestId: null,
+};
+omitCanonicalHistoricalRequestId = true;
+let rejectedUnprovenHistoricalStart = false;
+try {
+  await historicalData.ctrader.startHistoricalPreview('connection-1', {
+    ...historyBoundary,
+    clientRequestId: '44444444-4444-4444-8444-444444444444',
+  });
+} catch (error) {
+  rejectedUnprovenHistoricalStart = error?.latestHistoricalImport?.clientRequestId === null;
+}
+if (!rejectedUnprovenHistoricalStart) {
+  failures.push('Historical-preview recovery accepted a canonical row without the exact client request ID');
 }
 
 // Verify exact response wrappers and optimistic concurrency propagation.

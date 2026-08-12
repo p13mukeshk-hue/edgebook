@@ -48,6 +48,26 @@ function mockService() {
     createConnection: vi.fn(),
     connectionStatus: vi.fn(),
     queueManualSync: vi.fn(),
+    startHistoricalImport: vi.fn(async () => ({
+      id: "00000000-0000-4000-8000-000000000070",
+      connectionId: "00000000-0000-4000-8000-000000000090",
+      status: "queued",
+      boundaryAt: "2026-08-10T18:30:00.000Z",
+      boundaryLocal: "2026-08-11T00:00",
+      timeZone: "Asia/Kolkata",
+      throughAt: "2026-08-12T05:00:00.000Z",
+      acknowledgedAt: "2026-08-12T05:00:00.000Z",
+      acknowledgeNoOpenPositionsAtBoundary: true,
+      clientRequestId: "00000000-0000-4000-8000-000000000071",
+      counters: {},
+      error: null,
+      version: 1,
+      createdAt: "2026-08-12T05:00:00.000Z",
+      finishedAt: null,
+    })),
+    currentHistoricalImport: vi.fn(async () => null),
+    listReconciliationCandidates: vi.fn(async () => ({ historicalImport: {}, candidates: [] })),
+    resolveReconciliationCandidate: vi.fn(async () => ({ candidate: {}, historicalImport: {} })),
     disconnect: vi.fn(),
   } as unknown as CTraderBrokerService;
 }
@@ -211,6 +231,118 @@ describe("cTrader HTTP contract", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(service.connectMcp).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("starts an explicitly attested, account-scoped historical preview", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const connectionId = "00000000-0000-4000-8000-000000000090";
+    const clientRequestId = "00000000-0000-4000-8000-000000000071";
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/ctrader/connections/${connectionId}/historical-imports`,
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+        "idempotency-key": clientRequestId,
+      },
+      payload: {
+        boundaryLocal: "2026-08-11T00:00",
+        timeZone: "Asia/Kolkata",
+        boundaryAt: "2026-08-10T18:30:00.000Z",
+        acknowledgeNoOpenPositionsAtBoundary: true,
+        clientRequestId,
+      },
+    });
+    expect(response.statusCode).toBe(202);
+    expect(service.startHistoricalImport).toHaveBeenCalledWith(expect.objectContaining({
+      connectionId,
+      boundaryLocal: "2026-08-11T00:00",
+      timeZone: "Asia/Kolkata",
+      acknowledgeNoOpenPositionsAtBoundary: true,
+      clientRequestId,
+    }));
+    await app.close();
+  });
+
+  it.each([
+    { name: "no boundary attestation", header: "00000000-0000-4000-8000-000000000071", acknowledged: false, expected: 400 },
+    { name: "mismatched idempotency identity", header: "00000000-0000-4000-8000-000000000072", acknowledged: true, expected: 409 },
+  ])("rejects historical preview with $name", async ({ header, acknowledged, expected }) => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/connections/00000000-0000-4000-8000-000000000090/historical-imports",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+        "idempotency-key": header,
+      },
+      payload: {
+        boundaryLocal: "2026-08-11T00:00",
+        timeZone: "Asia/Kolkata",
+        boundaryAt: "2026-08-10T18:30:00.000Z",
+        acknowledgeNoOpenPositionsAtBoundary: acknowledged,
+        clientRequestId: "00000000-0000-4000-8000-000000000071",
+      },
+    });
+    expect(response.statusCode).toBe(expected);
+    expect(service.startHistoricalImport).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("requires If-Match and matching idempotency identity for reconciliation decisions", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const clientRequestId = "00000000-0000-4000-8000-000000000073";
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/connections/00000000-0000-4000-8000-000000000090/reconciliation/00000000-0000-4000-8000-000000000074/resolve",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+        "idempotency-key": clientRequestId,
+      },
+      payload: {
+        action: "link_manual",
+        version: 1,
+        importId: "00000000-0000-4000-8000-000000000070",
+        clientRequestId,
+      },
+    });
+    expect(response.statusCode).toBe(428);
+    expect(service.resolveReconciliationCandidate).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("passes a versioned reconciliation decision only with matching preconditions", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const clientRequestId = "00000000-0000-4000-8000-000000000073";
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/connections/00000000-0000-4000-8000-000000000090/reconciliation/00000000-0000-4000-8000-000000000074/resolve",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+        "idempotency-key": clientRequestId,
+        "if-match": '"3"',
+      },
+      payload: {
+        action: "suppress_deleted",
+        version: 3,
+        importId: "00000000-0000-4000-8000-000000000070",
+        clientRequestId,
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(service.resolveReconciliationCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      action: "suppress_deleted",
+      expectedVersion: 3,
+      clientRequestId,
+    }));
     await app.close();
   });
 });

@@ -16,10 +16,18 @@ type QueuedRun = QueryResultRow & {
   broker_connection_id: string;
   attempt_count: number;
   connection_mode: "official" | "mcp_read";
+  sync_type: string;
+  historical_import_user_id: string | null;
+  historical_import_id: string | null;
 };
 
 type ConnectionSyncEngine = {
   syncConnection(connectionId: string, heartbeat?: () => Promise<void>): Promise<CTraderSyncResult>;
+  previewHistoricalImport?(
+    importId: string,
+    connectionId: string,
+    heartbeat?: () => Promise<void>,
+  ): Promise<CTraderSyncResult>;
 };
 
 type Logger = Pick<Console, "info" | "warn" | "error">;
@@ -55,7 +63,10 @@ function safeError(error: unknown): { code: string; message: string; retryable: 
   }
   return {
     code: "CTRADER_WORKER_FAILED",
-    message: (error instanceof Error ? error.message : "The cTrader worker failed").slice(0, 2_000),
+    // Database, driver and provider errors can contain infrastructure or
+    // credential context. Only reviewed CTraderSyncError messages are safe to
+    // persist and expose through run status.
+    message: "The cTrader worker failed",
     retryable: false,
     requiresReauth: false,
   };
@@ -174,7 +185,9 @@ export class CTraderWorker {
     try {
       await client.query("BEGIN");
       const queued = await client.query<QueuedRun>(
-        `SELECT sr.id, sr.broker_connection_id, sr.attempt_count, c.connection_mode
+        `SELECT sr.id, sr.broker_connection_id, sr.attempt_count, sr.sync_type,
+                sr.historical_import_user_id, sr.historical_import_id,
+                c.connection_mode
          FROM sync_runs sr
          JOIN broker_connections c ON c.id=sr.broker_connection_id
          WHERE sr.status='queued' AND sr.not_before <= now()
@@ -184,6 +197,20 @@ export class CTraderWorker {
              OR (c.connection_mode='mcp_read' AND c.oauth_scope='mcp_read')
            )
            AND c.provider_environment IS NOT NULL AND c.connected=true
+           AND (
+             sr.sync_type <> 'historical_preview'
+             OR (
+               sr.historical_import_user_id=c.user_id
+               AND sr.historical_import_id IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM ctrader_historical_imports import
+                 WHERE import.id=sr.historical_import_id
+                   AND import.user_id=sr.historical_import_user_id
+                   AND import.broker_connection_id=sr.broker_connection_id
+                   AND import.status IN ('queued','running','review','completed')
+               )
+             )
+           )
          ORDER BY sr.started_at ASC, sr.id ASC
          FOR UPDATE OF sr SKIP LOCKED
          LIMIT 1`,
@@ -198,9 +225,20 @@ export class CTraderWorker {
            claimed_at=now(), heartbeat_at=now(), finished_at=NULL,
            error_code=NULL, error_message=NULL
          WHERE id=$1
-         RETURNING id, broker_connection_id, attempt_count`,
+         RETURNING id, broker_connection_id, attempt_count,
+                   sync_type, historical_import_user_id, historical_import_id`,
         [run.id],
       );
+      if (run.sync_type === "historical_preview" && run.historical_import_id !== null) {
+        await client.query(
+          `UPDATE ctrader_historical_imports SET status='running',
+             error_code=NULL, error_message=NULL, finished_at=NULL,
+             row_version=row_version+1
+           WHERE id=$1 AND user_id=$2 AND broker_connection_id=$3
+             AND status='queued'`,
+          [run.historical_import_id, run.historical_import_user_id, run.broker_connection_id],
+        );
+      }
       await client.query("COMMIT");
       const claimedRow = claimed.rows[0];
       return claimedRow ? { ...claimedRow, connection_mode: run.connection_mode } : null;
@@ -241,7 +279,30 @@ export class CTraderWorker {
           false,
         );
       }
-      const result = await engine.syncConnection(run.broker_connection_id, heartbeat);
+      let result: CTraderSyncResult;
+      if (run.sync_type === "historical_preview") {
+        if (!run.historical_import_id || !run.historical_import_user_id) {
+          throw new CTraderSyncError(
+            "CTRADER_HISTORICAL_IMPORT_INVALID",
+            "The historical preview run is missing its account-bound import identity",
+            false,
+          );
+        }
+        if (run.connection_mode !== "mcp_read" || !engine.previewHistoricalImport) {
+          throw new CTraderSyncError(
+            "CTRADER_HISTORICAL_PREVIEW_UNSUPPORTED",
+            "Historical preview is unavailable for this cTrader connection mode",
+            false,
+          );
+        }
+        result = await engine.previewHistoricalImport(
+          run.historical_import_id,
+          run.broker_connection_id,
+          heartbeat,
+        );
+      } else {
+        result = await engine.syncConnection(run.broker_connection_id, heartbeat);
+      }
       await this.database.query(
         `UPDATE sync_runs SET status='succeeded', cursor_before=$1::jsonb,
            cursor_after=$2::jsonb, counters=$3::jsonb, heartbeat_at=now(),
@@ -269,13 +330,30 @@ export class CTraderWorker {
            WHERE id=$3 AND status='running'`,
           [safe.code, safe.message, run.id],
         );
-        await this.database.query(
-          `UPDATE broker_connections SET
-             provider_metadata=(provider_metadata - 'lastErrorCode' - 'lastErrorMessage')
-               || jsonb_build_object('lastErrorCode',$1::text,'lastErrorMessage',$2::text)
-           WHERE id=$3`,
-          [safe.code, safe.message, run.broker_connection_id],
-        );
+        if (run.sync_type === "historical_preview" && run.historical_import_id) {
+          await this.database.query(
+            `UPDATE ctrader_historical_imports SET
+               status='failed', error_code=$1, error_message=$2,
+               finished_at=now(), row_version=row_version+1
+             WHERE id=$3 AND user_id=$4 AND broker_connection_id=$5
+               AND status IN ('queued','running')`,
+            [
+              safe.code,
+              safe.message,
+              run.historical_import_id,
+              run.historical_import_user_id,
+              run.broker_connection_id,
+            ],
+          );
+        } else {
+          await this.database.query(
+            `UPDATE broker_connections SET
+               provider_metadata=(provider_metadata - 'lastErrorCode' - 'lastErrorMessage')
+                 || jsonb_build_object('lastErrorCode',$1::text,'lastErrorMessage',$2::text)
+             WHERE id=$3`,
+            [safe.code, safe.message, run.broker_connection_id],
+          );
+        }
         this.logger.error(`cTrader sync ${run.id} failed [${safe.code}]: ${safe.message}`);
       }
     } finally {
@@ -329,6 +407,38 @@ export class CTraderWorker {
       `DELETE FROM oauth_transactions
        WHERE provider='ctrader' AND expires_at < now()-interval '1 day'`,
     );
+    // The preview transaction commits candidates and import counters before
+    // this worker acknowledges its sync_run. If the process dies in that tiny
+    // interval, recognize the committed import as canonical success instead
+    // of replaying or eventually failing a completed financial import.
+    const acknowledgedHistorical = await this.database.query<{ id: string }>(
+      `UPDATE sync_runs run SET
+         status='succeeded', heartbeat_at=now(), finished_at=now(),
+         cursor_before=connection.sync_cursor,
+         cursor_after=connection.sync_cursor,
+         counters=import.counters,
+         error_code=NULL, error_message=NULL
+       FROM ctrader_historical_imports import
+       JOIN broker_connections connection
+         ON connection.user_id=import.user_id
+        AND connection.id=import.broker_connection_id
+       WHERE run.sync_type='historical_preview'
+         AND run.status IN ('queued','running')
+         AND run.historical_import_id=import.id
+         AND run.historical_import_user_id=import.user_id
+         AND run.broker_connection_id=import.broker_connection_id
+         AND import.status IN ('review','completed')
+         AND (
+           run.status='queued'
+           OR COALESCE(run.heartbeat_at, run.claimed_at, run.started_at)
+             < now()-($1::int*interval '1 second')
+         )
+       RETURNING run.id`,
+      [this.config.cTrader.staleAfterSeconds],
+    );
+    if (acknowledgedHistorical.rows.length > 0) {
+      this.logger.info(`Acknowledged ${acknowledgedHistorical.rows.length} committed historical cTrader preview(s)`);
+    }
     const recovered = await this.database.query<{ id: string }>(
       `UPDATE sync_runs SET
          status=CASE WHEN attempt_count < 3 THEN 'queued' ELSE 'failed' END,
@@ -351,11 +461,37 @@ export class CTraderWorker {
       this.logger.warn(`Recovered ${recovered.rows.length} stale cTrader sync run(s)`);
     }
     await this.database.query(
+      `UPDATE ctrader_historical_imports import SET
+         status='failed', error_code='STALE_WORKER_RECOVERED',
+         error_message='The historical preview worker stopped repeatedly; start a new reviewed import',
+         finished_at=now(), row_version=import.row_version+1
+       FROM sync_runs run
+       WHERE run.historical_import_id=import.id
+         AND run.historical_import_user_id=import.user_id
+         AND run.broker_connection_id=import.broker_connection_id
+         AND run.sync_type='historical_preview'
+         AND run.status='failed'
+         AND import.status IN ('queued','running')`,
+    );
+    await this.database.query(
       `UPDATE sync_runs sr SET status='cancelled', finished_at=now(),
          error_code='DISCONNECTED', error_message='The cTrader connection is disconnected'
        FROM broker_connections c
        WHERE sr.broker_connection_id=c.id AND sr.status='queued'
          AND c.provider='ctrader' AND c.connected=false`,
+    );
+    await this.database.query(
+      `UPDATE ctrader_historical_imports import SET
+         status='cancelled', error_code='DISCONNECTED',
+         error_message='The cTrader connection is disconnected',
+         finished_at=now(), row_version=import.row_version+1
+       FROM sync_runs run
+       WHERE run.historical_import_id=import.id
+         AND run.historical_import_user_id=import.user_id
+         AND run.broker_connection_id=import.broker_connection_id
+         AND run.sync_type='historical_preview'
+         AND run.status='cancelled'
+         AND import.status IN ('queued','running')`,
     );
   }
 }

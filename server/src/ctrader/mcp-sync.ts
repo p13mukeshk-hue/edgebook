@@ -9,8 +9,20 @@ import { CTraderMcpError, CTraderMcpReadClient } from "./mcp.js";
 import { CTraderSyncError, type CTraderSyncCounters, type CTraderSyncResult } from "./sync.js";
 
 const MAX_HISTORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAX_HISTORICAL_PREVIEW_SPLIT_DEPTH = 16;
+const MAX_HISTORICAL_PREVIEW_REQUESTS = 128;
+const MAX_HISTORICAL_PREVIEW_DEALS = 5_000;
+const MAX_HISTORICAL_PREVIEW_POSITIONS = 250;
+const MAX_HISTORICAL_MANUAL_CANDIDATES = 1_000;
+const MAX_HISTORICAL_PREVIEW_ELAPSED_MS = 10 * 60 * 1_000;
 
 type JsonRecord = Record<string, unknown>;
+
+type HistoricalFetchBudget = {
+  deadline: number;
+  requestCount: number;
+  processedDeals: number;
+};
 
 type McpConnectionRow = QueryResultRow & {
   id: string;
@@ -35,6 +47,40 @@ type ExistingTradeRow = QueryResultRow & {
 type StoredExecutionRow = QueryResultRow & {
   external_position_id: string;
   raw_payload: unknown;
+};
+
+type HistoricalImportRow = QueryResultRow & {
+  id: string;
+  user_id: string;
+  broker_connection_id: string;
+  external_account_id: string;
+  provider_environment: "live" | "demo";
+  boundary_at: Date | string;
+  through_at: Date | string;
+  normal_history_floor_at_request: Date | string;
+  normal_history_floor_kind_at_request: string;
+  boundary_local: string;
+  time_zone: string;
+  no_open_positions_attested: boolean;
+  attestation_version: number;
+  attestation_purpose: string;
+  status: "queued" | "running" | "review" | "completed" | "failed" | "cancelled";
+  counters: unknown;
+};
+
+type HistoricalManualTradeRow = QueryResultRow & {
+  id: string;
+  row_version: number;
+  deleted_at: Date | string | null;
+  symbol: string;
+  direction: "Long" | "Short";
+  entry_price: string;
+  exit_price: string | null;
+  quantity: string;
+  pnl: string | null;
+  trade_date: Date | string;
+  entry_at: Date | string | null;
+  exit_at: Date | string | null;
 };
 
 type McpSymbol = {
@@ -85,6 +131,15 @@ type McpProjection = {
   brokerData: JsonRecord;
 };
 
+export type CTraderHistoricalPreviewCounters = CTraderSyncCounters & {
+  positionsStaged: number;
+  highConfidence: number;
+  ambiguous: number;
+  deletedManual: number;
+  unmatched: number;
+  executionOnly: number;
+};
+
 export interface CTraderMcpReadClientLike {
   getAccountInfo(): Promise<unknown>;
   getBalance(): Promise<unknown>;
@@ -129,7 +184,7 @@ function textValue(value: unknown, field: string, required = false): string | nu
 
 function finiteNumber(value: unknown, field: string, positive = false): number {
   const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
-  if (!Number.isFinite(number) || (positive && number <= 0)) {
+  if (!Number.isFinite(number) || Math.abs(number) > Number.MAX_SAFE_INTEGER || (positive && number <= 0)) {
     throw new CTraderSyncError("CTRADER_MCP_DEAL_INVALID", `cTrader returned an invalid ${field}`, false);
   }
   return number;
@@ -312,6 +367,23 @@ function assertCompleteHistoryPage(value: unknown): void {
   }
 }
 
+function historyPageIsIncomplete(value: unknown): boolean {
+  const object = objectValue(value);
+  if (
+    object.hasMore === true
+    || object.has_more === true
+    || object.nextCursor !== undefined
+    || object.next_cursor !== undefined
+    || object.cursor !== undefined
+  ) return true;
+  if (object.total !== undefined && object.limit !== undefined) {
+    const total = Number(object.total);
+    const page = unwrapArray(value, ["deals", "data", "result", "items", "history"], "deal history");
+    return Number.isFinite(total) && total > page.length;
+  }
+  return false;
+}
+
 function normalizedSymbolName(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
@@ -327,7 +399,7 @@ function compareDealIds(left: string, right: string): number {
 
 function normalizeSymbols(value: unknown): McpSymbol[] {
   const rows = unwrapArray(value, ["symbols", "data", "result", "items"], "symbols");
-  const symbols: McpSymbol[] = [];
+  const symbols = new Map<string, McpSymbol>();
   for (const row of rows) {
     const raw = objectValue(row);
     const id = textValue(firstValue(raw, ["id", "symbolId", "symbol_id"]), "symbol ID");
@@ -335,8 +407,10 @@ function normalizeSymbols(value: unknown): McpSymbol[] {
     if (!id || !name) continue;
     const providerLot = firstValue(raw, ["lotSize", "lot_size", "contractSize", "contract_size"]);
     const providerLotNumber = providerLot === null ? null : Number(providerLot);
-    const hasProviderLot = providerLotNumber !== null && Number.isFinite(providerLotNumber) && providerLotNumber > 0;
-    symbols.push({
+    const hasProviderLot = providerLotNumber !== null
+      && Number.isSafeInteger(providerLotNumber)
+      && providerLotNumber > 0;
+    const normalized: McpSymbol = {
       id,
       name,
       category: textValue(firstValue(raw, [
@@ -345,12 +419,28 @@ function normalizeSymbols(value: unknown): McpSymbol[] {
       lotSize: hasProviderLot ? providerLotNumber : null,
       lotSizeSource: hasProviderLot ? "provider" : "unavailable",
       raw,
-    });
+    };
+    const previous = symbols.get(id);
+    if (previous) {
+      const sameCanonicalSpecification = normalizedSymbolName(previous.name) === normalizedSymbolName(normalized.name)
+        && previous.category === normalized.category
+        && previous.lotSize === normalized.lotSize
+        && previous.lotSizeSource === normalized.lotSizeSource;
+      if (!sameCanonicalSpecification) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_SYMBOL_CONFLICT",
+          `cTrader returned conflicting specifications for symbol ${id}`,
+          false,
+        );
+      }
+      continue;
+    }
+    symbols.set(id, normalized);
   }
-  if (symbols.length === 0) {
+  if (symbols.size === 0) {
     throw new CTraderSyncError("CTRADER_MCP_SYMBOLS_EMPTY", "cTrader returned no usable symbols", false);
   }
-  return symbols;
+  return [...symbols.values()];
 }
 
 function safeCursor(value: unknown): JsonRecord {
@@ -414,11 +504,43 @@ function firstText(objects: readonly JsonRecord[], keys: readonly string[]): str
   for (const object of objects) {
     for (const key of keys) {
       const value = object[key];
-      if (typeof value === "string" && value.trim().length > 0) return value.trim();
-      if (typeof value === "number" && Number.isFinite(value)) return String(value);
+      if (typeof value === "string" && value.trim().length > 0) {
+        const trimmed = value.trim();
+        if (trimmed.length > 200 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+          throw new CTraderSyncError(
+            "CTRADER_MCP_METADATA_INVALID",
+            "cTrader returned invalid account metadata",
+            false,
+          );
+        }
+        return trimmed;
+      }
+      if (typeof value === "number" && Number.isFinite(value)) {
+        const text = String(value);
+        if (text.length <= 200) return text;
+        throw new CTraderSyncError(
+          "CTRADER_MCP_METADATA_INVALID",
+          "cTrader returned invalid account metadata",
+          false,
+        );
+      }
     }
   }
   return null;
+}
+
+function accountCurrency(objects: readonly JsonRecord[]): string | null {
+  const value = firstText(objects, ["currency", "currencyCode", "accountCurrency"]);
+  if (value === null) return null;
+  const canonical = value.toUpperCase();
+  if (!/^[A-Z0-9]{3,10}$/.test(canonical)) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_CURRENCY_INVALID",
+      "cTrader returned an invalid account currency",
+      false,
+    );
+  }
+  return canonical;
 }
 
 function historyStart(
@@ -506,10 +628,11 @@ function decimal(value: number, digits = 10): string {
 }
 
 function weightedPrice(deals: readonly McpDeal[]): number {
-  const total = deals.reduce((sum, deal) => sum + Number(deal.filledVolumeCents), 0);
-  if (!Number.isFinite(total) || total <= 0) {
-    throw new CTraderSyncError("CTRADER_MCP_VOLUME_INVALID", "cTrader position has no positive volume", false);
+  const totalBigint = deals.reduce((sum, deal) => sum + deal.filledVolumeCents, 0n);
+  if (totalBigint <= 0n || totalBigint > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new CTraderSyncError("CTRADER_MCP_NUMERIC_OVERFLOW", "cTrader position volume exceeds safe bounds", false);
   }
+  const total = Number(totalBigint);
   return deals.reduce(
     (sum, deal) => sum + deal.executionPrice * (Number(deal.filledVolumeCents) / total),
     0,
@@ -522,7 +645,15 @@ function moneyFromCents(value: number): string {
 
 function sumOptionalCents(deals: readonly McpDeal[], field: "commissionCents" | "swapCents"): string | null {
   const values = deals.map((deal) => deal[field]).filter((value): value is number => value !== null);
-  return values.length === 0 ? null : moneyFromCents(values.reduce((sum, value) => sum + value, 0));
+  if (values.length === 0) return null;
+  const total = values.reduce((sum, value) => {
+    const next = sum + BigInt(value);
+    if (next > BigInt(Number.MAX_SAFE_INTEGER) || next < BigInt(Number.MIN_SAFE_INTEGER)) {
+      throw new CTraderSyncError("CTRADER_MCP_NUMERIC_OVERFLOW", "cTrader monetary values exceed safe bounds", false);
+    }
+    return next;
+  }, 0n);
+  return moneyFromCents(Number(total));
 }
 
 function assetForSymbol(symbol: McpSymbol): McpProjection["asset"] {
@@ -553,8 +684,18 @@ function projectMcpPosition(
   if (deals.some((deal) => deal.positionId !== first.positionId)) {
     throw new CTraderSyncError("CTRADER_MCP_POSITIONS_MIXED", "cTrader returned mixed positions", false);
   }
+  if (deals.some((deal) => deal.symbolId !== first.symbolId) || symbol.id !== first.symbolId) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_POSITION_SYMBOL_MISMATCH",
+      `Position ${first.positionId} contains conflicting symbol identities`,
+      false,
+    );
+  }
   const explicitOpening = deals.filter((deal) => deal.role === "OPEN");
-  const attestedBoundaryInference = floorKind === "connection_time_empty_attested"
+  const attestedBoundaryInference = [
+    "connection_time_empty_attested",
+    "historical_preview_empty_attested",
+  ].includes(floorKind)
     && first.role === null
     && explicitOpening.length === 0;
   const lineageIsAuthoritative = floorKind === "registration"
@@ -615,14 +756,41 @@ function projectMcpPosition(
         };
       })
     : [];
-  const totalPnl = completeProviderPnl
-    ? moneyFromCents(closing.reduce((sum, deal) => sum + (deal.pnlCents ?? 0), 0))
-    : null;
+  let totalPnl: string | null = null;
+  if (completeProviderPnl) {
+    const totalPnlCents = closing.reduce((sum, deal) => {
+      const next = sum + BigInt(deal.pnlCents ?? 0);
+      if (next > BigInt(Number.MAX_SAFE_INTEGER) || next < BigInt(Number.MIN_SAFE_INTEGER)) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_NUMERIC_OVERFLOW",
+          "cTrader realized P&L exceeds safe bounds",
+          false,
+        );
+      }
+      return next;
+    }, 0n);
+    totalPnl = moneyFromCents(Number(totalPnlCents));
+  }
   const entryLocal = localDateTime(first.executionTimestamp, timeZone);
   const lastClose = closing.at(-1) ?? null;
   const exitLocal = lastClose ? localDateTime(lastClose.executionTimestamp, timeZone) : null;
   const openVolume = opened - closed;
-  const quantityLots = Number(opened) / (symbol.lotSize * 100);
+  if (opened > BigInt(Number.MAX_SAFE_INTEGER) || closed > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_NUMERIC_OVERFLOW",
+      `Position ${first.positionId} volume exceeds safe projection bounds`,
+      false,
+    );
+  }
+  const lotDenominator = symbol.lotSize * 100;
+  if (!Number.isSafeInteger(lotDenominator) || lotDenominator <= 0) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
+      `cTrader provided an unsafe contract size for ${symbol.name}`,
+      false,
+    );
+  }
+  const quantityLots = Number(opened) / lotDenominator;
   const asset = assetForSymbol(symbol);
   return {
     positionId: first.positionId,
@@ -663,9 +831,173 @@ function projectMcpPosition(
         openingLineage: explicitOpening[0] === first
           ? "provider"
           : attestedBoundaryInference
-            ? "user_attested_empty_at_connection"
+            ? floorKind === "historical_preview_empty_attested"
+              ? "user_attested_empty_at_historical_boundary"
+              : "user_attested_empty_at_connection"
             : "registration_bound",
       },
+    },
+  };
+}
+
+function dateValue(value: Date | string, field: string): number {
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new CTraderSyncError("CTRADER_HISTORICAL_IMPORT_INVALID", `Historical import has an invalid ${field}`, false);
+  }
+  return parsed;
+}
+
+function localDate(value: Date | string): string {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function finiteDecimal(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function numericDifference(left: string | null, right: string | null): {
+  absolute: number | null;
+  relative: number | null;
+} {
+  const leftNumber = finiteDecimal(left);
+  const rightNumber = finiteDecimal(right);
+  if (leftNumber === null || rightNumber === null) return { absolute: null, relative: null };
+  const absolute = Math.abs(leftNumber - rightNumber);
+  const scale = Math.max(Math.abs(leftNumber), Math.abs(rightNumber), 1e-12);
+  return { absolute, relative: absolute / scale };
+}
+
+function numericMatch(
+  left: string | null,
+  right: string | null,
+  relativeTolerance: number,
+  absoluteTolerance: number,
+): boolean {
+  if (left === null || right === null) return left === right;
+  const difference = numericDifference(left, right);
+  return difference.absolute !== null
+    && difference.relative !== null
+    && (difference.absolute <= absoluteTolerance || difference.relative <= relativeTolerance);
+}
+
+function historicalCandidateForPosition(
+  projection: McpProjection,
+  manualRows: readonly HistoricalManualTradeRow[],
+): {
+  classification: "high_confidence" | "ambiguous" | "deleted_manual" | "unmatched";
+  confidence: number;
+  manualTradeId: string | null;
+  manualRowVersion: number | null;
+  reasons: string[];
+  differences: JsonRecord;
+  candidateData: JsonRecord;
+} {
+  const plausible = manualRows.filter((manual) =>
+    normalizedSymbolName(manual.symbol) === normalizedSymbolName(projection.symbol)
+    && manual.direction === projection.direction
+    && localDate(manual.trade_date) === projection.tradeDate);
+  const strict = plausible.filter((manual) =>
+    numericMatch(manual.entry_price, projection.entryPrice, 0.0005, 0.00000001)
+    && numericMatch(manual.exit_price, projection.exitPrice, 0.0005, 0.00000001)
+    && numericMatch(manual.quantity, projection.quantityLots, 0.005, 0.00000001)
+    && (manual.pnl === null || projection.pnl === null
+      || numericMatch(manual.pnl, projection.pnl, 0.005, 0.01))
+    && (manual.entry_at === null
+      || Math.abs(dateValue(manual.entry_at, "manual entry time") - Date.parse(projection.entryAt)) <= 5 * 60 * 1_000)
+    && (manual.exit_at === null || projection.exitAt === null
+      || Math.abs(dateValue(manual.exit_at, "manual exit time") - Date.parse(projection.exitAt)) <= 5 * 60 * 1_000));
+  const activeStrict = strict.filter((manual) => manual.deleted_at === null);
+  const deletedStrict = strict.filter((manual) => manual.deleted_at !== null);
+  const selected = activeStrict.length === 1 && strict.length === 1
+    ? activeStrict[0]
+    : activeStrict.length === 0 && deletedStrict.length === 1 && strict.length === 1
+      ? deletedStrict[0]
+      : null;
+  const differences: JsonRecord = selected ? {
+    entryPrice: numericDifference(selected.entry_price, projection.entryPrice),
+    exitPrice: numericDifference(selected.exit_price, projection.exitPrice),
+    quantity: numericDifference(selected.quantity, projection.quantityLots),
+    pnl: numericDifference(selected.pnl, projection.pnl),
+    entryTimeMs: selected.entry_at === null
+      ? null
+      : Math.abs(dateValue(selected.entry_at, "manual entry time") - Date.parse(projection.entryAt)),
+    exitTimeMs: selected.exit_at === null || projection.exitAt === null
+      ? null
+      : Math.abs(dateValue(selected.exit_at, "manual exit time") - Date.parse(projection.exitAt)),
+  } : {};
+  const candidateIds = plausible.map((manual) => ({
+    tradeId: manual.id,
+    rowVersion: manual.row_version,
+    deleted: manual.deleted_at !== null,
+    strict: strict.some((candidate) => candidate.id === manual.id),
+  }));
+  const canPublishSeparate = projection.isOpen || projection.pnl !== null;
+  if (activeStrict.length === 1 && strict.length === 1 && selected) {
+    return {
+      classification: "high_confidence",
+      confidence: selected.entry_at === null ? 95 : 100,
+      manualTradeId: selected.id,
+      manualRowVersion: selected.row_version,
+      reasons: ["unique_strict_manual_match", "same_account", "same_symbol_direction_date", "provider_values_within_strict_tolerance"],
+      differences,
+      candidateData: {
+        manualCandidates: candidateIds,
+        allowedActions: canPublishSeparate
+          ? ["link_manual", "publish_separate", "reject"]
+          : ["link_manual", "reject"],
+        publishBlockedReason: canPublishSeparate ? null : "closed_provider_pnl_unavailable",
+      },
+    };
+  }
+  if (activeStrict.length === 0 && deletedStrict.length === 1 && strict.length === 1 && selected) {
+    return {
+      classification: "deleted_manual",
+      confidence: 100,
+      manualTradeId: selected.id,
+      manualRowVersion: selected.row_version,
+      reasons: ["unique_strict_deleted_manual_match", "deleted_trade_requires_explicit_suppression_review"],
+      differences,
+      candidateData: {
+        manualCandidates: candidateIds,
+        allowedActions: canPublishSeparate
+          ? ["suppress_deleted", "publish_separate", "reject"]
+          : ["suppress_deleted", "reject"],
+        publishBlockedReason: canPublishSeparate ? null : "closed_provider_pnl_unavailable",
+      },
+    };
+  }
+  if (plausible.length > 0) {
+    return {
+      classification: "ambiguous",
+      confidence: strict.length > 0 ? 70 : 40,
+      manualTradeId: null,
+      manualRowVersion: null,
+      reasons: strict.length > 1
+        ? ["multiple_strict_manual_matches", "manual_selection_required"]
+        : ["plausible_manual_match_but_strict_identity_unproven", "manual_selection_required"],
+      differences: {},
+      candidateData: {
+        manualCandidates: candidateIds,
+        allowedActions: canPublishSeparate ? ["publish_separate", "reject"] : ["reject"],
+        publishBlockedReason: canPublishSeparate ? null : "closed_provider_pnl_unavailable",
+      },
+    };
+  }
+  return {
+    classification: "unmatched",
+    confidence: 0,
+    manualTradeId: null,
+    manualRowVersion: null,
+    reasons: ["no_manual_candidate_in_account_and_time_window"],
+    differences: {},
+    candidateData: {
+      manualCandidates: [],
+      allowedActions: canPublishSeparate ? ["publish_separate", "reject"] : ["reject"],
+      publishBlockedReason: canPublishSeparate ? null : "closed_provider_pnl_unavailable",
     },
   };
 }
@@ -740,9 +1072,7 @@ export class CTraderMcpSyncEngine {
       const now = Date.now();
       const from = historyStart(this.config, cursorBefore, providerMetadata, now);
       const fetched = await this.fetchDeals(client, connection.external_account_id, from, now, heartbeat);
-      const accountCurrency = firstText([balance, accountInfo, providerMetadata], [
-        "currency", "currencyCode", "accountCurrency",
-      ])?.toUpperCase() ?? null;
+      const currency = accountCurrency([balance, accountInfo, providerMetadata]);
       const result = await this.persist({
         connection,
         fetched,
@@ -752,7 +1082,7 @@ export class CTraderMcpSyncEngine {
         historyFloorTimestamp: metadataTimestamp(providerMetadata.historyFloorTimestamp) ?? from,
         queryFromTimestamp: from,
         syncedThroughTimestamp: now,
-        accountCurrency,
+        accountCurrency: currency,
       });
       await this.events.publish(connection.user_id, "ctrader.synced", {
         connectionId,
@@ -765,6 +1095,212 @@ export class CTraderMcpSyncEngine {
     } finally {
       await client.close().catch(() => undefined);
     }
+  }
+
+  async previewHistoricalImport(
+    importId: string,
+    connectionId: string,
+    heartbeat: () => Promise<void> = async () => undefined,
+  ): Promise<CTraderSyncResult> {
+    const previewDeadline = Date.now() + MAX_HISTORICAL_PREVIEW_ELAPSED_MS;
+    const { historicalImport, connection } = await this.loadHistoricalImport(importId, connectionId);
+    const cursorSnapshot = safeCursor(connection.sync_cursor);
+    if (historicalImport.status === "review" || historicalImport.status === "completed") {
+      return {
+        userId: connection.user_id,
+        connectionId: connection.id,
+        counters: objectValue(historicalImport.counters) as CTraderHistoricalPreviewCounters,
+        cursorBefore: cursorSnapshot,
+        cursorAfter: cursorSnapshot,
+      };
+    }
+    if (!["queued", "running"].includes(historicalImport.status)) {
+      throw new CTraderSyncError(
+        "CTRADER_HISTORICAL_IMPORT_UNAVAILABLE",
+        "The historical cTrader preview is no longer runnable",
+        false,
+      );
+    }
+    if (!connection.access_token_ciphertext) {
+      throw new CTraderSyncError("CTRADER_REAUTH_REQUIRED", "Reconnect cTrader before importing history", false, true);
+    }
+    const boundaryTimestamp = dateValue(historicalImport.boundary_at, "boundary");
+    const throughTimestamp = dateValue(historicalImport.through_at, "upper boundary");
+    if (
+      boundaryTimestamp >= throughTimestamp
+      || historicalImport.no_open_positions_attested !== true
+      || Number(historicalImport.attestation_version) !== 1
+      || historicalImport.attestation_purpose !== "historical_preview_reconciliation"
+    ) {
+      throw new CTraderSyncError(
+        "CTRADER_HISTORICAL_ATTESTATION_INVALID",
+        "The historical cTrader preview does not have a valid immutable flat-account attestation",
+        false,
+      );
+    }
+    const providerMetadata = objectValue(connection.provider_metadata);
+    const normalHistoryFloor = metadataTimestamp(providerMetadata.historyFloorTimestamp);
+    const requestedNormalFloor = dateValue(
+      historicalImport.normal_history_floor_at_request,
+      "approved normal history floor",
+    );
+    if (
+      normalHistoryFloor === null
+      || throughTimestamp !== requestedNormalFloor
+      || requestedNormalFloor !== normalHistoryFloor
+      || historicalImport.normal_history_floor_kind_at_request !== providerMetadata.historyFloorKind
+      || historicalImport.normal_history_floor_kind_at_request !== "connection_time_empty_attested"
+      || providerMetadata.historyReadValidated !== true
+      || !hasValidNoOpenPositionsAttestation(connection, providerMetadata)
+    ) {
+      throw new CTraderSyncError(
+        "CTRADER_HISTORICAL_BOUNDARY_CHANGED",
+        "The historical cTrader preview upper bound no longer matches the approved normal history floor",
+        false,
+      );
+    }
+    const bearerToken = this.cipher.decrypt(
+      connection.access_token_ciphertext,
+      connectionTokenAad(connection.id, "access"),
+    );
+    const client = this.clientFactory(bearerToken);
+    try {
+      const balanceRaw = await client.getBalance();
+      await heartbeat();
+      const symbolsRaw = await client.getSymbols();
+      await heartbeat();
+      let accountInfoRaw: unknown = null;
+      try {
+        accountInfoRaw = await client.getAccountInfo();
+      } catch (error) {
+        if (!(error instanceof CTraderMcpError) || error.code !== "TOOL_UNAVAILABLE") throw error;
+      }
+      const balance = unwrapFirstObject(balanceRaw);
+      const accountInfo = unwrapFirstObject(accountInfoRaw);
+      const detectedAccount = firstText([balance, accountInfo], [
+        "accountId", "account_id", "ctidTraderAccountId", "traderAccountId",
+      ]);
+      if (detectedAccount !== null && detectedAccount !== historicalImport.external_account_id) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_ACCOUNT_MISMATCH",
+          "The cTrader credential no longer belongs to the historical import account",
+          false,
+          true,
+        );
+      }
+      const symbols = normalizeSymbols(symbolsRaw);
+      const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
+      const fetched = await this.fetchHistoricalPreviewDeals(
+        client,
+        historicalImport.external_account_id,
+        boundaryTimestamp,
+        throughTimestamp,
+        heartbeat,
+        previewDeadline,
+      );
+      const currency = accountCurrency([
+        balance,
+        accountInfo,
+        objectValue(connection.provider_metadata),
+      ]);
+      const result = await this.persistHistoricalPreview({
+        historicalImport,
+        connection,
+        fetched,
+        symbolById,
+        boundaryTimestamp,
+        throughTimestamp,
+        accountCurrency: currency,
+        cursorSnapshot,
+        previewDeadline,
+        heartbeat,
+      });
+      await this.events.publish(connection.user_id, "ctrader.historical_import.review_ready", {
+        connectionId: connection.id,
+        importId: historicalImport.id,
+        counters: result.counters,
+      }).catch(() => undefined);
+      return result;
+    } catch (error) {
+      throw normalizeMcpError(error);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }
+
+  private async loadHistoricalImport(
+    importId: string,
+    connectionId: string,
+  ): Promise<{ historicalImport: HistoricalImportRow; connection: McpConnectionRow }> {
+    const result = await this.database.query<HistoricalImportRow & McpConnectionRow>(
+      `SELECT
+         import.id, import.user_id, import.broker_connection_id,
+         import.external_account_id, import.provider_environment,
+         import.boundary_at, import.through_at,
+         import.normal_history_floor_at_request,
+         import.normal_history_floor_kind_at_request,
+         import.boundary_local,
+         import.time_zone, import.no_open_positions_attested,
+         import.attestation_version, import.attestation_purpose,
+         import.status, import.counters,
+         connection.connected, connection.access_token_ciphertext,
+         connection.encryption_key_version, connection.token_generation,
+         connection.sync_cursor, connection.provider_metadata,
+         connection.mapped_account_id, connection.legacy_mapped_account_id
+       FROM ctrader_historical_imports import
+       JOIN broker_connections connection
+         ON connection.user_id=import.user_id
+        AND connection.id=import.broker_connection_id
+        AND connection.external_account_id=import.external_account_id
+        AND connection.provider_environment=import.provider_environment
+       WHERE import.id=$1 AND import.broker_connection_id=$2
+         AND connection.provider='ctrader'
+         AND connection.connection_mode='mcp_read'
+         AND connection.oauth_scope='mcp_read'
+       LIMIT 1`,
+      [importId, connectionId],
+    );
+    const row = result.rows[0];
+    if (!row || !row.connected) {
+      throw new CTraderSyncError(
+        "CTRADER_HISTORICAL_IMPORT_NOT_FOUND",
+        "The account-bound historical cTrader preview is unavailable",
+        false,
+      );
+    }
+    const historicalImport: HistoricalImportRow = {
+      id: row.id,
+      user_id: row.user_id,
+      broker_connection_id: row.broker_connection_id,
+      external_account_id: row.external_account_id,
+      provider_environment: row.provider_environment,
+      boundary_at: row.boundary_at,
+      through_at: row.through_at,
+      normal_history_floor_at_request: row.normal_history_floor_at_request,
+      normal_history_floor_kind_at_request: row.normal_history_floor_kind_at_request,
+      boundary_local: row.boundary_local,
+      time_zone: row.time_zone,
+      no_open_positions_attested: row.no_open_positions_attested,
+      attestation_version: row.attestation_version,
+      attestation_purpose: row.attestation_purpose,
+      status: row.status,
+      counters: row.counters,
+    };
+    const connection: McpConnectionRow = {
+      id: row.broker_connection_id,
+      user_id: row.user_id,
+      external_account_id: row.external_account_id,
+      provider_environment: row.provider_environment,
+      connected: row.connected,
+      access_token_ciphertext: row.access_token_ciphertext,
+      encryption_key_version: row.encryption_key_version,
+      token_generation: row.token_generation,
+      sync_cursor: row.sync_cursor,
+      provider_metadata: row.provider_metadata,
+      mapped_account_id: row.mapped_account_id,
+      legacy_mapped_account_id: row.legacy_mapped_account_id,
+    };
+    return { historicalImport, connection };
   }
 
   private async loadConnection(connectionId: string): Promise<McpConnectionRow> {
@@ -792,21 +1328,85 @@ export class CTraderMcpSyncEngine {
     fromTimestamp: number,
     toTimestamp: number,
     heartbeat: () => Promise<void>,
+    splitIncompletePages = false,
+    absoluteDeadline: number | null = null,
+    maximumWindowMs = MAX_HISTORY_WINDOW_MS,
+    sharedBudget: HistoricalFetchBudget | null = null,
   ): Promise<McpDeal[]> {
     const byId = new Map<string, McpDeal>();
     let sawAnyDeal = false;
     let sawMatchingAccount = false;
-    let cursor = Math.max(0, Math.min(fromTimestamp, toTimestamp - 1));
-    while (cursor < toTimestamp) {
-      const end = Math.min(cursor + MAX_HISTORY_WINDOW_MS, toTimestamp);
+    const budget = sharedBudget ?? {
+      deadline: absoluteDeadline ?? Date.now() + MAX_HISTORICAL_PREVIEW_ELAPSED_MS,
+      requestCount: 0,
+      processedDeals: 0,
+    };
+    const enforcePreviewBudget = (depth: number): void => {
+      if (!splitIncompletePages) return;
+      if (
+        budget.requestCount > MAX_HISTORICAL_PREVIEW_REQUESTS
+        || depth > MAX_HISTORICAL_PREVIEW_SPLIT_DEPTH
+        || budget.processedDeals > MAX_HISTORICAL_PREVIEW_DEALS
+        || Date.now() > budget.deadline
+      ) {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+          "The historical cTrader preview exceeded its safe processing budget",
+          false,
+        );
+      }
+    };
+    const fetchWindow = async (start: number, end: number, depth = 0): Promise<void> => {
+      if (splitIncompletePages && depth > 0 && end - start <= 1) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_HISTORY_SATURATED",
+          "cTrader history is saturated within one millisecond and cannot be imported losslessly",
+          false,
+        );
+      }
+      budget.requestCount += 1;
+      enforcePreviewBudget(depth);
       const raw = await client.getDeals({
-        fromTimestamp: new Date(cursor).toISOString(),
-        toTimestamp: new Date(end).toISOString(),
+        fromTimestamp: new Date(start).toISOString(),
+        // Provider history ranges are inclusive at both ends. Convert our
+        // canonical half-open [start,end) window to an inclusive millisecond
+        // upper bound so adjacent validation partitions neither overlap nor
+        // omit a boundary execution.
+        toTimestamp: new Date(splitIncompletePages ? end - 1 : end).toISOString(),
       });
+      enforcePreviewBudget(depth);
+      if (splitIncompletePages && historyPageIsIncomplete(raw)) {
+        if (end - start <= 1) {
+          throw new CTraderSyncError(
+            "CTRADER_MCP_HISTORY_SATURATED",
+            "cTrader history is saturated within one millisecond and cannot be imported losslessly",
+            false,
+          );
+        }
+        const midpoint = start + Math.floor((end - start) / 2);
+        await fetchWindow(start, midpoint, depth + 1);
+        await fetchWindow(midpoint, end, depth + 1);
+        enforcePreviewBudget(depth);
+        return;
+      }
       assertCompleteHistoryPage(raw);
       const rows = unwrapArray(raw, ["deals", "data", "result", "items", "history"], "deal history");
       for (const row of rows) {
+        if (splitIncompletePages) {
+          budget.processedDeals += 1;
+          enforcePreviewBudget(depth);
+        }
         const deal = normalizeDeal(row);
+        if (
+          deal.executionTimestamp < start
+          || (splitIncompletePages ? deal.executionTimestamp >= end : deal.executionTimestamp > end)
+        ) {
+          throw new CTraderSyncError(
+            "CTRADER_MCP_DEAL_OUTSIDE_WINDOW",
+            `cTrader deal ${deal.dealId} falls outside the immutable requested history window`,
+            false,
+          );
+        }
         sawAnyDeal = true;
         if (deal.accountId === null) {
           throw new CTraderSyncError(
@@ -828,6 +1428,12 @@ export class CTraderMcpSyncEngine {
         byId.set(deal.dealId, deal);
       }
       await heartbeat();
+      enforcePreviewBudget(depth);
+    };
+    let cursor = Math.max(0, Math.min(fromTimestamp, toTimestamp - 1));
+    while (cursor < toTimestamp) {
+      const end = Math.min(cursor + maximumWindowMs, toTimestamp);
+      await fetchWindow(cursor, end);
       cursor = end;
     }
     if (sawAnyDeal && !sawMatchingAccount) {
@@ -840,6 +1446,583 @@ export class CTraderMcpSyncEngine {
     }
     return [...byId.values()].sort((left, right) =>
       left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
+  }
+
+  private async fetchHistoricalPreviewDeals(
+    client: CTraderMcpReadClientLike,
+    accountId: string,
+    fromTimestamp: number,
+    toTimestamp: number,
+    heartbeat: () => Promise<void>,
+    deadline: number,
+  ): Promise<McpDeal[]> {
+    const budget: HistoricalFetchBudget = { deadline, requestCount: 0, processedDeals: 0 };
+    const fullRangePlan = await this.fetchDeals(
+      client,
+      accountId,
+      fromTimestamp,
+      toTimestamp,
+      heartbeat,
+      true,
+      deadline,
+      MAX_HISTORY_WINDOW_MS,
+      budget,
+    );
+    const partitionPlan = await this.fetchDeals(
+      client,
+      accountId,
+      fromTimestamp,
+      toTimestamp,
+      heartbeat,
+      true,
+      deadline,
+      60 * 60 * 1_000,
+      budget,
+    );
+    const partitionById = new Map(partitionPlan.map((deal) => [deal.dealId, deal]));
+    const consistent = fullRangePlan.length === partitionPlan.length
+      && fullRangePlan.every((deal) => {
+        const other = partitionById.get(deal.dealId);
+        return other !== undefined
+          && json(canonicalStoredDeal(deal)) === json(canonicalStoredDeal(other));
+      });
+    if (!consistent) {
+      throw new CTraderSyncError(
+        "CTRADER_HISTORICAL_IMPORT_INCOMPLETE",
+        "cTrader returned inconsistent historical results; no preview data was staged",
+        false,
+      );
+    }
+    return fullRangePlan;
+  }
+
+  private async persistHistoricalPreview(input: {
+    historicalImport: HistoricalImportRow;
+    connection: McpConnectionRow;
+    fetched: McpDeal[];
+    symbolById: ReadonlyMap<string, McpSymbol>;
+    boundaryTimestamp: number;
+    throughTimestamp: number;
+    accountCurrency: string | null;
+    cursorSnapshot: JsonRecord;
+    previewDeadline: number;
+    heartbeat: () => Promise<void>;
+  }): Promise<CTraderSyncResult> {
+    const counters = await withTransaction(this.database, async (client) => {
+      const enforcePersistenceDeadline = (): void => {
+        if (Date.now() > input.previewDeadline) {
+          throw new CTraderSyncError(
+            "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+            "The historical cTrader preview exceeded its safe processing budget",
+            false,
+          );
+        }
+      };
+      enforcePersistenceDeadline();
+      const locked = await client.query<{
+        status: HistoricalImportRow["status"];
+        counters: unknown;
+        token_generation: string | number;
+        connected: boolean;
+        sync_cursor: unknown;
+      }>(
+        `SELECT import.status, import.counters, connection.token_generation,
+                connection.connected, connection.sync_cursor
+         FROM ctrader_historical_imports import
+         JOIN broker_connections connection
+           ON connection.user_id=import.user_id
+          AND connection.id=import.broker_connection_id
+          AND connection.external_account_id=import.external_account_id
+          AND connection.provider_environment=import.provider_environment
+         WHERE import.id=$1 AND import.user_id=$2
+           AND import.broker_connection_id=$3
+           AND import.external_account_id=$4
+           AND import.provider_environment=$5
+           AND import.boundary_at=$6 AND import.through_at=$7
+           AND import.no_open_positions_attested=true
+           AND import.attestation_version=1
+           AND import.attestation_purpose='historical_preview_reconciliation'
+         FOR UPDATE OF import, connection`,
+        [
+          input.historicalImport.id,
+          input.connection.user_id,
+          input.connection.id,
+          input.connection.external_account_id,
+          input.connection.provider_environment,
+          new Date(input.boundaryTimestamp),
+          new Date(input.throughTimestamp),
+        ],
+      );
+      const state = locked.rows[0];
+      if (!state || !state.connected) {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_CHANGED",
+          "The historical cTrader preview identity changed before it could be staged",
+          false,
+        );
+      }
+      if (String(state.token_generation) !== String(input.connection.token_generation)) {
+        throw new CTraderSyncError(
+          "CTRADER_CONNECTION_CHANGED",
+          "The cTrader connection changed during historical preview",
+          true,
+        );
+      }
+      // A replay of an already-committed preview is a read-only success. This
+      // protects a run whose final worker acknowledgement was lost.
+      if (state.status === "review" || state.status === "completed") {
+        return objectValue(state.counters) as CTraderHistoricalPreviewCounters;
+      }
+      if (!["queued", "running"].includes(state.status)) {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_UNAVAILABLE",
+          "The historical cTrader preview is no longer runnable",
+          false,
+        );
+      }
+      // Never allow this preview transaction to become a disguised cursor
+      // rewind. The cursor is checked again while the connection row is locked
+      // and is intentionally never updated below.
+      if (json(safeCursor(state.sync_cursor)) !== json(input.cursorSnapshot)) {
+        throw new CTraderSyncError(
+          "CTRADER_NORMAL_SYNC_MOVED",
+          "The normal cTrader cursor moved while the historical preview was running; retry the preview safely",
+          true,
+        );
+      }
+
+      const previewCounters: CTraderHistoricalPreviewCounters = {
+        inserted: 0,
+        updated: 0,
+        fetchedDeals: input.fetched.length,
+        insertedExecutions: 0,
+        updatedExecutions: 0,
+        insertedTrades: 0,
+        updatedTrades: 0,
+        unchangedTrades: 0,
+        archivedTradesPreserved: 0,
+        tombstonesPreserved: 0,
+        positionsProjected: 0,
+        positionsAwaitingReview: 0,
+        positionsStaged: 0,
+        highConfidence: 0,
+        ambiguous: 0,
+        deletedManual: 0,
+        unmatched: 0,
+        executionOnly: 0,
+      };
+      const externalExecutionIds = input.fetched.map((deal) => deal.dealId);
+      const existingExecutions = externalExecutionIds.length === 0
+        ? new Set<string>()
+        : new Set((await client.query<{ external_execution_id: string }>(
+            `SELECT external_execution_id FROM trade_executions
+             WHERE user_id=$1 AND broker_connection_id=$2
+               AND external_execution_id=ANY($3::text[])`,
+            [input.connection.user_id, input.connection.id, externalExecutionIds],
+          )).rows.map((row) => row.external_execution_id));
+
+      for (const [dealIndex, deal] of input.fetched.entries()) {
+        enforcePersistenceDeadline();
+        if (dealIndex > 0 && dealIndex % 100 === 0) await input.heartbeat();
+        const rawPayload = { edgebookMcpDeal: canonicalStoredDeal(deal) };
+        const moneyDigits = deal.pnlCents === null
+          && deal.commissionCents === null
+          && deal.swapCents === null
+          ? null
+          : 2;
+        const stored = await client.query<{ id: string }>(
+          `INSERT INTO trade_executions (
+             id, user_id, broker_connection_id, external_execution_id,
+             external_position_id, external_order_id, external_symbol_id,
+             side, quantity, price, pnl, commission, swap, currency_code,
+             executed_at, raw_payload, deal_status, filled_volume_cents,
+             closed_volume_cents, money_digits, close_position_detail,
+             provider_updated_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,
+             $17,$18,NULL,$19,NULL,$20
+           )
+           ON CONFLICT (broker_connection_id, external_execution_id) DO UPDATE SET
+             external_position_id=EXCLUDED.external_position_id,
+             external_order_id=EXCLUDED.external_order_id,
+             external_symbol_id=EXCLUDED.external_symbol_id,
+             side=EXCLUDED.side,
+             quantity=EXCLUDED.quantity,
+             price=EXCLUDED.price,
+             pnl=EXCLUDED.pnl,
+             commission=EXCLUDED.commission,
+             swap=EXCLUDED.swap,
+             currency_code=EXCLUDED.currency_code,
+             executed_at=EXCLUDED.executed_at,
+             raw_payload=EXCLUDED.raw_payload,
+             deal_status=EXCLUDED.deal_status,
+             filled_volume_cents=EXCLUDED.filled_volume_cents,
+             closed_volume_cents=NULL,
+             money_digits=EXCLUDED.money_digits,
+             close_position_detail=NULL,
+             provider_updated_at=EXCLUDED.provider_updated_at,
+             imported_at=now()
+           WHERE trade_executions.user_id=EXCLUDED.user_id
+             AND trade_executions.raw_payload IS DISTINCT FROM EXCLUDED.raw_payload
+           RETURNING id`,
+          [
+            randomUUID(),
+            input.connection.user_id,
+            input.connection.id,
+            deal.dealId,
+            deal.positionId,
+            deal.orderId,
+            deal.symbolId,
+            deal.side,
+            decimal(Number(deal.filledVolumeCents) / 100),
+            decimal(deal.executionPrice),
+            deal.pnlCents === null ? null : moneyFromCents(deal.pnlCents),
+            deal.commissionCents === null ? null : moneyFromCents(deal.commissionCents),
+            deal.swapCents === null ? null : moneyFromCents(deal.swapCents),
+            input.accountCurrency,
+            new Date(deal.executionTimestamp),
+            json(rawPayload),
+            deal.dealStatus,
+            deal.filledVolumeCents.toString(),
+            moneyDigits,
+            deal.providerUpdatedTimestamp === null ? null : new Date(deal.providerUpdatedTimestamp),
+          ],
+        );
+        let executionId = stored.rows[0]?.id ?? null;
+        if (executionId === null) {
+          executionId = (await client.query<{ id: string }>(
+            `SELECT id FROM trade_executions
+             WHERE user_id=$1 AND broker_connection_id=$2 AND external_execution_id=$3
+             LIMIT 1`,
+            [input.connection.user_id, input.connection.id, deal.dealId],
+          )).rows[0]?.id ?? null;
+        }
+        if (executionId === null) {
+          throw new CTraderSyncError(
+            "CTRADER_HISTORICAL_EXECUTION_MISSING",
+            "A historical cTrader execution could not be staged safely",
+            true,
+          );
+        }
+        await client.query(
+          `INSERT INTO ctrader_historical_import_executions (
+             user_id, broker_connection_id, import_id, execution_id
+           ) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (user_id, import_id, execution_id) DO NOTHING`,
+          [input.connection.user_id, input.connection.id, input.historicalImport.id, executionId],
+        );
+        if (existingExecutions.has(deal.dealId)) previewCounters.updatedExecutions += 1;
+        else previewCounters.insertedExecutions += 1;
+      }
+
+      const boundaryDate = input.historicalImport.boundary_local.slice(0, 10);
+      const throughDate = localDateTime(
+        Math.max(input.boundaryTimestamp, input.throughTimestamp - 1),
+        input.historicalImport.time_zone,
+      ).date;
+      const manualRows = (await client.query<HistoricalManualTradeRow>(
+        `SELECT id, row_version, deleted_at, symbol, direction,
+                entry_price::text, exit_price::text, quantity::text, pnl::text,
+                trade_date, entry_at, exit_at
+         FROM trades
+         WHERE user_id=$1
+           AND broker_connection_id IS NULL
+           AND external_trade_key IS NULL
+           AND source_system <> 'ctrader'
+           AND trade_date BETWEEN $2::date AND $3::date
+           AND (
+             ($4::uuid IS NOT NULL AND account_id=$4::uuid)
+             OR ($4::uuid IS NULL AND $5::text IS NOT NULL AND legacy_account_id=$5::text)
+           )
+         ORDER BY trade_date ASC, created_at ASC, id ASC
+         LIMIT $6`,
+        [
+          input.connection.user_id,
+          boundaryDate,
+          throughDate,
+          input.connection.mapped_account_id,
+          input.connection.legacy_mapped_account_id,
+          MAX_HISTORICAL_MANUAL_CANDIDATES + 1,
+        ],
+      )).rows;
+      if (manualRows.length > MAX_HISTORICAL_MANUAL_CANDIDATES) {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+          "The historical cTrader preview exceeded its safe processing budget",
+          false,
+        );
+      }
+      const grouped = new Map<string, McpDeal[]>();
+      for (const deal of input.fetched) {
+        const group = grouped.get(deal.positionId) ?? [];
+        group.push(deal);
+        grouped.set(deal.positionId, group);
+      }
+      if (grouped.size > MAX_HISTORICAL_PREVIEW_POSITIONS) {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_BUDGET_EXCEEDED",
+          "The historical cTrader preview exceeded its safe processing budget",
+          false,
+        );
+      }
+
+      // If a prior uncommitted worker attempt was externally interrupted after
+      // staging in a non-transactional test double, rebuild pending candidates
+      // deterministically. Resolved candidates are never touched.
+      await client.query(
+        `DELETE FROM ctrader_reconciliation_candidates
+         WHERE user_id=$1 AND broker_connection_id=$2 AND import_id=$3
+           AND status='pending'`,
+        [input.connection.user_id, input.connection.id, input.historicalImport.id],
+      );
+      let positionIndex = 0;
+      for (const [positionId, positionDeals] of grouped) {
+        enforcePersistenceDeadline();
+        if (positionIndex > 0 && positionIndex % 25 === 0) await input.heartbeat();
+        positionIndex += 1;
+        const orderedDeals = [...positionDeals].sort((left, right) =>
+          left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
+        const first = orderedDeals[0];
+        if (!first) continue;
+        const externalTradeKey = `position:${positionId}`;
+        const identityConflict = await client.query<{
+          existing_trade_id: string | null;
+          existing_trade_deleted_at: Date | string | null;
+          existing_link_trade_id: string | null;
+          tombstoned: boolean;
+        }>(
+          `SELECT
+             (SELECT trade.id FROM trades trade
+              WHERE trade.user_id=$1 AND trade.broker_connection_id=$2
+                AND trade.external_trade_key=$3
+              LIMIT 1) AS existing_trade_id,
+             (SELECT trade.deleted_at FROM trades trade
+              WHERE trade.user_id=$1 AND trade.broker_connection_id=$2
+                AND trade.external_trade_key=$3
+              LIMIT 1) AS existing_trade_deleted_at,
+             (SELECT link.trade_id FROM ctrader_trade_links link
+              WHERE link.user_id=$1 AND link.broker_connection_id=$2
+                AND link.external_trade_key=$3
+              LIMIT 1) AS existing_link_trade_id,
+             EXISTS(
+               SELECT 1 FROM ctrader_trade_tombstones tombstone
+               WHERE tombstone.user_id=$1 AND tombstone.broker_connection_id=$2
+                 AND tombstone.external_trade_key=$3
+             ) AS tombstoned`,
+          [input.connection.user_id, input.connection.id, externalTradeKey],
+        );
+        const conflict = identityConflict.rows[0];
+        if (conflict?.tombstoned || conflict?.existing_trade_id || conflict?.existing_link_trade_id) {
+          const reasons = conflict.tombstoned
+            ? ["broker_tombstone_exists", "historical_preview_cannot_resurrect_deleted_intent"]
+            : conflict.existing_link_trade_id
+              ? ["broker_position_already_linked", "normal_sync_identity_already_resolved"]
+              : conflict.existing_trade_deleted_at
+                ? ["broker_position_already_archived", "historical_preview_cannot_resurrect_deleted_intent"]
+                : ["already_imported_normal_sync", "normal_sync_identity_already_exists"];
+          await client.query(
+            `INSERT INTO ctrader_reconciliation_candidates (
+               id, user_id, broker_connection_id, import_id,
+               external_position_id, external_trade_key,
+               classification, confidence, reasons, differences,
+               candidate_data, projected_trade, status
+             ) VALUES ($1,$2,$3,$4,$5,$6,'execution_only',100,$7::jsonb,'{}'::jsonb,$8::jsonb,NULL,'pending')
+             ON CONFLICT (user_id, broker_connection_id, import_id, external_position_id)
+             DO UPDATE SET classification='execution_only', confidence=100,
+               reasons=EXCLUDED.reasons, differences='{}'::jsonb,
+               candidate_data=EXCLUDED.candidate_data, projected_trade=NULL,
+               manual_trade_id=NULL, manual_row_version=NULL,
+               row_version=ctrader_reconciliation_candidates.row_version+1
+             WHERE ctrader_reconciliation_candidates.status='pending'`,
+            [
+              randomUUID(),
+              input.connection.user_id,
+              input.connection.id,
+              input.historicalImport.id,
+              positionId,
+              externalTradeKey,
+              json(reasons),
+              json({
+                accountId: input.connection.external_account_id,
+                environment: input.connection.provider_environment,
+                externalPositionId: positionId,
+                executionIds: orderedDeals.map((deal) => deal.dealId),
+                completeWindow: true,
+                existingTradeId: conflict.existing_trade_id,
+                existingLinkTradeId: conflict.existing_link_trade_id,
+                tombstoned: conflict.tombstoned,
+                allowedActions: ["reject"],
+              }),
+            ],
+          );
+          previewCounters.positionsStaged += 1;
+          previewCounters.executionOnly += 1;
+          previewCounters.positionsAwaitingReview += 1;
+          continue;
+        }
+        const symbol = input.symbolById.get(first.symbolId);
+        let projection: McpProjection | null = null;
+        let executionOnlyReason: string | null = null;
+        if (!symbol) executionOnlyReason = "CTRADER_MCP_SYMBOL_UNAVAILABLE";
+        else {
+          try {
+            projection = projectMcpPosition(
+              orderedDeals,
+              symbol,
+              input.historicalImport.time_zone,
+              input.accountCurrency,
+              "historical_preview_empty_attested",
+            );
+          } catch (error) {
+            executionOnlyReason = projectionReviewReason(error);
+            if (executionOnlyReason === null) throw error;
+          }
+        }
+        let classification: "high_confidence" | "ambiguous" | "deleted_manual" | "unmatched" | "execution_only";
+        let confidence = 0;
+        let manualTradeId: string | null = null;
+        let manualRowVersion: number | null = null;
+        let reasons: string[];
+        let differences: JsonRecord = {};
+        let candidateData: JsonRecord;
+        let projectedTrade: JsonRecord | null = null;
+        if (executionOnlyReason !== null || projection === null) {
+          classification = "execution_only";
+          reasons = [executionOnlyReason ?? "CTRADER_MCP_PROJECTION_INCOMPLETE", "financial_values_not_guessed"];
+          candidateData = {
+            accountId: input.connection.external_account_id,
+            environment: input.connection.provider_environment,
+            externalPositionId: positionId,
+            executionIds: orderedDeals.map((deal) => deal.dealId),
+            completeWindow: true,
+            partialProjection: projection,
+            allowedActions: ["reject"],
+          };
+        } else {
+          const match = historicalCandidateForPosition(projection, manualRows);
+          classification = match.classification;
+          confidence = match.confidence;
+          manualTradeId = match.manualTradeId;
+          manualRowVersion = match.manualRowVersion;
+          reasons = match.reasons;
+          differences = match.differences;
+          candidateData = {
+            ...match.candidateData,
+            accountId: input.connection.external_account_id,
+            environment: input.connection.provider_environment,
+            externalPositionId: positionId,
+            executionIds: orderedDeals.map((deal) => deal.dealId),
+            completeWindow: true,
+          };
+          projectedTrade = {
+            positionId: projection.positionId,
+            symbol: projection.symbol,
+            asset: projection.asset,
+            direction: projection.direction,
+            entryPrice: projection.entryPrice,
+            exitPrice: projection.exitPrice,
+            quantityLots: projection.quantityLots,
+            pnl: projection.pnl,
+            isOpen: projection.isOpen,
+            tradeDate: projection.tradeDate,
+            entryAt: projection.entryAt,
+            exitAt: projection.exitAt,
+            entryTime: projection.entryTime,
+            exitTime: projection.exitTime,
+            brokerData: {
+              ...projection.brokerData,
+              environment: input.connection.provider_environment,
+              ctidTraderAccountId: input.connection.external_account_id,
+              historicalImportId: input.historicalImport.id,
+              historicalPreview: true,
+            },
+          };
+        }
+        await client.query(
+          `INSERT INTO ctrader_reconciliation_candidates (
+             id, user_id, broker_connection_id, import_id,
+             external_position_id, external_trade_key,
+             manual_trade_id, manual_row_version, classification, confidence,
+             reasons, differences, candidate_data, projected_trade, status
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+             $11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,'pending'
+           )
+           ON CONFLICT (user_id, broker_connection_id, import_id, external_position_id)
+           DO UPDATE SET
+             external_trade_key=EXCLUDED.external_trade_key,
+             manual_trade_id=EXCLUDED.manual_trade_id,
+             manual_row_version=EXCLUDED.manual_row_version,
+             classification=EXCLUDED.classification,
+             confidence=EXCLUDED.confidence,
+             reasons=EXCLUDED.reasons,
+             differences=EXCLUDED.differences,
+             candidate_data=EXCLUDED.candidate_data,
+             projected_trade=EXCLUDED.projected_trade,
+             row_version=ctrader_reconciliation_candidates.row_version+1
+           WHERE ctrader_reconciliation_candidates.status='pending'`,
+          [
+            randomUUID(),
+            input.connection.user_id,
+            input.connection.id,
+            input.historicalImport.id,
+            positionId,
+            `position:${positionId}`,
+            manualTradeId,
+            manualRowVersion,
+            classification,
+            confidence,
+            json(reasons),
+            json(differences),
+            json(candidateData),
+            projectedTrade === null ? null : json(projectedTrade),
+          ],
+        );
+        previewCounters.positionsStaged += 1;
+        if (classification === "high_confidence") previewCounters.highConfidence += 1;
+        else if (classification === "ambiguous") previewCounters.ambiguous += 1;
+        else if (classification === "deleted_manual") previewCounters.deletedManual += 1;
+        else if (classification === "unmatched") previewCounters.unmatched += 1;
+        else previewCounters.executionOnly += 1;
+        if (classification === "execution_only") previewCounters.positionsAwaitingReview += 1;
+        else previewCounters.positionsProjected += 1;
+      }
+      previewCounters.inserted = previewCounters.insertedExecutions;
+      previewCounters.updated = previewCounters.updatedExecutions;
+      enforcePersistenceDeadline();
+      const importStatus = previewCounters.positionsStaged === 0 ? "completed" : "review";
+      const updated = await client.query<{ id: string }>(
+        `UPDATE ctrader_historical_imports SET
+           status=$1, counters=$2::jsonb,
+           error_code=NULL, error_message=NULL,
+           row_version=row_version+1, finished_at=now()
+         WHERE id=$3 AND user_id=$4 AND broker_connection_id=$5
+           AND status IN ('queued','running')
+         RETURNING id`,
+        [
+          importStatus,
+          json(previewCounters),
+          input.historicalImport.id,
+          input.connection.user_id,
+          input.connection.id,
+        ],
+      );
+      if (!updated.rows[0]) {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_CHANGED",
+          "The historical cTrader preview changed before review staging completed",
+          true,
+        );
+      }
+      return previewCounters;
+    });
+    return {
+      userId: input.connection.user_id,
+      connectionId: input.connection.id,
+      counters,
+      cursorBefore: input.cursorSnapshot,
+      cursorAfter: input.cursorSnapshot,
+    };
   }
 
   private async persist(input: {
@@ -1093,6 +2276,23 @@ export class CTraderMcpSyncEngine {
     counters: CTraderSyncCounters,
   ): Promise<boolean> {
     const externalKey = `position:${positionId}`;
+    const pendingHistoricalReview = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM ctrader_reconciliation_candidates candidate
+         JOIN ctrader_historical_imports import
+           ON import.user_id=candidate.user_id
+          AND import.broker_connection_id=candidate.broker_connection_id
+          AND import.id=candidate.import_id
+         WHERE candidate.user_id=$1
+           AND candidate.broker_connection_id=$2
+           AND candidate.external_position_id=$3
+           AND candidate.external_trade_key=$4
+           AND candidate.status='pending'
+           AND import.status IN ('queued','running','review')
+       ) AS exists`,
+      [connection.user_id, connection.id, positionId, externalKey],
+    );
+    if (pendingHistoricalReview.rows[0]?.exists) return true;
     const tombstone = await client.query<{ exists: boolean }>(
       `SELECT EXISTS(
          SELECT 1 FROM ctrader_trade_tombstones
@@ -1219,6 +2419,13 @@ export class CTraderMcpSyncEngine {
          updated_at=now()
        WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
          AND deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM ctrader_trade_links link
+           WHERE link.user_id=trades.user_id
+             AND link.broker_connection_id=trades.broker_connection_id
+             AND link.external_trade_key=trades.external_trade_key
+             AND link.trade_id=trades.id
+         )
          AND (
            broker_data #> '{classification,projectionQuarantined}' IS DISTINCT FROM 'true'::jsonb
            OR broker_data #>> '{classification,projectionQuarantineReason}' IS DISTINCT FROM $4
@@ -1269,6 +2476,123 @@ export class CTraderMcpSyncEngine {
     counters: CTraderSyncCounters,
   ): Promise<void> {
     const externalKey = `position:${projection.positionId}`;
+    const linked = await client.query<ExistingTradeRow & { tombstoned: boolean }>(
+      `SELECT trade.id, trade.deleted_at
+              ,EXISTS(
+                SELECT 1 FROM ctrader_trade_tombstones tombstone
+                WHERE tombstone.user_id=link.user_id
+                  AND tombstone.broker_connection_id=link.broker_connection_id
+                  AND tombstone.external_trade_key=link.external_trade_key
+              ) AS tombstoned
+       FROM ctrader_trade_links link
+       JOIN trades trade ON trade.user_id=link.user_id AND trade.id=link.trade_id
+       WHERE link.user_id=$1 AND link.broker_connection_id=$2
+         AND link.external_position_id=$3 AND link.external_trade_key=$4
+       LIMIT 1`,
+      [connection.user_id, connection.id, projection.positionId, externalKey],
+    );
+    const linkedTrade = linked.rows[0] ?? null;
+    if (linkedTrade) {
+      if (linkedTrade.deleted_at !== null || linkedTrade.tombstoned) {
+        counters.archivedTradesPreserved += 1;
+        if (linkedTrade.tombstoned) counters.tombstonesPreserved += 1;
+        return;
+      }
+      const brokerData = {
+        ...projection.brokerData,
+        classification: {
+          ...objectValue(projection.brokerData.classification),
+          projectionQuarantined: false,
+          reconciledManualTrade: true,
+        },
+        environment: connection.provider_environment,
+        ctidTraderAccountId: connection.external_account_id,
+      };
+      const updated = await client.query<{ id: string }>(
+        `UPDATE trades SET
+           account_id=COALESCE($1::uuid,account_id),
+           legacy_account_id=COALESCE($2::text,legacy_account_id),
+           symbol=$3, asset=COALESCE($4::text,asset), instrument=$3, direction=$5,
+           entry_price=$6, exit_price=COALESCE($7::numeric,exit_price), quantity=$8,
+           pnl=COALESCE($9::numeric,pnl), is_open=$10,
+           trade_date=$11, entry_at=$12, exit_at=COALESCE($13::timestamptz,exit_at),
+           legacy_entry_time=$14, legacy_exit_time=COALESCE($15::time,legacy_exit_time),
+           broker_data=broker_data || $16::jsonb,
+           calculation_version=2,
+           row_version=row_version+1, updated_at=now()
+         WHERE id=$17 AND user_id=$18 AND deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM ctrader_trade_tombstones tombstone
+             WHERE tombstone.user_id=$18
+               AND tombstone.broker_connection_id=$19
+               AND tombstone.external_trade_key=$20
+           )
+           AND (
+             account_id IS DISTINCT FROM COALESCE($1::uuid,account_id)
+             OR legacy_account_id IS DISTINCT FROM COALESCE($2::text,legacy_account_id)
+             OR symbol IS DISTINCT FROM $3 OR asset IS DISTINCT FROM COALESCE($4::text,asset)
+             OR instrument IS DISTINCT FROM $3 OR direction IS DISTINCT FROM $5
+             OR entry_price IS DISTINCT FROM $6::numeric
+             OR exit_price IS DISTINCT FROM COALESCE($7::numeric,exit_price)
+             OR quantity IS DISTINCT FROM $8::numeric
+             OR pnl IS DISTINCT FROM COALESCE($9::numeric,pnl)
+             OR is_open IS DISTINCT FROM $10 OR trade_date IS DISTINCT FROM $11::date
+             OR entry_at IS DISTINCT FROM $12::timestamptz
+             OR exit_at IS DISTINCT FROM COALESCE($13::timestamptz,exit_at)
+             OR legacy_entry_time IS DISTINCT FROM $14::time
+             OR legacy_exit_time IS DISTINCT FROM COALESCE($15::time,legacy_exit_time)
+             OR broker_data IS DISTINCT FROM broker_data || $16::jsonb
+             OR calculation_version IS DISTINCT FROM 2
+           )
+         RETURNING id`,
+        [
+          connection.mapped_account_id,
+          connection.legacy_mapped_account_id,
+          projection.symbol,
+          projection.asset,
+          projection.direction,
+          projection.entryPrice,
+          projection.exitPrice,
+          projection.quantityLots,
+          projection.pnl,
+          projection.isOpen,
+          projection.tradeDate,
+          projection.entryAt,
+          projection.exitAt,
+          projection.entryTime,
+          projection.exitTime,
+          json(brokerData),
+          linkedTrade.id,
+          connection.user_id,
+          connection.id,
+          externalKey,
+        ],
+      );
+      if (!updated.rows[0]) {
+        const tombstone = await client.query<{ exists: boolean }>(
+          `SELECT EXISTS(
+             SELECT 1 FROM ctrader_trade_tombstones
+             WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+           ) AS exists`,
+          [connection.user_id, connection.id, externalKey],
+        );
+        if (tombstone.rows[0]?.exists) {
+          counters.tombstonesPreserved += 1;
+          return;
+        }
+      }
+      await client.query(
+        `UPDATE trade_executions SET trade_id=$1
+         WHERE user_id=$2 AND broker_connection_id=$3
+           AND external_position_id=$4 AND trade_id IS DISTINCT FROM $1`,
+        [linkedTrade.id, connection.user_id, connection.id, projection.positionId],
+      );
+      if (updated.rows[0]) {
+        counters.updatedTrades += 1;
+        counters.updated += 1;
+      } else counters.unchangedTrades += 1;
+      return;
+    }
     const existing = await client.query<ExistingTradeRow>(
       `SELECT id, deleted_at FROM trades
        WHERE broker_connection_id=$1 AND external_trade_key=$2
@@ -1297,9 +2621,13 @@ export class CTraderMcpSyncEngine {
          quantity, pnl, is_open, trade_date, entry_at, exit_at,
          legacy_entry_time, legacy_exit_time, broker_data,
          calculation_version, row_version
-       ) VALUES (
-         $1,$2,$3,$4,$5,'ctrader','api',$6,$7,$8,$9,$8,$10,$11,$12,
+       ) SELECT $1,$2,$3,$4,$5,'ctrader','api',$6,$7,$8,$9,$8,$10,$11,$12,
          $13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,2,1
+       WHERE NOT EXISTS (
+         SELECT 1 FROM ctrader_trade_tombstones tombstone
+         WHERE tombstone.user_id=$2
+           AND tombstone.broker_connection_id=$5
+           AND tombstone.external_trade_key=$6
        )
        ON CONFLICT (broker_connection_id, external_trade_key)
          WHERE broker_connection_id IS NOT NULL AND external_trade_key IS NOT NULL
@@ -1324,7 +2652,14 @@ export class CTraderMcpSyncEngine {
          broker_data=EXCLUDED.broker_data,
          calculation_version=EXCLUDED.calculation_version,
          row_version=trades.row_version+1
-       WHERE trades.deleted_at IS NULL AND (
+       WHERE trades.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM ctrader_trade_tombstones tombstone
+           WHERE tombstone.user_id=$2
+             AND tombstone.broker_connection_id=$5
+             AND tombstone.external_trade_key=$6
+         )
+         AND (
          trades.account_id, trades.legacy_account_id, trades.broker_trade_id,
          trades.symbol, trades.asset, trades.instrument, trades.direction,
          trades.entry_price, trades.exit_price, trades.quantity, trades.pnl,
@@ -1364,6 +2699,19 @@ export class CTraderMcpSyncEngine {
         json(brokerData),
       ],
     );
+    if (!changed.rows[0]) {
+      const tombstone = await client.query<{ exists: boolean }>(
+        `SELECT EXISTS(
+           SELECT 1 FROM ctrader_trade_tombstones
+           WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+         ) AS exists`,
+        [connection.user_id, connection.id, externalKey],
+      );
+      if (tombstone.rows[0]?.exists) {
+        counters.tombstonesPreserved += 1;
+        return;
+      }
+    }
     const tradeId = changed.rows[0]?.id ?? previous?.id ?? null;
     if (tradeId) {
       await client.query(
