@@ -106,10 +106,12 @@ describe("CTraderMcpReadClient", () => {
         { name: "get_balance" },
         { name: "get_symbols" },
         { name: "get_deals" },
+        { name: "get_position_details" },
       ] }),
       tool(3, { balance: 100_000, currency: "USD" }),
       tool(4, [{ id: 1, name: "EURUSD" }]),
       tool(5, [{ dealId: "77" }]),
+      tool(6, { position: { positionId: 77 }, deals: [{ dealId: 77 }] }),
     ]);
     const client = new CTraderMcpReadClient(TOKEN, { fetchImplementation: mock.fetchImplementation });
 
@@ -119,8 +121,12 @@ describe("CTraderMcpReadClient", () => {
       fromTimestamp: "2026-08-01T00:00:00.000Z",
       toTimestamp: "2026-08-11T00:00:00.000Z",
     })).resolves.toEqual([{ dealId: "77" }]);
+    await expect(client.getPositionDetails("77")).resolves.toEqual({
+      position: { positionId: 77 },
+      deals: [{ dealId: 77 }],
+    });
 
-    expect(mock.calls).toHaveLength(6);
+    expect(mock.calls).toHaveLength(7);
     expect(mock.calls.every((call) => call.url === CTRADER_MCP_ENDPOINT)).toBe(true);
     expect(mock.calls.every((call) => call.init?.redirect === "error")).toBe(true);
     const initialization = postedJson(mock.calls[0]!);
@@ -130,7 +136,7 @@ describe("CTraderMcpReadClient", () => {
       const body = postedJson(call);
       return (body.params as Record<string, unknown>).name;
     });
-    expect(toolNames).toEqual(["get_balance", "get_symbols", "get_deals"]);
+    expect(toolNames).toEqual(["get_balance", "get_symbols", "get_deals", "get_position_details"]);
     const headers = new Headers(mock.calls[3]!.init?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
     expect(headers.get("mcp-session-id")).toBe("safe-session-id");
@@ -168,6 +174,14 @@ describe("CTraderMcpReadClient", () => {
       fromTimestamp: "2026-01-01T00:00:00.000Z",
       toTimestamp: "2026-02-01T00:00:00.001Z",
     })).rejects.toMatchObject({ code: "DEAL_RANGE_INVALID" });
+    expect(mock.calls).toHaveLength(0);
+  });
+
+  it("rejects unsafe position IDs before calling the read-only detail tool", async () => {
+    const mock = queuedFetch([]);
+    const client = new CTraderMcpReadClient(TOKEN, { fetchImplementation: mock.fetchImplementation });
+    await expect(client.getPositionDetails("1.5")).rejects.toMatchObject({ code: "DEAL_RANGE_INVALID" });
+    await expect(client.getPositionDetails("9007199254740992")).rejects.toMatchObject({ code: "DEAL_RANGE_INVALID" });
     expect(mock.calls).toHaveLength(0);
   });
 

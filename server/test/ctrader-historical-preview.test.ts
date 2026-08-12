@@ -157,6 +157,7 @@ function harness(options: {
   operatorAccountAttestation?: Record<string, unknown>;
   verifiedSymbolOverrides?: Record<string, unknown>;
   lockedProviderMetadata?: Record<string, unknown>;
+  positionDetailsResponse?: unknown;
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
@@ -306,6 +307,7 @@ function harness(options: {
         return Number.isFinite(executedAt) && executedAt >= from && executedAt <= to;
       });
     }),
+    getPositionDetails: vi.fn(async () => options.positionDetailsResponse ?? { deals: [] }),
     close: vi.fn(async () => undefined),
   } satisfies CTraderMcpReadClientLike;
   const events = { publish: vi.fn(async () => ({ id: 1 })) } as unknown as EventBus;
@@ -347,6 +349,91 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     expect(candidateData.allowedActions).toEqual(["link_manual", "reject"]);
     expect(candidateData.publishBlockedReason).toBe("closed_provider_pnl_unavailable");
     expect(JSON.parse(String(values?.[13]))).toMatchObject({ pnl: null, quantityLots: "0.1" });
+  });
+
+  it("stages authoritative historical close money using the nested provider moneyDigits", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const baseHistoricalDeals = closedPosition(false);
+    const historicalDetails = baseHistoricalDeals.map((row, index) => index === 0 ? row : {
+      ...(row as Record<string, unknown>),
+      closePositionDetail: {
+        grossProfit: 250_000,
+        swap: -10_000,
+        commission: -5_000,
+        pnlConversionFee: 1_000,
+        moneyDigits: 4,
+      },
+    });
+    const { engine, queries, candidateRows, readClient } = harness({
+      deals: baseHistoricalDeals,
+      positionDetailsResponse: { deals: historicalDetails },
+    });
+
+    const preview = await engine.previewHistoricalImport(importId, connectionId);
+
+    expect(preview.counters).toMatchObject({ positionsStaged: 1, executionOnly: 0 });
+    expect(readClient.getPositionDetails).toHaveBeenCalledWith("9001");
+    const executionInserts = queries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"));
+    expect(executionInserts[1]?.values.slice(10, 13)).toEqual(["23.4", "-0.5", "-1"]);
+    expect(executionInserts[1]?.values[18]).toBe(4);
+    expect(JSON.parse(String(executionInserts[1]?.values[19]))).toMatchObject({
+      grossProfit: "250000",
+      moneyDigits: 4,
+    });
+    const projected = JSON.parse(String(candidateRows[0]?.values[13])) as Record<string, unknown>;
+    expect(projected).toMatchObject({ pnl: "23.4" });
+    expect(candidateRows[0]?.values[8]).toBe("unmatched");
+    const candidateData = JSON.parse(String(candidateRows[0]?.values[12])) as {
+      allowedActions: string[];
+      publishBlockedReason: string | null;
+    };
+    expect(candidateData.allowedActions).toEqual(["publish_separate", "reject"]);
+    expect(candidateData.publishBlockedReason).toBeNull();
+  });
+
+  it.each([
+    "accountId", "account_id", "ctidTraderAccountId", "ctidTradingAccountId", "traderAccountId",
+  ])("rejects historical position details with mismatched position-wrapper %s", async (accountKey) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const accountlessDeals = closedPosition(false).map((row) => ({
+      ...(row as Record<string, unknown>),
+      accountId: undefined,
+    }));
+    const { engine, database } = harness({
+      deals: accountlessDeals,
+      positionDetailsResponse: {
+        position: { positionId: "9001", [accountKey]: "different-account" },
+        deals: accountlessDeals,
+      },
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects historical position details with a mismatched account in the orders wrapper", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const accountlessDeals = closedPosition(false).map((row) => ({
+      ...(row as Record<string, unknown>),
+      accountId: undefined,
+    }));
+    const { engine, database } = harness({
+      deals: accountlessDeals,
+      positionDetailsResponse: {
+        orders: [{ orderId: "7001", ctidTraderAccountId: "different-account" }],
+        deals: accountlessDeals,
+      },
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
   });
 
   it("stages generic quantity as execution-only with its unknown volume scale preserved", async () => {

@@ -803,12 +803,23 @@ requireMatch(app, /html\[data-auth-mode="vps"\] \.ctrader-legacy-only\{display:n
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/start['"]/, 'same-origin cTrader OAuth start route');
 requireMatch(dataAdapter, /['"]\/ctrader\/oauth\/pending['"]/, 'same-origin cTrader OAuth pending route');
 requireMatch(dataAdapter, /['"]\/ctrader\/mcp\/connect['"]/, 'same-origin cTrader Remote MCP connection route');
+requireMatch(dataAdapter, /\/live-reconciliation['"`]/, 'same-origin live cTrader reconciliation read route');
+requireMatch(dataAdapter, /\/live-reconciliation\/\$\{encodedCandidateId\}\/resolve/, 'same-origin live cTrader reconciliation decision route');
+requireMatch(dataAdapter, /resolveLiveCandidate[\s\S]*?['"]if-match['"][\s\S]*?['"]idempotency-key['"][\s\S]*?resolutionClientRequestId[\s\S]*?recoveredAfterAmbiguousResponse/, 'live cTrader decision concurrency and exact lost-response recovery');
 requireMatch(dataAdapter, /\/historical-imports['"`]/, 'same-origin staged cTrader historical-import route');
 requireMatch(dataAdapter, /\/historical-imports\/current/, 'canonical cTrader historical-import recovery route');
 requireMatch(dataAdapter, /\/reconciliation\/\$\{encodedCandidateId\}\/resolve/, 'same-origin cTrader reconciliation route');
 requireMatch(dataAdapter, /startHistoricalPreview[\s\S]*?['"]idempotency-key['"][\s\S]*?recoveredAfterAmbiguousResponse/, 'historical preview lost-response reconciliation');
 requireMatch(dataAdapter, /resolveHistoricalCandidate[\s\S]*?['"]if-match['"][\s\S]*?['"]idempotency-key['"][\s\S]*?recoveredAfterAmbiguousResponse/, 'historical decision concurrency and lost-response reconciliation');
 rejectMatch(dataAdapter, /https?:\/\//i, 'absolute URL in VPS data adapter');
+requireMatch(app, /Possible cTrader matches[\s\S]*?Nothing is merged automatically/, 'visible live cTrader reconciliation review');
+requireMatch(app, /Merge keeps one record:[\s\S]*?chosen manual trade ID becomes cTrader-linked[\s\S]*?Manual P&amp;L survives only when cTrader has no verified P&amp;L/, 'live merge explains identity survival and broker-first P&L precedence');
+requireMatch(app, /function liveCtraderAllowedActions[\s\S]*?candidate\.allowedActions[\s\S]*?classActions\.has/, 'live cTrader actions intersect server authorization and known classifications');
+requireMatch(app, /classification===['"]ambiguous['"][\s\S]*?Choose the manual journal trade to merge[\s\S]*?manualSelections/, 'ambiguous live cTrader match requires explicit manual selection');
+requireMatch(app, /manual\.hasStrategy[\s\S]*?manual\.hasPsychology[\s\S]*?manual\.hasNotes[\s\S]*?manual\.hasCustomFields[\s\S]*?manual\.screenshotCount/, 'live cTrader review shows preservation flags');
+requireMatch(app, /brokerFirst=isManual&&isCTraderTrade\(existing\)[\s\S]*?replace\.style\.display=brokerFirst\?['"]none['"]/, 'broker-first duplicate hides manual price replacement');
+requireMatch(app, /action===['"]replace_prices['"]&&brokerFirst[\s\S]*?Verified cTrader facts cannot be replaced/, 'broker-first duplicate rejects forged price replacement');
+requireMatch(app, /queueBrokerFirstReconciliation[\s\S]*?\.ctrader\.sync[\s\S]*?review the match in Settings/, 'broker-first keep-both queues reconciliation review');
 
 const ctraderMcpModalSource = sourceBetween('<!-- VPS cTrader Remote MCP compatibility.', '<!-- VPS cTrader OAuth account picker');
 const ctraderMcpSubmitSource = sourceBetween('function clearVpsCtraderMcpForm', 'function openVpsCtraderPicker');
@@ -1082,6 +1093,64 @@ try {
   }
 } catch (error) {
   failures.push(`cTrader historical-candidate security fixture failed: ${error.message}`);
+}
+
+try {
+  const liveReviewSource = sourceBetween('function liveCtraderCandidateClass', 'async function loadVpsCtraderConnections');
+  const liveDocument = makeFakeDocument();
+  const liveState = {
+    reviews: new Map(), errors: new Map(), loading: new Set(), resolving: new Set(),
+    resolutionKeys: new Map(), manualSelections: new Map(),
+  };
+  const { context, exports: liveReview } = evaluateSecurityFixture(
+    liveReviewSource,
+    {
+      document: liveDocument,
+      vpsCtraderState: { live: liveState, connections: [] },
+      ctraderDifferenceSummaries: () => [],
+      showToast() {}, showConfirm() {},
+      window: {}, DataStore: {}, crypto,
+    },
+    '{renderLiveCtraderCandidate,liveCtraderAllowedActions}',
+  );
+  const liveCandidateBase = {
+    id: '00000000-0000-4000-8000-000000000079',
+    version: 2,
+    status: 'pending',
+    reasons: [maliciousMarkup],
+    differences: {},
+    brokerTrade: { symbol: maliciousMarkup, positionId: maliciousIdentifier, entryPrice: '1.25', pnl: '5.50' },
+    manualTrade: null,
+    manualChoices: [
+      { id: '00000000-0000-4000-8000-000000000080', version: 3, symbol: 'XAUUSD', direction: 'Long', date: '2026-08-12', hasStrategy: true, hasPsychology: true, hasNotes: true, hasCustomFields: true, screenshotCount: 2 },
+      { id: '00000000-0000-4000-8000-000000000081', version: 1, symbol: 'XAUUSD', direction: 'Long', date: '2026-08-12' },
+    ],
+  };
+  const collectLive = (element, predicate, output = []) => {
+    if (predicate(element)) output.push(element);
+    for (const child of element?.children || []) collectLive(child, predicate, output);
+    return output;
+  };
+  const liveButtons = card => collectLive(card, element => element?.tagName === 'BUTTON').map(button => button.textContent);
+  const ambiguous = { ...liveCandidateBase, classification: 'ambiguous', allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted', 'reject'] };
+  const ambiguousCard = liveReview.renderLiveCtraderCandidate('connection-1', ambiguous);
+  if (liveButtons(ambiguousCard).join('|') !== 'Keep both|Dismiss match') failures.push('Ambiguous live match linked without an explicit manual selection or exposed suppression');
+  liveState.manualSelections.set(`connection-1:${ambiguous.id}`, ambiguous.manualChoices[0].id);
+  if (liveReview.liveCtraderAllowedActions('connection-1', ambiguous).join('|') !== 'link_manual|publish_separate|reject') failures.push('Ambiguous live match did not unlock only server-authorized actions after an advertised selection');
+  const unknownCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, classification: 'future_class', allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted', 'reject'] });
+  const unversionedCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, version: null, classification: 'high_confidence', manualTrade: liveCandidateBase.manualChoices[0], allowedActions: ['link_manual'] });
+  const deletedCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, classification: 'deleted_manual', manualTrade: { ...liveCandidateBase.manualChoices[0], deleted: true }, allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted', 'reject'] });
+  const pairedCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, classification: 'existing_pair', manualTrade: liveCandidateBase.manualChoices[0], allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted', 'reject'] });
+  if (liveButtons(unknownCard).length || liveButtons(unversionedCard).length) failures.push('Unknown or unversioned live cTrader candidate exposed a mutation control');
+  if (liveButtons(deletedCard).join('|') !== 'Suppress broker copy|Dismiss match') failures.push('Deleted-manual live match exposed an unsafe action');
+  if (liveButtons(pairedCard).join('|') !== 'Merge + preserve manual journal|Dismiss match') failures.push('Broker-first existing pair exposed keep-both or suppression after broker publication');
+  if (liveDocument.created.some(element => element._innerHtmlWrites > 0) || context.__edgebookXss) failures.push('Live cTrader review rendered untrusted values through executable HTML');
+  const liveText = liveDocument.created.map(element => element.textContent).join('\n');
+  for (const expected of [maliciousMarkup, 'Verified cTrader facts', 'Manual journal details preserved', 'Saved and preserved', '2 preserved']) {
+    if (!liveText.includes(expected)) failures.push(`Live cTrader review omitted safe comparison value: ${expected}`);
+  }
+} catch (error) {
+  failures.push(`Live cTrader reconciliation security fixture failed: ${error.message}`);
 }
 
 try {
@@ -2244,14 +2313,16 @@ const ctraderApi = {
     if (requestPath === '/ctrader/oauth/pending') return { grantId: 'grant-1', accounts: [{ ctidTraderAccountId: '42' }] };
     if (requestPath === '/ctrader/connections') return { connections: [{ id: 'connection-1', lastSyncStatus: 'succeeded' }] };
     if (requestPath.endsWith('/status')) return { connection: { id: 'connection-1', lastSyncStatus: 'running' } };
+    if (requestPath.endsWith('/live-reconciliation')) return { candidates: [] };
     return {};
   },
-  async post(requestPath, body) {
-    ctraderCalls.push({ method: 'POST', path: requestPath, body });
+  async post(requestPath, body, options) {
+    ctraderCalls.push({ method: 'POST', path: requestPath, body, options });
     if (requestPath === '/ctrader/oauth/start') return { authorizationUrl: 'https://id.ctrader.com/my/settings/openapi/grantingaccess/', expiresAt: '2026-08-09T00:00:00Z' };
     if (requestPath === '/ctrader/mcp/connect') return { connection: { id: 'mcp-connection-1', authMode: 'remote_mcp' } };
     if (requestPath === '/ctrader/connections') return { connection: { id: 'connection-1' } };
     if (requestPath.endsWith('/sync')) return { syncRunId: 'sync-1', status: 'queued' };
+    if (requestPath.endsWith('/live-reconciliation/00000000-0000-4000-8000-000000000075/resolve')) return { candidate: { id: '00000000-0000-4000-8000-000000000075', status: 'linked' } };
     return null;
   },
 };
@@ -2272,6 +2343,13 @@ await ctraderData.ctrader.list();
 await ctraderData.ctrader.create({ grantId: 'grant-1', ctidTraderAccountId: '42', mappedLegacyAccountId: 'acct_1', label: 'Demo' });
 await ctraderData.ctrader.status('connection-1');
 await ctraderData.ctrader.sync('connection-1');
+await ctraderData.ctrader.listLiveReconciliation('connection-1');
+await ctraderData.ctrader.resolveLiveCandidate('connection-1', '00000000-0000-4000-8000-000000000075', {
+  action: 'link_manual',
+  version: 3,
+  clientRequestId: '77777777-7777-4777-8777-777777777777',
+  manualTradeId: '00000000-0000-4000-8000-000000000076',
+});
 await ctraderData.ctrader.disconnect('connection-1');
 const ctraderCreate = ctraderCalls.find(call => call.method === 'POST' && call.path === '/ctrader/connections');
 if (ctraderCreate?.body?.mappedLegacyAccountId !== 'acct_1') failures.push('cTrader legacy account mapping was not forwarded');
@@ -2280,6 +2358,11 @@ const ctraderMcpConnect = ctraderCalls.find(call => call.method === 'POST' && ca
 if (ctraderMcpConnect?.body?.accountId !== '42' || ctraderMcpConnect?.body?.environment !== 'live' || ctraderMcpConnect?.body?.mappedLegacyAccountId !== 'acct_1' || ctraderMcpConnect?.body?.label !== 'The5ers' || ctraderMcpConnect?.body?.acknowledgeTradingCredentialRisk !== true || ctraderMcpConnect?.body?.acknowledgeNoOpenPositionsAtConnect !== true || !ctraderMcpConnect?.body?.configuration) {
   failures.push('cTrader Remote MCP connection payload was not forwarded exactly');
 }
+const liveResolve = ctraderCalls.find(call => call.method === 'POST' && call.path.endsWith('/live-reconciliation/00000000-0000-4000-8000-000000000075/resolve'));
+if (liveResolve?.body?.manualTradeId !== '00000000-0000-4000-8000-000000000076' || liveResolve?.body?.version !== 3 ||
+    liveResolve?.options?.headers?.['if-match'] !== '"3"' || liveResolve?.options?.headers?.['idempotency-key'] !== '77777777-7777-4777-8777-777777777777') {
+  failures.push('Live cTrader reconciliation decision did not send exact manual choice, version, and idempotency preconditions');
+}
 for (const expectedPath of [
   '/ctrader/oauth/start',
   '/ctrader/mcp/connect',
@@ -2287,10 +2370,79 @@ for (const expectedPath of [
   '/ctrader/connections',
   '/ctrader/connections/connection-1/status',
   '/ctrader/connections/connection-1/sync',
+  '/ctrader/connections/connection-1/live-reconciliation',
+  '/ctrader/connections/connection-1/live-reconciliation/00000000-0000-4000-8000-000000000075/resolve',
   '/ctrader/connections/connection-1/disconnect',
 ]) {
   if (!ctraderCalls.some(call => call.path === expectedPath)) failures.push(`Missing cTrader adapter call ${expectedPath}`);
 }
+
+// A lost live-resolution response is accepted only when the canonical row
+// carries the exact action and client request identity from this attempt.
+const liveCandidateId = '00000000-0000-4000-8000-000000000077';
+const liveRequestId = '88888888-8888-4888-8888-888888888888';
+let canonicalLiveCandidate = {
+  id: liveCandidateId,
+  version: 4,
+  status: 'pending',
+  allowedActions: ['link_manual'],
+  resolutionAction: null,
+  resolutionClientRequestId: null,
+};
+let proveLiveResolution = true;
+const liveRecoveryCalls = [];
+const liveRecoveryData = createVpsDataAdapter({
+  async get(requestPath) {
+    liveRecoveryCalls.push({ method: 'GET', path: requestPath });
+    return { candidate: canonicalLiveCandidate };
+  },
+  async post(requestPath, body, options) {
+    liveRecoveryCalls.push({ method: 'POST', path: requestPath, body, options });
+    canonicalLiveCandidate = {
+      ...canonicalLiveCandidate,
+      version: 5,
+      status: 'linked',
+      resolutionAction: body.action,
+      resolutionClientRequestId: proveLiveResolution ? body.clientRequestId : null,
+    };
+    const error = new Error('live decision response lost after commit');
+    error.code = 'NETWORK_ERROR';
+    throw error;
+  },
+});
+const recoveredLive = await liveRecoveryData.ctrader.resolveLiveCandidate('connection-1', liveCandidateId, {
+  action: 'link_manual',
+  version: 4,
+  clientRequestId: liveRequestId,
+  manualTradeId: '00000000-0000-4000-8000-000000000078',
+});
+if (!recoveredLive?.recoveredAfterAmbiguousResponse || recoveredLive?.candidate?.resolutionClientRequestId !== liveRequestId) {
+  failures.push('Live cTrader decision did not recover a lost response from the exact canonical request identity');
+}
+if (!liveRecoveryCalls.some(call => call.method === 'GET'
+  && call.path.endsWith(`/live-reconciliation/${liveCandidateId}`))) {
+  failures.push('Live cTrader lost-response recovery did not use the exact tenant-scoped candidate detail route');
+}
+proveLiveResolution = false;
+let rejectedUnprovenLiveResolution = false;
+try {
+  await liveRecoveryData.ctrader.resolveLiveCandidate('connection-1', liveCandidateId, {
+    action: 'link_manual',
+    version: 5,
+    clientRequestId: '99999999-9999-4999-8999-999999999999',
+    manualTradeId: '00000000-0000-4000-8000-000000000078',
+  });
+} catch (error) {
+  rejectedUnprovenLiveResolution = error?.latestCandidate?.resolutionClientRequestId === null;
+}
+if (!rejectedUnprovenLiveResolution) failures.push('Live cTrader decision recovery accepted a row without the exact request identity');
+let rejectedMissingLiveVersion = false;
+try {
+  await liveRecoveryData.ctrader.resolveLiveCandidate('connection-1', liveCandidateId, {
+    action: 'reject', version: null, clientRequestId: liveRequestId,
+  });
+} catch (error) { rejectedMissingLiveVersion = error?.code === 'VERSION_REQUIRED'; }
+if (!rejectedMissingLiveVersion) failures.push('Live cTrader decision did not fail closed without a positive candidate version');
 
 // Historical preview and per-candidate decisions retain one idempotency key
 // across a lost response, then accept only the matching canonical server row.

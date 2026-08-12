@@ -82,6 +82,7 @@ async function harness(options: HarnessOptions = {}) {
       if (sql.includes("FROM ctrader_trade_tombstones")) {
         return result([{ exists: options.tombstoneExists ?? true }]);
       }
+      if (sql.includes("DELETE FROM ctrader_live_reconciliation_candidates")) return result([], "DELETE");
       if (sql.includes("SELECT storage_key FROM file_deletion_queue")) {
         return result(queuedKeys.map((storage_key) => ({ storage_key })));
       }
@@ -159,6 +160,8 @@ describe("permanent trade purge serialization", () => {
     const fileLock = timeline.findIndex((entry) => entry.includes("SELECT storage_key FROM file_objects"));
     const deletion = timeline.findIndex((entry) => entry.includes("DELETE FROM trades"));
     const tombstoneGuard = timeline.findIndex((entry) => entry.includes("FROM ctrader_trade_tombstones"));
+    const liveCandidateRetirement = timeline.findIndex((entry) =>
+      entry.includes("DELETE FROM ctrader_live_reconciliation_candidates"));
     const deletionQueueGuard = timeline.findIndex((entry) => entry.includes("SELECT storage_key FROM file_deletion_queue"));
     const commit = timeline.findIndex((entry) => entry === "tx:COMMIT");
     const firstStorageRemoval = timeline.findIndex((entry) => entry.startsWith("storage:remove:"));
@@ -168,7 +171,8 @@ describe("permanent trade purge serialization", () => {
     expect(fileLock).toBeGreaterThan(tradeLock);
     expect(deletion).toBeGreaterThan(fileLock);
     expect(tombstoneGuard).toBeGreaterThan(deletion);
-    expect(deletionQueueGuard).toBeGreaterThan(tombstoneGuard);
+    expect(liveCandidateRetirement).toBeGreaterThan(tombstoneGuard);
+    expect(deletionQueueGuard).toBeGreaterThan(liveCandidateRetirement);
     expect(commit).toBeGreaterThan(deletionQueueGuard);
     expect(firstStorageRemoval).toBeGreaterThan(commit);
     expect(screenshotStorage.remove).toHaveBeenCalledTimes(2);

@@ -16,12 +16,14 @@ export type CTraderMcpReadTool =
   | "get_balance"
   | "get_symbols"
   | "get_deals"
+  | "get_position_details"
   | "get_account"
   | "get_accountinfo"
   | "get_account_info";
 
 const ALLOWED_TOOLS = new Set<CTraderMcpReadTool>([
-  "get_balance", "get_symbols", "get_deals", "get_account", "get_accountinfo", "get_account_info",
+  "get_balance", "get_symbols", "get_deals", "get_position_details",
+  "get_account", "get_accountinfo", "get_account_info",
 ]);
 
 export type CTraderMcpErrorCode =
@@ -402,6 +404,22 @@ export class CTraderMcpReadClient {
       fromTimestamp: request.fromTimestamp,
       toTimestamp: request.toTimestamp,
     });
+  }
+
+  /**
+   * Fetch the provider's immutable deal lineage for one position. This is a
+   * reviewed read-only Remote MCP tool; the client still cannot call any
+   * trading-capable tool advertised by the same bearer token.
+   */
+  async getPositionDetails(positionId: string): Promise<unknown> {
+    if (!/^\d+$/.test(positionId) || positionId === "0") {
+      throw new CTraderMcpError("DEAL_RANGE_INVALID", "The cTrader position ID is invalid");
+    }
+    const parsed = Number(positionId);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+      throw new CTraderMcpError("DEAL_RANGE_INVALID", "The cTrader position ID is invalid");
+    }
+    return this.#callTool("get_position_details", { positionId: parsed });
   }
 
   async getAccountInfo(): Promise<unknown> {

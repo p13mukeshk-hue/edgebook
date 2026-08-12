@@ -68,6 +68,9 @@ function mockService() {
     currentHistoricalImport: vi.fn(async () => null),
     listReconciliationCandidates: vi.fn(async () => ({ historicalImport: {}, candidates: [] })),
     resolveReconciliationCandidate: vi.fn(async () => ({ candidate: {}, historicalImport: {} })),
+    listLiveReconciliationCandidates: vi.fn(async () => ({ candidates: [] })),
+    getLiveReconciliationCandidate: vi.fn(async () => ({ candidate: {} })),
+    resolveLiveReconciliationCandidate: vi.fn(async () => ({ candidate: {} })),
     disconnect: vi.fn(),
   } as unknown as CTraderBrokerService;
 }
@@ -340,6 +343,52 @@ describe("cTrader HTTP contract", () => {
     expect(response.statusCode).toBe(200);
     expect(service.resolveReconciliationCandidate).toHaveBeenCalledWith(expect.objectContaining({
       action: "suppress_deleted",
+      expectedVersion: 3,
+      clientRequestId,
+    }));
+    await app.close();
+  });
+
+  it("reads one exact live candidate for lost-response recovery without exposing terminal history in the list", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const connectionId = "00000000-0000-4000-8000-000000000090";
+    const candidateId = "00000000-0000-4000-8000-000000000074";
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/ctrader/connections/${connectionId}/live-reconciliation/${candidateId}`,
+      headers: { cookie: "edgebook_session=session-token" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("private, no-store");
+    expect(service.getLiveReconciliationCandidate).toHaveBeenCalledWith(
+      "00000000-0000-4000-8000-000000000002",
+      connectionId,
+      candidateId,
+    );
+    await app.close();
+  });
+
+  it("passes a live manual choice only with matching version and idempotency preconditions", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const clientRequestId = "00000000-0000-4000-8000-000000000073";
+    const manualTradeId = "00000000-0000-4000-8000-000000000075";
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/ctrader/connections/00000000-0000-4000-8000-000000000090/live-reconciliation/00000000-0000-4000-8000-000000000074/resolve",
+      headers: {
+        cookie: "edgebook_session=session-token; edgebook_csrf=csrf-test",
+        "x-csrf-token": "csrf-test",
+        "idempotency-key": clientRequestId,
+        "if-match": '"3"',
+      },
+      payload: { action: "link_manual", version: 3, clientRequestId, manualTradeId },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(service.resolveLiveReconciliationCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      action: "link_manual",
+      manualTradeId,
       expectedVersion: 3,
       clientRequestId,
     }));

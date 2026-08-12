@@ -28,6 +28,12 @@ const resolveCandidateSchema = z.object({
   importId: historicalImportIdSchema,
   clientRequestId: clientRequestIdSchema,
 }).strict();
+const resolveLiveCandidateSchema = z.object({
+  action: z.enum(["link_manual", "publish_separate", "suppress_deleted", "reject"]),
+  version: z.number().int().min(1),
+  clientRequestId: clientRequestIdSchema,
+  manualTradeId: z.string().uuid().nullable().optional(),
+}).strict();
 const createConnectionSchema = z.object({
   grantId: z.string().uuid(),
   ctidTraderAccountId: z.string().regex(/^(?:0|[1-9]\d{0,19})$/),
@@ -190,6 +196,21 @@ export async function registerCTraderRoutes(
     },
   );
 
+  app.get<{ Params: { id: string; candidateId: string } }>(
+    "/api/ctrader/connections/:id/live-reconciliation/:candidateId",
+    protectedRead,
+    async (request, reply) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      const candidateId = reconciliationCandidateIdSchema.parse(request.params.candidateId);
+      reply.header("Cache-Control", "no-store");
+      return enabledService().getLiveReconciliationCandidate(
+        request.auth!.user.id,
+        connectionId,
+        candidateId,
+      );
+    },
+  );
+
   app.post<{ Params: { id: string } }>(
     "/api/ctrader/connections/:id/sync",
     protectedWrite,
@@ -276,6 +297,47 @@ export async function registerCTraderRoutes(
         candidateId,
         importId: body.importId,
         action: body.action,
+        expectedVersion: body.version,
+        clientRequestId: body.clientRequestId,
+        idempotencyKey,
+      });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/ctrader/connections/:id/live-reconciliation",
+    protectedRead,
+    async (request, reply) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      reply.header("Cache-Control", "no-store");
+      return enabledService().listLiveReconciliationCandidates(request.auth!.user.id, connectionId);
+    },
+  );
+
+  app.post<{ Params: { id: string; candidateId: string } }>(
+    "/api/ctrader/connections/:id/live-reconciliation/:candidateId/resolve",
+    protectedWrite,
+    async (request) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      const candidateId = reconciliationCandidateIdSchema.parse(request.params.candidateId);
+      const body = resolveLiveCandidateSchema.parse(request.body);
+      const idempotencyKey = idempotencyKeySchema.parse(request.headers["idempotency-key"]);
+      if (idempotencyKey !== body.clientRequestId) {
+        throw new AppError(409, "IDEMPOTENCY_CONFLICT", "Idempotency-Key must match clientRequestId");
+      }
+      const ifMatch = request.headers["if-match"];
+      if (ifMatch === undefined) {
+        throw new AppError(428, "PRECONDITION_REQUIRED", "If-Match is required to resolve a candidate");
+      }
+      if (ifMatch !== `\"${body.version}\"` && ifMatch !== String(body.version)) {
+        throw new AppError(409, "VERSION_CONFLICT", "The reconciliation candidate changed; reload before deciding");
+      }
+      return enabledService().resolveLiveReconciliationCandidate({
+        auth: request.auth!,
+        connectionId,
+        candidateId,
+        action: body.action,
+        manualTradeId: body.manualTradeId ?? null,
         expectedVersion: body.version,
         clientRequestId: body.clientRequestId,
         idempotencyKey,

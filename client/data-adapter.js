@@ -398,6 +398,63 @@ export function createVpsDataAdapter(api) {
       status: id => api.get(`/ctrader/connections/${encodeURIComponent(id)}/status`),
       sync: id => api.post(`/ctrader/connections/${encodeURIComponent(id)}/sync`, {}),
       disconnect: id => api.post(`/ctrader/connections/${encodeURIComponent(id)}/disconnect`, {}),
+      async listLiveReconciliation(id) {
+        const payload = await api.get(`/ctrader/connections/${encodeURIComponent(id)}/live-reconciliation`);
+        if (!payload || !Array.isArray(payload.candidates)) {
+          const error = new Error('cTrader returned an invalid live reconciliation review');
+          error.code = 'CTRADER_LIVE_RECONCILIATION_INVALID';
+          throw error;
+        }
+        return payload;
+      },
+      async resolveLiveCandidate(id, candidateId, {
+        action,
+        version,
+        clientRequestId,
+        manualTradeId = null,
+      }) {
+        if (!Number.isInteger(version) || version <= 0) {
+          const error = new Error('Reload this cTrader match before deciding');
+          error.code = 'VERSION_REQUIRED';
+          throw error;
+        }
+        const connectionId = encodeURIComponent(id);
+        const encodedCandidateId = encodeURIComponent(candidateId);
+        const body = {
+          action,
+          version,
+          clientRequestId,
+          ...(manualTradeId ? { manualTradeId } : {}),
+        };
+        const headers = {
+          'if-match': `"${version}"`,
+          'idempotency-key': clientRequestId,
+        };
+        try {
+          return await api.post(
+            `/ctrader/connections/${connectionId}/live-reconciliation/${encodedCandidateId}/resolve`,
+            body,
+            { headers },
+          );
+        } catch (error) {
+          if (clientRequestId && isAmbiguousWriteError(error)) {
+            try {
+              const latest = await api.get(`/ctrader/connections/${connectionId}/live-reconciliation/${encodedCandidateId}`);
+              const current = latest?.candidate ?? null;
+              const resolution = current?.resolutionAction ?? current?.resolution?.action ?? null;
+              const resolvedRequest = current?.resolutionClientRequestId ?? current?.resolution?.clientRequestId ?? null;
+              if (resolution === action && resolvedRequest === clientRequestId) {
+                return { candidate: current, recoveredAfterAmbiguousResponse: true };
+              }
+              error.latestCandidate = current ?? null;
+            } catch {
+              // Preserve the original uncertain mutation result if the
+              // canonical candidate cannot be read either.
+            }
+          }
+          throw error;
+        }
+      },
       async startHistoricalPreview(id, {
         boundaryLocal,
         timeZone,

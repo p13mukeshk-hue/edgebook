@@ -633,16 +633,29 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
       }
       const suppressed = await client.query<{ blocked: boolean }>(
         `SELECT true AS blocked
-         FROM ctrader_reconciliation_candidates candidate
-         JOIN ctrader_reconciliation_resolutions resolution
-           ON resolution.user_id=candidate.user_id
-          AND resolution.broker_connection_id=candidate.broker_connection_id
-          AND resolution.import_id=candidate.import_id
-          AND resolution.candidate_id=candidate.id
-         WHERE candidate.user_id=$1 AND candidate.manual_trade_id=$2
-           AND candidate.status='suppressed'
-           AND candidate.resolution_action='suppress_deleted'
-           AND resolution.action='suppress_deleted'
+         FROM (
+           SELECT candidate.user_id, candidate.manual_trade_id
+           FROM ctrader_reconciliation_candidates candidate
+           JOIN ctrader_reconciliation_resolutions resolution
+             ON resolution.user_id=candidate.user_id
+            AND resolution.broker_connection_id=candidate.broker_connection_id
+            AND resolution.import_id=candidate.import_id
+            AND resolution.candidate_id=candidate.id
+           WHERE candidate.status='suppressed'
+             AND candidate.resolution_action='suppress_deleted'
+             AND resolution.action='suppress_deleted'
+           UNION ALL
+           SELECT candidate.user_id, resolution.selected_manual_trade_id AS manual_trade_id
+           FROM ctrader_live_reconciliation_candidates candidate
+           JOIN ctrader_live_reconciliation_resolutions resolution
+             ON resolution.user_id=candidate.user_id
+            AND resolution.broker_connection_id=candidate.broker_connection_id
+            AND resolution.candidate_id=candidate.id
+           WHERE candidate.status='suppressed'
+             AND candidate.resolution_action='suppress_deleted'
+             AND resolution.action='suppress_deleted'
+         ) suppressed_match
+         WHERE suppressed_match.user_id=$1 AND suppressed_match.manual_trade_id=$2
          LIMIT 1`,
         [auth.user.id, trade.id],
       );
@@ -796,6 +809,12 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
         if (tombstone.rows[0]?.exists !== true) {
           throw new Error("Permanent trade purge did not preserve its cTrader tombstone");
         }
+        await client.query(
+          `DELETE FROM ctrader_live_reconciliation_candidates
+           WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+             AND status='pending'`,
+          [auth.user.id, lockedConnectionId, providerExternalKey],
+        );
       }
       const storageKeys = files.rows.map((file) => file.storage_key);
       if (storageKeys.length > 0) {

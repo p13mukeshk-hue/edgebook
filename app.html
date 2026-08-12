@@ -1081,6 +1081,16 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .ctrader-connect-actions{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;margin:10px 20px 16px}
 .ctrader-history-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-top:1px solid var(--border);background:rgba(108,99,255,.035);font-size:11px;color:var(--text2);flex-wrap:wrap}
 .ctrader-history-summary strong{color:var(--text);font-weight:600}
+.ctrader-live-review{border-top:1px solid var(--border);background:rgba(245,166,35,.025)}
+.ctrader-live-review-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 16px;flex-wrap:wrap}
+.ctrader-live-review-title{font-size:12px;font-weight:600;color:var(--text)}
+.ctrader-live-review-sub{font-size:10px;color:var(--text3);margin-top:3px;line-height:1.45}
+.ctrader-live-review-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 7px;border-radius:999px;background:var(--amber-bg);color:var(--amber);font-size:10px;font-weight:700}
+.ctrader-live-review-list{display:grid;gap:10px;padding:0 16px 14px}
+.ctrader-live-choice{display:flex;align-items:center;gap:8px;padding:9px 14px;border-top:1px solid var(--border);font-size:10px;color:var(--text2);flex-wrap:wrap}
+.ctrader-live-choice label{font-weight:600;color:var(--text)}
+.ctrader-live-choice select{min-width:min(100%,280px);max-width:100%;padding:6px 8px;border:1px solid var(--border2);border-radius:7px;background:var(--bg2);color:var(--text);font-size:10px;outline:none}
+.ctrader-live-choice select:focus{border-color:var(--accent)}
 .ctrader-history-modal-card{width:min(920px,calc(100vw - 28px));max-height:calc(100vh - 32px);overflow:auto;background:var(--bg2);border:1px solid var(--border2);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.35)}
 .ctrader-history-head{position:sticky;top:0;z-index:2;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px;border-bottom:1px solid var(--border);background:var(--bg2)}
 .ctrader-history-body{padding:18px 20px}
@@ -4113,16 +4123,20 @@ function renderDupModal(){
   const incoming = dup.incomingTrade;
 
   const isManual=dup.id==='__manual__';
+  const brokerFirst=isManual&&isCTraderTrade(existing);
   const warning=document.getElementById('dup-warning-copy');
-  if(warning)warning.textContent=isManual
+  if(warning)warning.textContent=brokerFirst
+    ? 'This looks like a manual copy of an existing cTrader trade. Edgebook will never replace verified broker facts here. You can use the cTrader row, or intentionally save the manual row and review the server-verified match under Settings → Broker sync.'
+    : isManual
     ? 'A trade with the same symbol, date, direction, account and nearly identical prices and size already exists. Save another copy only if these are genuinely separate executions.'
     : 'A very similar broker trade already exists. Compare both records before resolving it.';
   const keepExisting=document.getElementById('dup-keep-existing');
   const keepBoth=document.getElementById('dup-keep-both');
   const replace=document.getElementById('dup-replace');
-  if(keepExisting)keepExisting.textContent=isManual?'Cancel new trade':'Keep existing';
-  if(keepBoth)keepBoth.textContent=isManual?'Save anyway':'Keep both';
+  if(keepExisting)keepExisting.textContent=brokerFirst?'Use cTrader trade':isManual?'Cancel new trade':'Keep existing';
+  if(keepBoth)keepBoth.textContent=brokerFirst?'Save manual + review match':isManual?'Save anyway':'Keep both';
   if(replace)replace.innerHTML=isManual?'<i class="fa-solid fa-rotate"></i> Update existing':'<i class="fa-solid fa-rotate"></i> Replace prices';
+  if(replace){replace.style.display=brokerFirst?'none':'';replace.disabled=brokerFirst;}
 
   document.getElementById('dup-existing-content').innerHTML = dupTradeCard(existing, null);
   document.getElementById('dup-incoming-content').innerHTML = dupTradeCard(incoming, existing);
@@ -4185,6 +4199,17 @@ async function recoverTradesAfterFailedWrite(previous){
   await DataStore.loadFromFirestore({forceServer:true});
 }
 
+async function queueBrokerFirstReconciliation(existing){
+  const connectionId=existing?.brokerConnectionId||existing?.brokerData?.brokerConnectionId||existing?.brokerData?.connectionId||null;
+  if(!connectionId||window._dataMode!=='vps'||!window._vpsData?.ctrader?.sync)return {queued:false};
+  try{
+    const result=await window._vpsData.ctrader.sync(String(connectionId));
+    if(result?.status!=='queued'||!result?.syncRunId)return {queued:false};
+    pollVpsCtraderConnection(String(connectionId));
+    return {queued:true,connectionId:String(connectionId)};
+  }catch(error){return {queued:false,error};}
+}
+
 async function resolveDup(action){
   const dup = _pendingDups[_dupIdx];
   if(!dup) return;
@@ -4193,7 +4218,10 @@ async function resolveDup(action){
   document.querySelectorAll('#dup-modal button').forEach(button=>{button.disabled=true;});
   try{
   const isManual = dup.id === '__manual__';
+  const existingRecord=trades.find(t=>String(t.id)===String(dup.existingTradeId))||(isManual?_pendingManualTrade?.existingTrade:null);
+  const brokerFirst=isManual&&isCTraderTrade(existingRecord);
   const uid = DataStore._uid;
+  if(action==='replace_prices'&&brokerFirst){showToast('Verified cTrader facts cannot be replaced from the manual duplicate dialog. Use Broker sync review.','error');return;}
 
   if(action==='keep_existing'){
     if(!isManual) await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',uid,'pendingDuplicates',dup.id));
@@ -4210,14 +4238,16 @@ async function resolveDup(action){
         showToast('Both trades were not saved. Check your connection and retry.','error');
         return;
       }
+      const brokerFollowup=brokerFirst?await queueBrokerFirstReconciliation(existingRecord):null;
       if(!persistence.attachmentsSaved){
         const remaining=Number(persistence.remaining)||pendingTradeScreenshotDraft.length||1;
         _pendingDups.splice(_dupIdx,1);
         _pendingManualTrade=null;
         closeModal('dup-modal');
-        showToast(`Trade saved, but ${remaining} screenshot${remaining===1?'':'s'} could not be uploaded. The trade form is still open; check your connection and press Save trade to retry.`,'error');
+        showToast(`Trade saved, but ${remaining} screenshot${remaining===1?'':'s'} could not be uploaded. The trade form is still open; check your connection and press Save trade to retry.${brokerFollowup?.queued?' cTrader match review was queued.':''}`,'error');
         return;
       }
+      if(brokerFirst)showToast(brokerFollowup?.queued?'Manual copy saved. cTrader sync was queued; review the match in Settings → Broker sync.':'Manual copy saved. Open Settings → Broker sync, run Sync now, then review the possible match.',brokerFollowup?.queued?'success':'info');
     }else{
       trades.unshift(newTrade);
       const saved=await DataStore.saveTrades(trades);
@@ -4229,7 +4259,7 @@ async function resolveDup(action){
     }
     refreshAll();
     if(!isManual) await window._fbDeleteDoc(window._fbDoc(window._fbDb,'users',uid,'pendingDuplicates',dup.id));
-    showToast('Both trades saved','success');
+    if(!brokerFirst)showToast('Both trades saved','success');
   } else if(action==='replace_prices'){
     const incoming = isManual ? _pendingManualTrade.incomingTrade : dup.incomingTrade;
     const idx = trades.findIndex(t=>String(t.id)===String(dup.existingTradeId));
@@ -4347,7 +4377,7 @@ function showManualDupModal(incomingTrade, existingTrade){
 }
 
 // ── VPS CTRADER CONNECTIONS ───────────────────────────────────────────────
-const vpsCtraderState={oauthEnabled:null,mcpEnabled:null,pending:null,connections:[],statuses:new Map(),callbackHandled:false,message:null,messageType:'success',history:{connectionId:null,session:null,candidates:[],requestKey:null,resolutionKeys:new Map(),busy:false}};
+const vpsCtraderState={oauthEnabled:null,mcpEnabled:null,pending:null,connections:[],statuses:new Map(),callbackHandled:false,message:null,messageType:'success',live:{reviews:new Map(),errors:new Map(),loading:new Set(),resolving:new Set(),resolutionKeys:new Map(),manualSelections:new Map()},history:{connectionId:null,session:null,candidates:[],requestKey:null,resolutionKeys:new Map(),busy:false}};
 let vpsCtraderLoadPromise=null;
 
 function escapeHtml(value){
@@ -4432,6 +4462,13 @@ function ctraderConnectionCard(connection,status){
   const current={...connection,...(status?.connection&&typeof status.connection==='object'?status.connection:{})};
   const id=String(current.id);
   const idArg=escapeCtraderText(JSON.stringify(id));
+  let liveHash=2166136261;for(let index=0;index<id.length;index++){liveHash^=id.charCodeAt(index);liveHash=Math.imul(liveHash,16777619);}
+  const liveReviewId=`${id.replace(/[^A-Za-z0-9_-]/g,'_').slice(0,64)||'id'}_${(liveHash>>>0).toString(16)}`;
+  const liveState=vpsCtraderState.live||{};
+  const livePayload=liveState.reviews instanceof Map?liveState.reviews.get(id):null;
+  const liveCandidates=Array.isArray(livePayload?.candidates)?livePayload.candidates:[];
+  const livePending=liveCandidates.filter(candidate=>String(candidate?.status||'pending').toLowerCase()==='pending').length;
+  const liveLoading=liveState.loading instanceof Set&&liveState.loading.has(id);
   const connectionAuthMode=String(current.authMode||current.mode||'oauth').toLowerCase();
   const isMcpConnection=connectionAuthMode.includes('mcp');
   const authModeLabel=isMcpConnection?'Remote MCP compatibility':'Official OAuth';
@@ -4483,6 +4520,7 @@ function ctraderConnectionCard(connection,status){
       <div class="broker-account-card-actions"><span style="font-size:10px;padding:3px 9px;border-radius:14px;background:${stateBg};color:${stateColor}">${busy?'<i class="fa-solid fa-spinner fa-spin"></i> ':''}${stateText}</span>${reauth?reconnectAction:`<button class="btn-ghost" onclick="syncVpsCtraderConnection(${idArg},this)" ${busy?'disabled':''}><i class="fa-solid fa-rotate"></i> Sync now</button><button class="btn-ghost" onclick="disconnectVpsCtraderConnection(${idArg})" style="color:var(--red)"><i class="fa-solid fa-unlink"></i></button>`}</div>
     </div>
     <div style="padding:10px 16px;font-size:11px;color:var(--text3);line-height:1.7"><div><i class="fa-regular fa-clock"></i> Last sync: ${escapeCtraderText(formatCtraderWhen(current.lastSyncAt))}${counterText}</div><div><i class="fa-solid fa-plug"></i> Connection: ${escapeCtraderText(authModeLabel)}</div><div><i class="fa-solid fa-shield-halved"></i> ${isMcpConnection?'Edgebook invokes read tools only; the cTrader Remote MCP token itself remains trading-capable.':'Official OAuth uses read-only account access.'}</div><div><i class="fa-solid fa-wallet"></i> Edgebook account: ${escapeCtraderText(mappedAccount?.name||'Not mapped')}</div>${current.accountCurrency?`<div><i class="fa-solid fa-coins"></i> Account currency: ${escapeCtraderText(current.accountCurrency)}</div>`:''}${warningText?`<div style="margin-top:6px;color:var(--amber)"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeCtraderText(warningText)}</div>`:''}${error?`<div style="margin-top:6px;color:var(--red)"><i class="fa-solid fa-circle-exclamation"></i> ${escapeCtraderText(error)}</div>`:''}</div>
+    <section class="ctrader-live-review" aria-labelledby="ctrader-live-title-${liveReviewId}"><div class="ctrader-live-review-head"><div><div id="ctrader-live-title-${liveReviewId}" class="ctrader-live-review-title"><i class="fa-solid fa-code-compare" style="color:var(--amber);margin-right:6px"></i>Possible cTrader matches</div><div class="ctrader-live-review-sub">Nothing is merged automatically. Merge keeps one record: the chosen manual trade ID becomes cTrader-linked while its strategy, psychology, notes, custom fields, and screenshots survive. Manual P&amp;L survives only when cTrader has no verified P&amp;L; otherwise the broker value is used.</div></div><div style="display:flex;align-items:center;gap:7px"><span class="ctrader-live-review-count" id="ctrader-live-count-${liveReviewId}">${liveLoading?'…':livePending}</span><button class="btn-ghost" type="button" onclick="refreshLiveCtraderReconciliation(${idArg})" ${liveLoading?'disabled':''}><i class="fa-solid fa-rotate${liveLoading?' fa-spin':''}"></i> Refresh</button></div></div><div id="ctrader-live-list-${liveReviewId}" class="ctrader-live-review-list" data-connection-id="${escapeCtraderText(id)}"></div></section>
     ${reauth?'':`<div class="ctrader-history-summary"><div><strong>${escapeCtraderText(historyActionLabel)}</strong><div style="margin-top:2px;color:var(--text3)">${escapeCtraderText(historySummaryText)}</div></div><button class="btn-ghost" type="button" onclick="openCtraderHistoryModal(${idArg})" ${historyBusy?'disabled':''}>${historyBusy?'<i class="fa-solid fa-spinner fa-spin"></i> Preparing preview':`<i class="fa-solid fa-clock-rotate-left"></i> ${escapeCtraderText(historyActionLabel)}`}</button></div>`}
   </div>`;
 }
@@ -4514,6 +4552,184 @@ function renderVpsCtraderPanel(){
   const cards=vpsCtraderState.connections.map(connection=>ctraderConnectionCard(connection,vpsCtraderState.statuses.get(String(connection.id)))).join('');
   const addActions=cards?`<div class="ctrader-connect-actions">${vpsCtraderState.oauthEnabled?'<button class="btn-accent" onclick="beginVpsCtraderOAuth(this)"><i class="fa-solid fa-plus"></i> Connect another cTrader account</button>':''}${vpsCtraderState.mcpEnabled?'<button class="btn-ghost" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-plug"></i> Connect existing Remote MCP</button>':''}</div>`:'';
   panel.innerHTML=message+pending+(cards||(oauthIntro+mcpIntro))+addActions;
+  renderAllLiveCtraderReviews();
+}
+function liveCtraderCandidateClass(candidate){
+  const value=String(candidate?.classification||'').toLowerCase();
+  return ['high_confidence','ambiguous','deleted_manual','existing_pair'].includes(value)?value:'unknown';
+}
+function liveCtraderCandidateStatus(candidate){return String(candidate?.status||'pending').toLowerCase();}
+function liveCtraderCandidateKey(connectionId,candidateId){return `${String(connectionId)}:${String(candidateId)}`;}
+function liveCtraderUuid(value){return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);}
+function liveCtraderManualChoices(candidate){
+  const choices=[];const seen=new Set();
+  const add=value=>{if(value&&typeof value==='object'&&liveCtraderUuid(value.id)&&!seen.has(value.id)){seen.add(value.id);choices.push(value);}};
+  if(Array.isArray(candidate?.manualChoices))candidate.manualChoices.forEach(add);
+  add(candidate?.manualTrade);
+  return choices;
+}
+function selectedLiveCtraderManual(connectionId,candidate){
+  const choices=liveCtraderManualChoices(candidate);
+  const selection=vpsCtraderState.live.manualSelections.get(liveCtraderCandidateKey(connectionId,candidate?.id));
+  if(selection)return choices.find(choice=>choice.id===selection)||null;
+  return liveCtraderCandidateClass(candidate)==='ambiguous'?null:(choices.find(choice=>choice.id===candidate?.manualTrade?.id)||null);
+}
+function liveCtraderAllowedActions(connectionId,candidate){
+  if(!liveCtraderUuid(candidate?.id)||!Number.isInteger(candidate?.version)||candidate.version<=0||liveCtraderCandidateStatus(candidate)!=='pending'||!Array.isArray(candidate?.allowedActions))return [];
+  const classification=liveCtraderCandidateClass(candidate);
+  const classActions={
+    high_confidence:new Set(['link_manual','publish_separate','reject']),
+    ambiguous:new Set(['link_manual','publish_separate','reject']),
+    deleted_manual:new Set(['suppress_deleted','reject']),
+    existing_pair:new Set(['link_manual','reject']),
+  }[classification];
+  if(!classActions)return [];
+  const selected=selectedLiveCtraderManual(connectionId,candidate);
+  return [...new Set(candidate.allowedActions.map(String).filter(action=>{
+    if(!classActions.has(action))return false;
+    if(action==='link_manual')return selected!==null;
+    if(action==='suppress_deleted')return candidate?.manualTrade?.deleted===true;
+    return true;
+  }))];
+}
+function liveCtraderReviewValue(value){
+  if(value==null||value==='')return '—';
+  if(Array.isArray(value))return value.length?value.map(liveCtraderReviewValue).join(', '):'—';
+  if(typeof value==='object'){try{return JSON.stringify(value);}catch{return '[Saved data]';}}
+  return String(value);
+}
+function appendLiveCtraderFact(parent,label,value){
+  const row=document.createElement('div');row.className='ctrader-review-fact';
+  const name=document.createElement('span');name.textContent=label;
+  const detail=document.createElement('span');detail.textContent=liveCtraderReviewValue(value);
+  row.append(name,detail);parent.append(row);
+}
+function liveCtraderChoiceLabel(choice){
+  const parts=[choice?.symbol,choice?.direction,choice?.date,choice?.id].filter(Boolean).map(String);
+  return parts.length?parts.join(' · '):'Protected manual trade';
+}
+function renderLiveCtraderCandidate(connectionId,candidate){
+  const classification=liveCtraderCandidateClass(candidate);
+  const broker=candidate?.brokerTrade&&typeof candidate.brokerTrade==='object'?candidate.brokerTrade:{};
+  const choices=liveCtraderManualChoices(candidate);
+  const manual=selectedLiveCtraderManual(connectionId,candidate);
+  const card=document.createElement('article');card.className=`ctrader-review-card ${classification==='high_confidence'||classification==='existing_pair'?'high-confidence':classification==='deleted_manual'?'deleted':'ambiguous'}`;
+  const head=document.createElement('div');head.className='ctrader-review-card-head';
+  const heading=document.createElement('div');
+  const title=document.createElement('div');title.className='ctrader-review-title';title.textContent=broker.symbol||manual?.symbol||'cTrader execution';
+  const sub=document.createElement('div');sub.className='ctrader-review-sub';sub.textContent=`Broker position ${broker.positionId||'unknown'} · Candidate ${candidate?.id||'invalid'} · ${liveCtraderCandidateStatus(candidate)}`;
+  heading.append(title,sub);
+  const badge=document.createElement('span');badge.className='ctrader-review-badge';badge.textContent=classification==='existing_pair'?'broker + manual pair':classification.replaceAll('_',' ');
+  head.append(heading,badge);card.append(head);
+
+  if(choices.length>1||classification==='ambiguous'){
+    const chooser=document.createElement('div');chooser.className='ctrader-live-choice';
+    const label=document.createElement('label');label.textContent='Choose the manual journal trade to merge';
+    const select=document.createElement('select');select.setAttribute?.('aria-label','Choose manual journal match');
+    const placeholder=document.createElement('option');placeholder.value='';placeholder.textContent='Select a manual trade';select.append(placeholder);
+    const current=manual?.id||'';
+    choices.forEach(choice=>{const option=document.createElement('option');option.value=choice.id;option.textContent=liveCtraderChoiceLabel(choice);option.selected=choice.id===current;select.append(option);});
+    select.value=current;
+    select.addEventListener('change',()=>{
+      const key=liveCtraderCandidateKey(connectionId,candidate?.id);
+      if(select.value&&choices.some(choice=>choice.id===select.value))vpsCtraderState.live.manualSelections.set(key,select.value);
+      else vpsCtraderState.live.manualSelections.delete(key);
+      renderLiveCtraderReview(connectionId);
+    });
+    chooser.append(label,select);card.append(chooser);
+  }
+
+  const columns=document.createElement('div');columns.className='ctrader-review-columns';
+  const brokerColumn=document.createElement('div');brokerColumn.className='ctrader-review-column';const brokerTitle=document.createElement('h5');brokerTitle.textContent='Verified cTrader facts';brokerColumn.append(brokerTitle);
+  for(const [label,value] of [['Broker trade',broker.id],['Position',broker.positionId],['Date / time',broker.entryAt||broker.tradeDate],['Direction',broker.direction],['Entry',broker.entryPrice],['Exit',broker.exitPrice],['Size (lots)',broker.quantityLots],['P&L',broker.pnl],['Position state',broker.isOpen===true?'Open':broker.isOpen===false?'Closed':null]])appendLiveCtraderFact(brokerColumn,label,value);
+  const manualColumn=document.createElement('div');manualColumn.className='ctrader-review-column';const manualTitle=document.createElement('h5');manualTitle.textContent=manual?.deleted?'Deleted manual journal (protected)':'Manual journal details preserved';manualColumn.append(manualTitle);
+  if(manual){
+    const preserved=value=>value===true?'Saved and preserved':value===false?'None saved':'Protected';
+    for(const [label,value] of [['Trade ID',manual.id],['Date',manual.date],['Strategy / setup',preserved(manual.hasStrategy)],['Emotion',preserved(manual.hasEmotion)],['Psychology',preserved(manual.hasPsychology)],['Notes',preserved(manual.hasNotes)],['Custom fields',preserved(manual.hasCustomFields)],['Screenshots',Number.isFinite(Number(manual.screenshotCount))?`${Number(manual.screenshotCount)} preserved`:'Protected']])appendLiveCtraderFact(manualColumn,label,value);
+  }else appendLiveCtraderFact(manualColumn,'Selection',classification==='ambiguous'?'Choose one of the server-verified candidates above':'No valid manual candidate was supplied');
+  columns.append(brokerColumn,manualColumn);card.append(columns);
+
+  const reasons=document.createElement('div');reasons.className='ctrader-review-reasons';
+  const reasonList=Array.isArray(candidate?.reasons)?candidate.reasons.map(liveCtraderReviewValue):[];
+  const differences=ctraderDifferenceSummaries(candidate?.differences);
+  reasons.textContent=`Why this appeared: ${reasonList.length?reasonList.join(' · '):'The server did not supply a deterministic reason.'}${differences.length?` Differences: ${differences.join(' · ')}`:''}`;card.append(reasons);
+
+  const actions=document.createElement('div');actions.className='ctrader-review-actions';
+  const allowed=liveCtraderAllowedActions(connectionId,candidate);
+  const labels={link_manual:'Merge + preserve manual journal',publish_separate:'Keep both',suppress_deleted:'Suppress broker copy',reject:'Dismiss match'};
+  const resolving=vpsCtraderState.live.resolving.has(liveCtraderCandidateKey(connectionId,candidate?.id));
+  if(liveCtraderCandidateStatus(candidate)==='pending'){
+    for(const action of ['link_manual','publish_separate','suppress_deleted','reject']){
+      if(!allowed.includes(action))continue;
+      const button=document.createElement('button');button.type='button';button.className=action==='link_manual'?'btn-accent':'btn-ghost';button.textContent=labels[action];button.disabled=resolving;
+      button.addEventListener('click',()=>confirmLiveCtraderResolution(connectionId,candidate,action));actions.append(button);
+    }
+  }
+  const status=document.createElement('span');status.className='ctrader-review-status';
+  if(liveCtraderCandidateStatus(candidate)!=='pending')status.textContent=`Saved decision: ${candidate?.resolutionAction||liveCtraderCandidateStatus(candidate)}. No automatic overwrite occurred.`;
+  else if(resolving)status.textContent='Saving the versioned decision…';
+  else if(!allowed.length)status.textContent=classification==='ambiguous'&&choices.length?'Choose a manual trade to see server-authorized actions.':'No safe action is available. Refresh the review.';
+  else if(classification==='existing_pair')status.textContent='The broker and manual rows stay separate until you explicitly merge them.';
+  else status.textContent='Only the actions authorized for this exact candidate are shown.';
+  actions.append(status);card.append(actions);return card;
+}
+function renderLiveCtraderReview(connectionId){
+  const id=String(connectionId);const container=document.getElementById(`ctrader-live-list-${safeDomId(id)}`);if(!container)return;
+  container.replaceChildren();
+  if(vpsCtraderState.live.loading.has(id)){const loading=document.createElement('div');loading.className='ctrader-history-note';loading.textContent='Loading the latest cTrader match review…';container.append(loading);return;}
+  const error=vpsCtraderState.live.errors.get(id);if(error){const alert=document.createElement('div');alert.className='ctrader-vps-message error';alert.setAttribute?.('role','alert');alert.textContent=error;container.append(alert);return;}
+  const payload=vpsCtraderState.live.reviews.get(id);const candidates=Array.isArray(payload?.candidates)?payload.candidates:[];
+  if(!candidates.length){const empty=document.createElement('div');empty.className='ctrader-history-note';empty.textContent='No possible cTrader/manual matches need review. New matches appear here after a broker sync.';container.append(empty);return;}
+  candidates.forEach(candidate=>container.append(renderLiveCtraderCandidate(id,candidate)));
+}
+function renderAllLiveCtraderReviews(){vpsCtraderState.connections.forEach(connection=>renderLiveCtraderReview(String(connection.id)));}
+async function refreshLiveCtraderReconciliation(connectionId){
+  const id=String(connectionId);if(!id||!window._vpsData?.ctrader?.listLiveReconciliation)return null;
+  vpsCtraderState.live.loading.add(id);vpsCtraderState.live.errors.delete(id);renderVpsCtraderPanel();
+  try{
+    const payload=await window._vpsData.ctrader.listLiveReconciliation(id);
+    vpsCtraderState.live.reviews.set(id,payload);return payload;
+  }catch(error){vpsCtraderState.live.errors.set(id,error?.message||'The cTrader match review could not be loaded.');return null;}
+  finally{vpsCtraderState.live.loading.delete(id);renderVpsCtraderPanel();}
+}
+function confirmLiveCtraderResolution(connectionId,candidate,action){
+  if(!liveCtraderAllowedActions(connectionId,candidate).includes(action)){showToast('This cTrader action is not authorized for the latest candidate. Refresh and try again.','error');return;}
+  const messages={
+    link_manual:'One cTrader-linked record will remain under the chosen manual trade ID. Strategy, psychology, notes, custom fields, and screenshots are preserved. Manual P&L is retained only if cTrader has no verified P&L; otherwise the broker P&L is used.',
+    publish_separate:'The broker trade and manual journal entry will remain separate. This can intentionally show two rows for the same execution.',
+    suppress_deleted:'The deleted manual record stays deleted and this broker copy will be suppressed so sync cannot recreate it.',
+    reject:'This suggestion will be dismissed. Neither the broker trade nor manual journal entry will be edited.',
+  };
+  const titles={link_manual:'Merge this cTrader match?',publish_separate:'Keep both journal rows?',suppress_deleted:'Suppress this broker copy?',reject:'Dismiss this match?'};
+  showConfirm(titles[action],messages[action],()=>resolveLiveCtraderCandidate(connectionId,candidate,action));
+}
+async function resolveLiveCtraderCandidate(connectionId,candidate,action){
+  const id=String(connectionId);const allowed=liveCtraderAllowedActions(id,candidate);if(!allowed.includes(action))return;
+  const manual=selectedLiveCtraderManual(id,candidate);const manualTradeId=action==='link_manual'?(manual?.id||null):null;
+  if(action==='link_manual'&&!liveCtraderUuid(manualTradeId)){showToast('Choose a valid manual journal trade before merging.','error');return;}
+  const candidateKey=liveCtraderCandidateKey(id,candidate.id);const requestKey=`${candidateKey}:${candidate.version}:${action}:${manualTradeId||''}`;
+  let clientRequestId=vpsCtraderState.live.resolutionKeys.get(requestKey);if(!clientRequestId){clientRequestId=crypto.randomUUID();vpsCtraderState.live.resolutionKeys.set(requestKey,clientRequestId);}
+  vpsCtraderState.live.resolving.add(candidateKey);vpsCtraderState.live.errors.delete(id);renderLiveCtraderReview(id);
+  try{
+    const result=await window._vpsData.ctrader.resolveLiveCandidate(id,candidate.id,{action,version:candidate.version,clientRequestId,manualTradeId});
+    vpsCtraderState.live.resolutionKeys.delete(requestKey);vpsCtraderState.live.manualSelections.delete(candidateKey);
+    showToast(result?.recoveredAfterAmbiguousResponse?'The decision was already saved; confirmed server state is shown.':action==='link_manual'?'cTrader facts merged; manual journal details were preserved.':action==='publish_separate'?'Both trades were kept.':action==='suppress_deleted'?'Broker copy suppressed; deleted journal record stayed protected.':'Match dismissed.','success');
+    await refreshLiveCtraderReconciliation(id);
+    await DataStore.loadFromFirestore({forceServer:true});
+  }catch(error){
+    const latest=error?.latestCandidate;
+    if(latest&&String(latest.id)===String(candidate.id)){
+      const payload=vpsCtraderState.live.reviews.get(id)||{candidates:[]};
+      vpsCtraderState.live.reviews.set(id,{...payload,candidates:(payload.candidates||[]).map(item=>String(item?.id)===String(latest.id)?latest:item)});
+    }
+    const reloadCodes=new Set(['VERSION_CONFLICT','RECONCILIATION_ALREADY_RESOLVED','MANUAL_TRADE_CHANGED','RECONCILIATION_IDENTITY_CONFLICT']);
+    if(reloadCodes.has(error?.code)||error?.status===409){
+      vpsCtraderState.live.errors.set(id,'This match changed or was resolved elsewhere. The latest server version has been reloaded; review it before deciding again.');
+      await refreshLiveCtraderReconciliation(id);
+    }else if(error?.code==='IDEMPOTENCY_CONFLICT')vpsCtraderState.live.errors.set(id,'This retry identity was already used for a different decision. Refresh before trying again.');
+    else if(error?.code==='RECONCILIATION_ACTION_INVALID'||error?.status===404)vpsCtraderState.live.errors.set(id,'That action is no longer available for this match. Refresh the review.');
+    else vpsCtraderState.live.errors.set(id,error?.message||'The decision was not confirmed. Its stable retry identity was retained.');
+  }finally{vpsCtraderState.live.resolving.delete(candidateKey);renderVpsCtraderPanel();}
 }
 async function loadVpsCtraderConnections(){
   if(window._dataMode!=='vps'||!window._vpsData?.ctrader) return;
@@ -4540,9 +4756,21 @@ async function loadVpsCtraderConnections(){
       }
       const connections=await window._vpsData.ctrader.list();
       vpsCtraderState.connections=connections;
-      const statuses=await Promise.allSettled(connections.map(connection=>window._vpsData.ctrader.status(connection.id)));
+      const connectionIds=new Set(connections.map(connection=>String(connection.id)));
+      for(const id of vpsCtraderState.live.reviews.keys())if(!connectionIds.has(id))vpsCtraderState.live.reviews.delete(id);
+      for(const id of vpsCtraderState.live.errors.keys())if(!connectionIds.has(id))vpsCtraderState.live.errors.delete(id);
+      connectionIds.forEach(id=>vpsCtraderState.live.loading.add(id));
+      const [statuses,liveReviews]=await Promise.all([
+        Promise.allSettled(connections.map(connection=>window._vpsData.ctrader.status(connection.id))),
+        Promise.allSettled(connections.map(connection=>window._vpsData.ctrader.listLiveReconciliation(connection.id))),
+      ]);
       vpsCtraderState.statuses=new Map();
       statuses.forEach((result,index)=>{if(result.status==='fulfilled')vpsCtraderState.statuses.set(String(connections[index].id),result.value);});
+      liveReviews.forEach((result,index)=>{
+        const id=String(connections[index].id);vpsCtraderState.live.loading.delete(id);
+        if(result.status==='fulfilled'){vpsCtraderState.live.reviews.set(id,result.value);vpsCtraderState.live.errors.delete(id);}
+        else vpsCtraderState.live.errors.set(id,result.reason?.message||'The cTrader match review could not be loaded.');
+      });
       renderVpsCtraderPanel();
       if(callback?.state==='select'&&vpsCtraderState.pending?.grantId) openVpsCtraderPicker();
     }catch(error){console.error('cTrader VPS load failed:',error);if(panel)panel.innerHTML=`<div class="ctrader-vps-message error">Could not load cTrader: ${escapeCtraderText(error.message)}</div>`;}

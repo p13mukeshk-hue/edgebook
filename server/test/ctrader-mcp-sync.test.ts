@@ -104,6 +104,16 @@ function harness(dealsResponse: unknown, options: {
   activeLegacyIds?: string[];
   activeLegacyConnectionId?: string;
   existingTrade?: { id: string; deleted_at: Date | string | null };
+  positionDetailsResponse?: unknown;
+  pnlRefreshPositionIds?: string[];
+  linkedTrade?: { id: string; deleted_at: Date | string | null; tombstoned: boolean };
+  liveManualRows?: Array<Record<string, unknown>>;
+  liveExistingBroker?: { id: string; row_version: number; deleted_at: Date | string | null };
+  liveCandidateDecision?: { status: string; resolution_action: string | null };
+  mappedAccountId?: string | null;
+  mappedLegacyAccountId?: string | null;
+  lockedMappedAccountId?: string | null;
+  lockedMappedLegacyAccountId?: string | null;
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
@@ -125,6 +135,10 @@ function harness(dealsResponse: unknown, options: {
           external_account_id: "5032134",
           provider_environment: "live",
           provider_metadata: options.lockedProviderMetadata ?? providerMetadata,
+          mapped_account_id: options.lockedMappedAccountId === undefined
+            ? options.mappedAccountId ?? null : options.lockedMappedAccountId,
+          legacy_mapped_account_id: options.lockedMappedLegacyAccountId === undefined
+            ? options.mappedLegacyAccountId ?? null : options.lockedMappedLegacyAccountId,
         }]);
       }
       if (sql.includes("SELECT external_execution_id FROM trade_executions")) return result([]);
@@ -137,6 +151,15 @@ function harness(dealsResponse: unknown, options: {
           external_position_id: execution.position,
           raw_payload: execution.payload,
         })));
+      }
+      if (sql.includes("FROM ctrader_live_reconciliation_candidates") && sql.includes("resolution_action")) {
+        return result(options.liveCandidateDecision ? [options.liveCandidateDecision] : []);
+      }
+      if (sql.includes("SELECT id, row_version, deleted_at FROM trades")) {
+        return result(options.liveExistingBroker ? [options.liveExistingBroker] : []);
+      }
+      if (sql.includes("FROM ctrader_trade_links link")) {
+        return result(options.linkedTrade ? [options.linkedTrade] : []);
       }
       if (sql.includes("SELECT EXISTS") && sql.includes("ctrader_trade_tombstones")) {
         return result([{ exists: options.tombstoned ?? false }]);
@@ -152,6 +175,9 @@ function harness(dealsResponse: unknown, options: {
       if (sql.includes("SELECT id, deleted_at FROM trades")) {
         return result(options.existingTrade ? [options.existingTrade] : []);
       }
+      if (sql.includes("FROM trades manual") && sql.includes("manual.broker_connection_id IS NULL")) {
+        return result(options.liveManualRows ?? []);
+      }
       if (sql.includes("INSERT INTO trades")) return result([{ id: tradeId }]);
       return result([]);
     }),
@@ -159,6 +185,9 @@ function harness(dealsResponse: unknown, options: {
   } as unknown as PoolClient;
   const database = {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes("SELECT execution.external_position_id")) {
+        return result((options.pnlRefreshPositionIds ?? []).map((external_position_id) => ({ external_position_id })));
+      }
       if (sql.includes("FROM broker_connections")) {
         return result([{
           id: connectionId,
@@ -171,8 +200,8 @@ function harness(dealsResponse: unknown, options: {
           token_generation: "1",
           sync_cursor: options.syncCursor ?? {},
           provider_metadata: providerMetadata,
-          mapped_account_id: null,
-          legacy_mapped_account_id: null,
+          mapped_account_id: options.mappedAccountId ?? null,
+          legacy_mapped_account_id: options.mappedLegacyAccountId ?? null,
         }]);
       }
       return result([]);
@@ -187,6 +216,7 @@ function harness(dealsResponse: unknown, options: {
       ?? [{ id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" }]),
     getAccountInfo: vi.fn(async () => options.accountInfoResponse ?? {}),
     getDeals: vi.fn(async () => dealsResponse),
+    getPositionDetails: vi.fn(async () => options.positionDetailsResponse ?? { deals: [] }),
     close: vi.fn(async () => undefined),
   } satisfies CTraderMcpReadClientLike;
   const events = { publish: vi.fn(async () => ({ id: 1 })) } as unknown as EventBus;
@@ -836,6 +866,402 @@ describe("CTraderMcpSyncEngine", () => {
       realizedEvents: [],
       classification: { reviewNeeded: true },
     });
+  });
+
+  it.each([
+    { manualSymbol: "GOLD", providerSymbol: "XAUUSD" },
+    { manualSymbol: "BTC/USD", providerSymbol: "BTCUSD" },
+  ])("stages a live manual match for the narrow $manualSymbol provider alias", async ({ manualSymbol, providerSymbol }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal({ symbolName: providerSymbol }),
+      deal({
+        dealId: "1002",
+        tradeSide: "SELL",
+        dealType: "EXIT",
+        symbolName: providerSymbol,
+        executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      }),
+    ], {
+      symbolsResponse: [{ id: "41", name: providerSymbol, lotSize: 100, symbolCategory: "Metals" }],
+      liveManualRows: [{
+        id: "00000000-0000-4000-8000-000000000301",
+        row_version: 3,
+        deleted_at: null,
+        symbol: manualSymbol,
+        direction: "Long",
+        entry_price: "2000",
+        exit_price: "2010",
+        quantity: "0.1",
+        pnl: "12",
+        trade_date: "2026-08-10",
+        entry_at: null,
+        exit_at: null,
+        strategy: "Breakout",
+        emotion: "Calm",
+        notes: "journal",
+        tags: [],
+        psychology: { review: "kept" },
+        custom_fields: { setup: "A" },
+        screenshot_count: "2",
+      }],
+    });
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({ insertedTrades: 0, positionsProjected: 1 });
+    const staged = clientQueries.find(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_candidates"));
+    expect(staged?.values.slice(5, 11)).toEqual([
+      "00000000-0000-4000-8000-000000000301", 3, null, null, "high_confidence", 95,
+    ]);
+    expect(JSON.parse(String(staged?.values[13]))).toMatchObject({
+      manualChoices: [{ id: "00000000-0000-4000-8000-000000000301", screenshotCount: 2 }],
+    });
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
+  });
+
+  it("suggests an adjacent-day manual match only as ambiguous explicit review", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal(),
+      deal({
+        dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      }),
+    ], {
+      liveManualRows: [{
+        id: "00000000-0000-4000-8000-000000000302", row_version: 2, deleted_at: null,
+        symbol: "XAU/USD", direction: "Long", entry_price: "2000", exit_price: "2010",
+        quantity: "0.1", pnl: null, trade_date: "2026-08-11", entry_at: null, exit_at: null,
+        strategy: null, emotion: null, notes: null, tags: [], psychology: {}, custom_fields: {}, screenshot_count: 0,
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const staged = clientQueries.find(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_candidates"));
+    expect(staged?.values[5]).toBeNull();
+    expect(staged?.values[9]).toBe("ambiguous");
+    expect(JSON.parse(String(staged?.values[11]))).toContain("explicit_manual_selection_required");
+  });
+
+  it("publishes a broker trade on the next sync after a manual-match suggestion is rejected", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([deal()], {
+      liveCandidateDecision: { status: "rejected", resolution_action: "reject" },
+      liveManualRows: [{
+        id: "00000000-0000-4000-8000-000000000303", row_version: 1, deleted_at: null,
+        symbol: "XAU/USD", direction: "Long", entry_price: "2000", exit_price: null,
+        quantity: "0.1", pnl: null, trade_date: "2026-08-10", entry_at: null, exit_at: null,
+        strategy: "manual", emotion: null, notes: "keep", tags: [], psychology: {},
+        custom_fields: {}, screenshot_count: 1,
+      }],
+    });
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({ insertedTrades: 1, positionsProjected: 1 });
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_candidates"))).toBe(false);
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(true);
+  });
+
+  it("retires a stale pending candidate before publishing when its manual match disappeared", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([deal()], {
+      liveCandidateDecision: { status: "pending", resolution_action: null },
+      liveManualRows: [],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const retirement = clientQueries.find(({ sql }) =>
+      sql.includes("DELETE FROM ctrader_live_reconciliation_candidates") && sql.includes("status='pending'"));
+    const brokerInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(retirement).toBeDefined();
+    expect(brokerInsert).toBeDefined();
+    expect(clientQueries.indexOf(retirement!)).toBeLessThan(clientQueries.indexOf(brokerInsert!));
+  });
+
+  it("retires a pending live candidate when a purge tombstone suppresses its provider position", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([deal()], {
+      tombstoned: true,
+      liveCandidateDecision: { status: "pending", resolution_action: null },
+    });
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({ insertedTrades: 0, tombstonesPreserved: 1 });
+    expect(clientQueries.some(({ sql }) =>
+      sql.includes("DELETE FROM ctrader_live_reconciliation_candidates") && sql.includes("status='pending'"))).toBe(true);
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
+  });
+
+  it("uses the connection mapping re-read under FOR UPDATE instead of a stale pre-fetch mapping", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const initialAccountId = "00000000-0000-4000-8000-000000000401";
+    const lockedAccountId = "00000000-0000-4000-8000-000000000402";
+    const { engine, clientQueries } = harness([deal()], {
+      mappedAccountId: initialAccountId,
+      mappedLegacyAccountId: "old-account",
+      lockedMappedAccountId: lockedAccountId,
+      lockedMappedLegacyAccountId: "current-account",
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const manualMatchRead = clientQueries.find(({ sql }) => sql.includes("FROM trades manual"));
+    expect(manualMatchRead?.values.slice(2, 4)).toEqual([lockedAccountId, "current-account"]);
+    const brokerInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(brokerInsert?.values.slice(2, 4)).toEqual([lockedAccountId, "current-account"]);
+  });
+
+  it("continues updating a separately published broker trade with later close and P&L facts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal(),
+      deal({
+        dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(), netPnlCents: 2_500,
+      }),
+    ], {
+      liveCandidateDecision: { status: "published", resolution_action: "publish_separate" },
+      existingTrade: { id: tradeId, deleted_at: null },
+      liveExistingBroker: { id: tradeId, row_version: 2, deleted_at: null },
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_candidates"))).toBe(false);
+    const brokerUpsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(brokerUpsert?.values[13]).toBe("25");
+    expect(brokerUpsert?.values[14]).toBe(false);
+  });
+
+  it("keeps an existing broker row provider-current while an existing-pair merge is pending", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal(),
+      deal({
+        dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(), netPnlCents: 2_500,
+      }),
+    ], {
+      existingTrade: { id: tradeId, deleted_at: null },
+      liveExistingBroker: { id: tradeId, row_version: 2, deleted_at: null },
+      liveManualRows: [{
+        id: "00000000-0000-4000-8000-000000000304", row_version: 1, deleted_at: null,
+        symbol: "XAU/USD", direction: "Long", entry_price: "2000", exit_price: "2010",
+        quantity: "0.1", pnl: null, trade_date: "2026-08-10", entry_at: null, exit_at: null,
+        strategy: "manual", emotion: null, notes: "merge me", tags: [], psychology: {},
+        custom_fields: {}, screenshot_count: 0,
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_candidates"))).toBe(true);
+    const brokerUpsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(brokerUpsert?.values[13]).toBe("25");
+    expect(brokerUpsert?.values[14]).toBe(false);
+  });
+
+  it("uses authoritative nested close money with its provider moneyDigits", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const opening = deal();
+    const closing = deal({
+      dealId: "1002",
+      tradeSide: "SELL",
+      dealType: "EXIT",
+      executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+    });
+    const authoritativeClosing = {
+      ...closing,
+      closePositionDetail: {
+        grossProfit: 250_000,
+        swap: -10_000,
+        commission: -5_000,
+        pnlConversionFee: 1_000,
+        moneyDigits: 4,
+      },
+    };
+    const { engine, clientQueries, storedExecutions, readClient } = harness([
+      opening,
+      closing,
+    ], { positionDetailsResponse: { deals: [opening, authoritativeClosing] } });
+
+    await engine.syncConnection(connectionId);
+
+    expect(readClient.getPositionDetails).toHaveBeenCalledWith("9001");
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBe("23.4");
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      pnlMethod: "provider_close_detail_money_digits",
+      grossProfit: "25",
+      commission: "-0.5",
+      swap: "-1",
+      pnlConversionFee: "0.1",
+      realizedEvents: [{ pnl: "23.4", grossProfit: "25", commission: "-0.5", swap: "-1" }],
+    });
+    const executionInsert = clientQueries.filter((query) => query.sql.includes("INSERT INTO trade_executions"))[1];
+    expect(executionInsert?.values.slice(10, 13)).toEqual(["23.4", "-0.5", "-1"]);
+    expect(executionInsert?.values[18]).toBe(4);
+    expect(JSON.parse(String(executionInsert?.values[19]))).toMatchObject({ moneyDigits: 4, grossProfit: "250000" });
+    expect(storedExecutions[1]?.payload).toMatchObject({
+      edgebookMcpDeal: {
+        closePositionDetail: { moneyDigits: 4, grossProfit: "250000" },
+      },
+    });
+  });
+
+  it("fails closed when explicit cents conflict with authoritative close money", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([deal({
+      dealType: "EXIT",
+      tradeSide: "SELL",
+      netPnlCents: 2_341,
+      closePositionDetail: {
+        grossProfit: 250_000,
+        swap: -10_000,
+        commission: -5_000,
+        pnlConversionFee: 1_000,
+        moneyDigits: 4,
+      },
+    })]);
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_DEAL_INVALID",
+      message: "cTrader returned conflicting realized P&L representations",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("re-fetches a previously stored closed position without regressing the normal sync cursor", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const opening = deal();
+    const closing = deal({
+      dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      closePositionDetail: {
+        grossProfit: 250_000, swap: -10_000, commission: -5_000, pnlConversionFee: 1_000, moneyDigits: 4,
+      },
+    });
+    const newerCursorTimestamp = new Date("2026-08-11T10:00:00.000Z").getTime();
+    const { engine, readClient, clientQueries } = harness([], {
+      pnlRefreshPositionIds: ["9001"],
+      positionDetailsResponse: { deals: [opening, closing] },
+      syncCursor: {
+        historyWindowComplete: true,
+        syncedThroughTimestamp: newerCursorTimestamp,
+        lastDealTimestamp: newerCursorTimestamp,
+        lastDealId: "newer-deal",
+      },
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(readClient.getPositionDetails).toHaveBeenCalledWith("9001");
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBe("23.4");
+    const connectionUpdate = clientQueries.find((query) => query.sql.includes("UPDATE broker_connections SET"));
+    expect(JSON.parse(String(connectionUpdate?.values[0]))).toMatchObject({
+      lastDealTimestamp: newerCursorTimestamp,
+      lastDealId: "newer-deal",
+    });
+  });
+
+  it("upgrades a linked manual trade with non-null displayed P&L when provider provenance is unavailable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const opening = deal();
+    const closing = deal({
+      dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      closePositionDetail: {
+        grossProfit: 250_000, swap: -10_000, commission: -5_000, pnlConversionFee: 1_000, moneyDigits: 4,
+      },
+    });
+    const { engine, database, clientQueries } = harness([], {
+      pnlRefreshPositionIds: ["9001"],
+      positionDetailsResponse: { deals: [opening, closing] },
+      linkedTrade: { id: "00000000-0000-4000-8000-000000000301", deleted_at: null, tombstoned: false },
+      syncCursor: {
+        historyWindowComplete: true,
+        syncedThroughTimestamp: new Date("2026-08-11T10:00:00.000Z").getTime(),
+      },
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const refreshQuery = vi.mocked(database.query).mock.calls.find(([sql]) =>
+      String(sql).includes("SELECT execution.external_position_id"));
+    expect(String(refreshQuery?.[0])).toContain("trade.broker_data->>'pnlMethod'='unavailable'");
+    expect(String(refreshQuery?.[0])).not.toContain("trade.pnl IS NULL");
+    const linkedUpdate = clientQueries.find(({ sql }) =>
+      sql.includes("UPDATE trades SET") && sql.includes("pnl=COALESCE($9::numeric,pnl)"));
+    expect(linkedUpdate?.values[8]).toBe("23.4");
+    expect(JSON.parse(String(linkedUpdate?.values[15]))).toMatchObject({
+      pnlMethod: "provider_close_detail_money_digits",
+      classification: { reconciledManualTrade: true },
+    });
+  });
+
+  it.each([
+    "accountId", "account_id", "ctidTraderAccountId", "ctidTradingAccountId", "traderAccountId",
+  ])("rejects a mismatched %s inside the position-detail position wrapper", async (accountKey) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const opening = deal({ accountId: undefined });
+    const closing = deal({
+      dealId: "1002", accountId: undefined, tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+    });
+    const { engine, database } = harness([opening, closing], {
+      positionDetailsResponse: {
+        position: { positionId: "9001", [accountKey]: "different-account" },
+        deals: [opening, closing],
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched account inside the position-detail orders wrapper", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const opening = deal({ accountId: undefined });
+    const closing = deal({
+      dealId: "1002", accountId: undefined, tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+    });
+    const { engine, database } = harness([opening, closing], {
+      positionDetailsResponse: {
+        orders: [{ orderId: "7001", ctidTraderAccountId: "different-account" }],
+        deals: [opening, closing],
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_ACCOUNT_HISTORY_MISMATCH",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
   });
 
   it("does not reinterpret gross or unscaled fee aliases as net minor-unit P&L", async () => {

@@ -93,6 +93,8 @@ describe("suppressed cTrader/manual reconciliation restore invariant", () => {
     expect(targetLock).toBeGreaterThanOrEqual(0);
     expect(suppressionRead).toBeGreaterThan(targetLock);
     expect(transactionQueries.some((sql) => sql.includes("UPDATE trades SET deleted_at=NULL"))).toBe(false);
+    expect(transactionQueries.some((sql) => sql.includes("ctrader_live_reconciliation_candidates"))).toBe(true);
+    expect(transactionQueries.some((sql) => sql.includes("ctrader_live_reconciliation_resolutions"))).toBe(true);
     await app.close();
   });
 });

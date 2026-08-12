@@ -152,6 +152,24 @@ export type CTraderReconciliationCandidate = {
   brokerTrade: Record<string, unknown>;
 };
 
+export type CTraderLiveReconciliationAction = CTraderReconciliationAction;
+
+export type CTraderLiveReconciliationCandidate = {
+  id: string;
+  version: number;
+  status: string;
+  classification: "high_confidence" | "ambiguous" | "deleted_manual" | "existing_pair";
+  confidence: number;
+  reasons: unknown[];
+  differences: Record<string, unknown>;
+  allowedActions: CTraderLiveReconciliationAction[];
+  resolutionAction: CTraderLiveReconciliationAction | null;
+  resolutionClientRequestId: string | null;
+  manualTrade: (NonNullable<CTraderReconciliationCandidate["manualTrade"]> & { hasCustomFields?: boolean }) | null;
+  manualChoices: Array<NonNullable<CTraderReconciliationCandidate["manualTrade"]> & { hasCustomFields?: boolean }>;
+  brokerTrade: Record<string, unknown>;
+};
+
 export type CTraderMcpValidation = {
   bearerToken: string;
   balance: unknown;
@@ -217,6 +235,22 @@ export interface CTraderBrokerService {
     clientRequestId: string;
     idempotencyKey: string;
   }): Promise<{ candidate: CTraderReconciliationCandidate; historicalImport: CTraderHistoricalImport }>;
+  listLiveReconciliationCandidates(userId: string, connectionId: string): Promise<{
+    candidates: CTraderLiveReconciliationCandidate[];
+  }>;
+  getLiveReconciliationCandidate(userId: string, connectionId: string, candidateId: string): Promise<{
+    candidate: CTraderLiveReconciliationCandidate;
+  }>;
+  resolveLiveReconciliationCandidate(input: {
+    auth: AuthContext;
+    connectionId: string;
+    candidateId: string;
+    action: CTraderLiveReconciliationAction;
+    manualTradeId: string | null;
+    expectedVersion: number;
+    clientRequestId: string;
+    idempotencyKey: string;
+  }): Promise<{ candidate: CTraderLiveReconciliationCandidate }>;
   disconnect(userId: string, connectionId: string): Promise<void>;
 }
 
@@ -693,6 +727,116 @@ const reconciliationCandidateSelect = `
    AND resolution.broker_connection_id=rc.broker_connection_id
    AND resolution.import_id=rc.import_id
    AND resolution.candidate_id=rc.id`;
+
+type LiveReconciliationCandidateRow = QueryResultRow & {
+  id: string;
+  row_version: number;
+  status: string;
+  classification: CTraderLiveReconciliationCandidate["classification"];
+  confidence: number;
+  reasons: unknown;
+  differences: unknown;
+  candidate_data: unknown;
+  projected_trade: unknown;
+  manual_trade_id: string | null;
+  manual_row_version: number | null;
+  broker_trade_id: string | null;
+  broker_row_version: number | null;
+  external_position_id: string;
+  external_trade_key: string;
+  resolution_action: CTraderLiveReconciliationAction | null;
+  resolution_client_request_id: string | null;
+  manual_deleted_at: Date | string | null;
+  manual_symbol: string | null;
+  manual_direction: string | null;
+  manual_trade_date: Date | string | null;
+  manual_has_psychology: boolean | null;
+  manual_has_notes: boolean | null;
+  manual_has_strategy: boolean | null;
+  manual_has_emotion: boolean | null;
+  manual_has_custom_fields: boolean | null;
+  screenshot_count: number | string | null;
+};
+
+const liveReconciliationCandidateSelect = `
+  SELECT candidate.id, candidate.row_version, candidate.status,
+         candidate.classification, candidate.confidence, candidate.reasons,
+         candidate.differences, candidate.candidate_data, candidate.projected_trade,
+         candidate.manual_trade_id, candidate.manual_row_version,
+         candidate.broker_trade_id, candidate.broker_row_version,
+         candidate.external_position_id, candidate.external_trade_key,
+         candidate.resolution_action,
+         resolution.client_request_id AS resolution_client_request_id,
+         manual.deleted_at AS manual_deleted_at,
+         manual.symbol AS manual_symbol, manual.direction AS manual_direction,
+         manual.trade_date AS manual_trade_date,
+         CASE WHEN manual.id IS NULL THEN NULL ELSE manual.psychology <> '{}'::jsonb END AS manual_has_psychology,
+         CASE WHEN manual.id IS NULL THEN NULL ELSE COALESCE(length(trim(manual.notes)),0) > 0 END AS manual_has_notes,
+         CASE WHEN manual.id IS NULL THEN NULL ELSE COALESCE(length(trim(manual.strategy)),0) > 0 END AS manual_has_strategy,
+         CASE WHEN manual.id IS NULL THEN NULL ELSE COALESCE(length(trim(manual.emotion)),0) > 0 END AS manual_has_emotion,
+         CASE WHEN manual.id IS NULL THEN NULL ELSE manual.custom_fields <> '{}'::jsonb END AS manual_has_custom_fields,
+         (SELECT count(*) FROM file_objects file
+          WHERE file.user_id=candidate.user_id AND file.trade_id=manual.id
+            AND file.deleted_at IS NULL) AS screenshot_count
+  FROM ctrader_live_reconciliation_candidates candidate
+  LEFT JOIN trades manual
+    ON manual.user_id=candidate.user_id AND manual.id=candidate.manual_trade_id
+  LEFT JOIN ctrader_live_reconciliation_resolutions resolution
+    ON resolution.user_id=candidate.user_id
+   AND resolution.broker_connection_id=candidate.broker_connection_id
+   AND resolution.candidate_id=candidate.id`;
+
+function liveAllowedActions(row: LiveReconciliationCandidateRow): CTraderLiveReconciliationAction[] {
+  if (row.status !== "pending") return [];
+  if (row.classification === "high_confidence") return ["link_manual", "publish_separate", "reject"];
+  if (row.classification === "ambiguous") return ["link_manual", "publish_separate", "reject"];
+  if (row.classification === "deleted_manual") return ["suppress_deleted", "reject"];
+  return ["link_manual", "reject"];
+}
+
+function mapLiveReconciliationCandidate(row: LiveReconciliationCandidateRow): CTraderLiveReconciliationCandidate {
+  const projection = objectValue(row.projected_trade);
+  const brokerTrade = Object.fromEntries(["positionId", "symbol", "direction", "entryPrice", "exitPrice",
+    "quantityLots", "pnl", "isOpen", "tradeDate", "entryAt", "exitAt"].filter((key) =>
+    Object.prototype.hasOwnProperty.call(projection, key)).map((key) => [key, projection[key]]));
+  if (row.broker_trade_id !== null) brokerTrade.id = row.broker_trade_id;
+  const manualTrade = row.manual_trade_id === null ? null : {
+    id: row.manual_trade_id,
+    version: row.manual_row_version,
+    deleted: row.manual_deleted_at !== null,
+    symbol: row.manual_symbol ?? "",
+    direction: row.manual_direction ?? "",
+    date: row.manual_trade_date === null ? "" : new Date(row.manual_trade_date).toISOString().slice(0, 10),
+    hasStrategy: row.manual_has_strategy === true,
+    hasEmotion: row.manual_has_emotion === true,
+    hasPsychology: row.manual_has_psychology === true,
+    hasNotes: row.manual_has_notes === true,
+    hasCustomFields: row.manual_has_custom_fields === true,
+    screenshotCount: Number(row.screenshot_count ?? 0),
+  };
+  const choiceValues = arrayValue(objectValue(row.candidate_data).manualChoices);
+  const manualChoices = choiceValues.flatMap((choice) => {
+    const value = objectValue(choice);
+    return typeof value.id === "string" && Number.isInteger(value.version)
+      ? [value as NonNullable<CTraderLiveReconciliationCandidate["manualTrade"]>]
+      : [];
+  });
+  return {
+    id: row.id,
+    version: row.row_version,
+    status: row.status,
+    classification: row.classification,
+    confidence: row.confidence,
+    reasons: arrayValue(row.reasons),
+    differences: objectValue(row.differences),
+    allowedActions: liveAllowedActions(row),
+    resolutionAction: row.resolution_action,
+    resolutionClientRequestId: row.resolution_client_request_id,
+    manualTrade,
+    manualChoices,
+    brokerTrade,
+  };
+}
 
 function parseAuthorizedAccounts(value: unknown): CTraderAuthorizedAccount[] {
   if (!Array.isArray(value)) throw new Error("Stored cTrader account grant is malformed");
@@ -1579,6 +1723,411 @@ export class PostgresCTraderService implements CTraderBrokerService {
       historicalImport: mapHistoricalImport(historicalImport),
       candidates: rows.rows.map(mapReconciliationCandidate),
     };
+  }
+
+  async listLiveReconciliationCandidates(userId: string, connectionId: string): Promise<{
+    candidates: CTraderLiveReconciliationCandidate[];
+  }> {
+    await this.findConnectionRow(userId, connectionId);
+    const rows = await this.database.query<LiveReconciliationCandidateRow>(
+      `${liveReconciliationCandidateSelect}
+       WHERE candidate.user_id=$1 AND candidate.broker_connection_id=$2
+         AND candidate.status='pending'
+       ORDER BY candidate.created_at ASC, candidate.id ASC
+       LIMIT 501`,
+      [userId, connectionId],
+    );
+    if (rows.rows.length > 500) {
+      throw new AppError(409, "CTRADER_RECONCILIATION_LIMIT_EXCEEDED", "Too many live cTrader matches require review");
+    }
+    return { candidates: rows.rows.map(mapLiveReconciliationCandidate) };
+  }
+
+  async getLiveReconciliationCandidate(
+    userId: string,
+    connectionId: string,
+    candidateId: string,
+  ): Promise<{ candidate: CTraderLiveReconciliationCandidate }> {
+    await this.findConnectionRow(userId, connectionId);
+    const rows = await this.database.query<LiveReconciliationCandidateRow>(
+      `${liveReconciliationCandidateSelect}
+       WHERE candidate.id=$1 AND candidate.user_id=$2
+         AND candidate.broker_connection_id=$3`,
+      [candidateId, userId, connectionId],
+    );
+    if (!rows.rows[0]) throw notFound("cTrader live reconciliation candidate");
+    return { candidate: mapLiveReconciliationCandidate(rows.rows[0]) };
+  }
+
+  async resolveLiveReconciliationCandidate(input: {
+    auth: AuthContext;
+    connectionId: string;
+    candidateId: string;
+    action: CTraderLiveReconciliationAction;
+    manualTradeId: string | null;
+    expectedVersion: number;
+    clientRequestId: string;
+    idempotencyKey: string;
+  }): Promise<{ candidate: CTraderLiveReconciliationCandidate }> {
+    const hash = requestHash({
+      connectionId: input.connectionId,
+      candidateId: input.candidateId,
+      action: input.action,
+      manualTradeId: input.manualTradeId,
+      expectedVersion: input.expectedVersion,
+      clientRequestId: input.clientRequestId,
+    });
+    const outcome = await withTransaction(this.database, async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `ctrader:live-resolution:${input.auth.user.id}:${input.clientRequestId}`,
+      ]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [input.connectionId]);
+      const replay = await client.query<{ request_hash: Buffer; candidate_id: string }>(
+        `SELECT request_hash, candidate_id FROM ctrader_live_reconciliation_resolutions
+         WHERE user_id=$1 AND client_request_id=$2 LIMIT 1`,
+        [input.auth.user.id, input.clientRequestId],
+      );
+      if (replay.rows[0]) {
+        if (!replay.rows[0].request_hash.equals(hash) || replay.rows[0].candidate_id !== input.candidateId) {
+          throw new AppError(409, "IDEMPOTENCY_CONFLICT", "clientRequestId was already used for another decision");
+        }
+        return this.readLiveResolvedCandidate(client, input.auth.user.id, input.connectionId, input.candidateId);
+      }
+      const result = await client.query<LiveReconciliationCandidateRow>(
+        `SELECT candidate.id, candidate.row_version, candidate.status,
+                candidate.classification, candidate.confidence, candidate.reasons,
+                candidate.differences, candidate.candidate_data, candidate.projected_trade,
+                candidate.manual_trade_id, candidate.manual_row_version,
+                candidate.broker_trade_id, candidate.broker_row_version,
+                candidate.external_position_id, candidate.external_trade_key,
+                candidate.resolution_action, NULL::uuid AS resolution_client_request_id,
+                NULL::timestamptz AS manual_deleted_at, NULL::text AS manual_symbol,
+                NULL::text AS manual_direction, NULL::date AS manual_trade_date,
+                NULL::boolean AS manual_has_psychology, NULL::boolean AS manual_has_notes,
+                NULL::boolean AS manual_has_strategy, NULL::boolean AS manual_has_emotion,
+                NULL::boolean AS manual_has_custom_fields, 0::bigint AS screenshot_count
+         FROM ctrader_live_reconciliation_candidates candidate
+         JOIN broker_connections connection
+           ON connection.user_id=candidate.user_id
+          AND connection.id=candidate.broker_connection_id
+         WHERE candidate.id=$1 AND candidate.user_id=$2
+           AND candidate.broker_connection_id=$3
+         FOR UPDATE OF candidate, connection`,
+        [input.candidateId, input.auth.user.id, input.connectionId],
+      );
+      const candidate = result.rows[0];
+      if (!candidate) throw notFound("cTrader live reconciliation candidate");
+      if (candidate.status !== "pending") {
+        throw new AppError(409, "RECONCILIATION_ALREADY_RESOLVED", "This candidate was already resolved");
+      }
+      if (candidate.row_version !== input.expectedVersion) {
+        throw new AppError(409, "VERSION_CONFLICT", "The reconciliation candidate changed; reload before deciding");
+      }
+      if (!liveAllowedActions(candidate).includes(input.action)) {
+        throw new AppError(409, "RECONCILIATION_ACTION_INVALID", "This action is not safe for this candidate");
+      }
+      const tombstone = await client.query<{ exists: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM ctrader_trade_tombstones
+           WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+         ) AS exists`,
+        [input.auth.user.id, input.connectionId, candidate.external_trade_key],
+      );
+      if (tombstone.rows[0]?.exists === true) {
+        throw new AppError(
+          409,
+          "RECONCILIATION_IDENTITY_CONFLICT",
+          "This broker position was permanently removed or suppressed; reload the review",
+        );
+      }
+      const projection = reviewedProjection(candidate.projected_trade);
+      if (!projection) throw new AppError(409, "RECONCILIATION_PROJECTION_INCOMPLETE", "Broker facts are incomplete");
+      const choices = arrayValue(objectValue(candidate.candidate_data).manualChoices).map(objectValue);
+      const selectedManualId = input.action === "link_manual" || input.action === "suppress_deleted"
+        ? input.manualTradeId ?? candidate.manual_trade_id
+        : null;
+      if (input.action === "link_manual" || input.action === "suppress_deleted") {
+        if (!selectedManualId || !choices.some((choice) => choice.id === selectedManualId)) {
+          throw new AppError(409, "RECONCILIATION_MANUAL_TRADE_REQUIRED", "Choose an advertised manual trade");
+        }
+      }
+      let resolvedTradeId: string | null = null;
+      let beforeManual: unknown = null;
+      let beforeBroker: unknown = null;
+      if (input.action === "link_manual") {
+        const choice = choices.find((candidateChoice) => candidateChoice.id === selectedManualId)!;
+        const expectedManualVersion = Number(choice.version);
+        if (!Number.isSafeInteger(expectedManualVersion) || expectedManualVersion <= 0) {
+          throw new AppError(409, "MANUAL_TRADE_CHANGED", "The advertised manual trade version is invalid; reload before linking");
+        }
+        const manualResult = await client.query<{ row: unknown; row_version: number; deleted_at: Date | string | null }>(
+          `SELECT to_jsonb(manual) AS row, manual.row_version, manual.deleted_at
+           FROM trades manual
+           WHERE manual.id=$1 AND manual.user_id=$2
+             AND manual.row_version=$3
+             AND manual.broker_connection_id IS NULL
+             AND manual.external_trade_key IS NULL
+             AND manual.source_system <> 'ctrader'
+             AND EXISTS (
+               SELECT 1 FROM broker_connections connection
+               WHERE connection.id=$4 AND connection.user_id=$2
+                 AND (
+                   (connection.mapped_account_id IS NOT NULL
+                     AND manual.account_id=connection.mapped_account_id)
+                   OR (
+                     connection.mapped_account_id IS NULL
+                     AND connection.legacy_mapped_account_id IS NOT NULL
+                     AND manual.legacy_account_id=connection.legacy_mapped_account_id
+                   )
+                 )
+             )
+           FOR UPDATE OF manual`,
+          [selectedManualId, input.auth.user.id, expectedManualVersion, input.connectionId],
+        );
+        const manual = manualResult.rows[0];
+        if (!manual || manual.deleted_at !== null) {
+          throw new AppError(409, "MANUAL_TRADE_CHANGED", "The manual trade changed; reload before linking");
+        }
+        beforeManual = manual.row;
+        if (candidate.broker_trade_id !== null) {
+          const brokerResult = await client.query<{ row: unknown; row_version: number }>(
+            `SELECT to_jsonb(broker) AS row, broker.row_version
+             FROM trades broker
+             WHERE broker.id=$1 AND broker.user_id=$2
+               AND broker.broker_connection_id=$3
+               AND broker.external_trade_key=$4
+               AND broker.deleted_at IS NULL AND broker.row_version=$5
+             FOR UPDATE`,
+            [candidate.broker_trade_id, input.auth.user.id, input.connectionId,
+              candidate.external_trade_key, candidate.broker_row_version],
+          );
+          const broker = brokerResult.rows[0];
+          if (!broker) throw new AppError(409, "RECONCILIATION_IDENTITY_CONFLICT", "The broker trade changed; reload");
+          beforeBroker = broker.row;
+          const historicalEvidence = await client.query<{ exists: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1 FROM ctrader_reconciliation_resolutions
+               WHERE user_id=$1 AND broker_connection_id=$2 AND resolved_trade_id=$3
+             ) AS exists`,
+            [input.auth.user.id, input.connectionId, candidate.broker_trade_id],
+          );
+          if (historicalEvidence.rows[0]?.exists === true) {
+            throw new AppError(
+              409,
+              "RECONCILIATION_AUDIT_DEPENDENCY",
+              "This broker row is protected by an earlier historical-import decision; keep both rows to preserve its audit evidence",
+            );
+          }
+          await client.query(
+            `UPDATE file_objects SET trade_id=$1
+             WHERE user_id=$2 AND trade_id=$3`,
+            [selectedManualId, input.auth.user.id, candidate.broker_trade_id],
+          );
+          await client.query(
+            `UPDATE trade_executions SET trade_id=NULL
+             WHERE user_id=$1 AND broker_connection_id=$2 AND external_position_id=$3
+               AND trade_id=$4`,
+            [input.auth.user.id, input.connectionId, candidate.external_position_id, candidate.broker_trade_id],
+          );
+          const removed = await client.query<{ id: string }>(
+            `DELETE FROM trades
+             WHERE id=$1 AND user_id=$2 AND row_version=$3
+             RETURNING id`,
+            [candidate.broker_trade_id, input.auth.user.id, candidate.broker_row_version],
+          );
+          if (!removed.rows[0]) throw new AppError(409, "RECONCILIATION_IDENTITY_CONFLICT", "The broker trade changed; reload");
+          // Deleting a cTrader row creates a tombstone by trigger. This merge is
+          // not deletion intent, so remove only the exact just-created key while
+          // still holding the connection advisory lock.
+          await client.query(
+            `DELETE FROM ctrader_trade_tombstones
+             WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3`,
+            [input.auth.user.id, input.connectionId, candidate.external_trade_key],
+          );
+        }
+        await client.query(
+          `INSERT INTO ctrader_trade_links (
+             user_id, broker_connection_id, external_position_id,
+             external_trade_key, trade_id, import_id
+           ) VALUES ($1,$2,$3,$4,$5,NULL)`,
+          [input.auth.user.id, input.connectionId, candidate.external_position_id,
+            candidate.external_trade_key, selectedManualId],
+        );
+        const updated = await client.query<{ id: string }>(
+          `UPDATE trades SET
+             broker_connection_id=$1, external_trade_key=$2, broker_trade_id=$3,
+             source_system='ctrader', ingestion_method='reconciled',
+             symbol=$4, asset=COALESCE($5,asset), instrument=$4, direction=$6,
+             entry_price=$7, exit_price=COALESCE($8,exit_price),
+             quantity=$9, pnl=COALESCE($10,pnl), is_open=$11,
+             trade_date=$12, entry_at=$13, exit_at=COALESCE($14,exit_at),
+             legacy_entry_time=$15, legacy_exit_time=COALESCE($16,legacy_exit_time),
+             broker_data=broker_data || $17::jsonb, calculation_version=2,
+             row_version=row_version+1
+           WHERE id=$18 AND user_id=$19 AND row_version=$20 AND deleted_at IS NULL
+           RETURNING id`,
+          [
+            input.connectionId, candidate.external_trade_key, projection.positionId,
+            projection.symbol, projection.asset, projection.direction, projection.entryPrice,
+            projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
+            projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
+            projection.exitTime, JSON.stringify(projection.brokerData), selectedManualId,
+            input.auth.user.id, expectedManualVersion,
+          ],
+        );
+        if (!updated.rows[0]) throw new AppError(409, "MANUAL_TRADE_CHANGED", "The manual trade changed during linking");
+        resolvedTradeId = updated.rows[0].id;
+        await client.query(
+          `UPDATE trade_executions SET trade_id=$1
+           WHERE user_id=$2 AND broker_connection_id=$3 AND external_position_id=$4`,
+          [resolvedTradeId, input.auth.user.id, input.connectionId, candidate.external_position_id],
+        );
+      } else if (input.action === "publish_separate") {
+        if (candidate.broker_trade_id !== null) {
+          const brokerResult = await client.query<{ row: unknown; row_version: number }>(
+            `SELECT to_jsonb(broker) AS row, broker.row_version
+             FROM trades broker
+             WHERE broker.id=$1 AND broker.user_id=$2
+               AND broker.broker_connection_id=$3
+               AND broker.external_trade_key=$4
+               AND broker.deleted_at IS NULL AND broker.row_version=$5
+             FOR UPDATE`,
+            [candidate.broker_trade_id, input.auth.user.id, input.connectionId,
+              candidate.external_trade_key, candidate.broker_row_version],
+          );
+          if (!brokerResult.rows[0]) {
+            throw new AppError(409, "RECONCILIATION_IDENTITY_CONFLICT", "The broker trade changed; reload");
+          }
+          beforeBroker = brokerResult.rows[0].row;
+          resolvedTradeId = candidate.broker_trade_id;
+        } else {
+          resolvedTradeId = randomUUID();
+          await client.query(
+            `INSERT INTO trades (
+               id,user_id,account_id,legacy_account_id,broker_connection_id,
+               source_system,ingestion_method,external_trade_key,broker_trade_id,
+               symbol,asset,instrument,direction,entry_price,exit_price,quantity,pnl,
+               is_open,trade_date,entry_at,exit_at,legacy_entry_time,legacy_exit_time,
+               broker_data,calculation_version,row_version
+             ) SELECT $1,$2,connection.mapped_account_id,connection.legacy_mapped_account_id,connection.id,
+               'ctrader','api',$3,$4,$5,$6,$5,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+               $18::jsonb,2,1 FROM broker_connections connection
+               WHERE connection.id=$19 AND connection.user_id=$2`,
+            [resolvedTradeId, input.auth.user.id, candidate.external_trade_key, projection.positionId,
+              projection.symbol, projection.asset, projection.direction, projection.entryPrice,
+              projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
+              projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
+              projection.exitTime, JSON.stringify(projection.brokerData), input.connectionId],
+          );
+          await client.query(
+            `UPDATE trade_executions SET trade_id=$1
+             WHERE user_id=$2 AND broker_connection_id=$3 AND external_position_id=$4`,
+            [resolvedTradeId, input.auth.user.id, input.connectionId, candidate.external_position_id],
+          );
+        }
+      } else if (input.action === "suppress_deleted") {
+        const choice = choices.find((candidateChoice) => candidateChoice.id === selectedManualId)!;
+        const expectedManualVersion = Number(choice.version);
+        if (!Number.isSafeInteger(expectedManualVersion) || expectedManualVersion <= 0) {
+          throw new AppError(409, "DELETED_MATCH_CHANGED", "The advertised deleted-trade version is invalid; reload");
+        }
+        const deleted = await client.query<{ id: string }>(
+          `SELECT id FROM trades
+           WHERE id=$1 AND user_id=$2 AND row_version=$3 AND deleted_at IS NOT NULL
+             AND broker_connection_id IS NULL AND external_trade_key IS NULL
+             AND EXISTS (
+               SELECT 1 FROM broker_connections connection
+               WHERE connection.id=$4 AND connection.user_id=$2
+                 AND (
+                   (connection.mapped_account_id IS NOT NULL
+                     AND trades.account_id=connection.mapped_account_id)
+                   OR (
+                     connection.mapped_account_id IS NULL
+                     AND connection.legacy_mapped_account_id IS NOT NULL
+                     AND trades.legacy_account_id=connection.legacy_mapped_account_id
+                   )
+                 )
+             )
+           FOR UPDATE`,
+          [selectedManualId, input.auth.user.id, expectedManualVersion, input.connectionId],
+        );
+        if (!deleted.rows[0]) throw new AppError(409, "DELETED_MATCH_CHANGED", "The deleted trade changed; reload");
+        await client.query(
+          `INSERT INTO ctrader_trade_tombstones (
+             user_id, broker_connection_id, external_trade_key, external_position_id
+           ) VALUES ($1,$2,$3,$4)
+           ON CONFLICT (user_id,broker_connection_id,external_trade_key) DO UPDATE SET
+             external_position_id=EXCLUDED.external_position_id, purged_at=now()`,
+          [input.auth.user.id, input.connectionId, candidate.external_trade_key, candidate.external_position_id],
+        );
+      }
+      const finalStatus = input.action === "link_manual" ? "linked"
+        : input.action === "publish_separate" ? "published"
+          : input.action === "suppress_deleted" ? "suppressed" : "rejected";
+      const resolved = await client.query(
+        `UPDATE ctrader_live_reconciliation_candidates SET
+           status=$1, resolution_action=$2, resolved_trade_id=$3,
+           merged_broker_snapshot=$4::jsonb, resolved_at=now(), row_version=row_version+1
+         WHERE id=$5 AND user_id=$6 AND broker_connection_id=$7
+           AND row_version=$8 AND status='pending'`,
+        [finalStatus, input.action, resolvedTradeId,
+          beforeBroker === null ? null : JSON.stringify(beforeBroker), input.candidateId,
+          input.auth.user.id, input.connectionId, input.expectedVersion],
+      );
+      if (resolved.rowCount !== 1) throw new AppError(409, "VERSION_CONFLICT", "Candidate changed during resolution");
+      await client.query(
+        `INSERT INTO ctrader_live_reconciliation_resolutions (
+           id,user_id,broker_connection_id,candidate_id,client_request_id,
+           request_hash,action,selected_manual_trade_id,before_manual,before_broker,
+           staged_projection,resolved_trade_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12)`,
+        [randomUUID(), input.auth.user.id, input.connectionId, input.candidateId,
+          input.clientRequestId, hash, input.action, selectedManualId,
+          beforeManual === null ? null : JSON.stringify(beforeManual),
+          beforeBroker === null ? null : JSON.stringify(beforeBroker),
+          JSON.stringify(candidate.projected_trade), resolvedTradeId],
+      );
+      await client.query(
+        `INSERT INTO audit_events (
+           user_id,session_id,event_type,target_type,target_id,metadata
+         ) VALUES ($1,$2,'ctrader.live_reconciliation_resolved','ctrader_live_reconciliation_candidate',$3,
+           jsonb_build_object('connectionId',$4::text,'action',$5::text,
+             'manualTradeId',$6::text,'resolvedTradeId',$7::text,
+             'preservedFields',jsonb_build_array('id','created_at','strategy','emotion','notes','tags','psychology','custom_fields','files')))` ,
+        [input.auth.user.id, input.auth.sessionId, input.candidateId, input.connectionId,
+          input.action, selectedManualId, resolvedTradeId],
+      );
+      return this.readLiveResolvedCandidate(client, input.auth.user.id, input.connectionId, input.candidateId);
+    });
+    await this.events.publish(input.auth.user.id, "ctrader.live_reconciliation_resolved", {
+      connectionId: input.connectionId,
+      candidateId: input.candidateId,
+      action: input.action,
+    }).catch(() => undefined);
+    if (input.action !== "reject") {
+      await this.events.publish(input.auth.user.id, "trades.changed", {
+        reason: "ctrader_live_reconciliation",
+        connectionId: input.connectionId,
+        candidateId: input.candidateId,
+        action: input.action,
+      }).catch(() => undefined);
+    }
+    return outcome;
+  }
+
+  private async readLiveResolvedCandidate(
+    client: PoolClient,
+    userId: string,
+    connectionId: string,
+    candidateId: string,
+  ): Promise<{ candidate: CTraderLiveReconciliationCandidate }> {
+    const result = await client.query<LiveReconciliationCandidateRow>(
+      `${liveReconciliationCandidateSelect}
+       WHERE candidate.id=$1 AND candidate.user_id=$2 AND candidate.broker_connection_id=$3`,
+      [candidateId, userId, connectionId],
+    );
+    if (!result.rows[0]) throw notFound("cTrader live reconciliation decision");
+    return { candidate: mapLiveReconciliationCandidate(result.rows[0]) };
   }
 
   async resolveReconciliationCandidate(input: {
