@@ -34,6 +34,15 @@ const ACCOUNTLESS_HISTORY_ATTESTATION_KEY = "accountlessHistoryAttributionAttest
 const ACCOUNTLESS_HISTORY_ATTESTATION_PURPOSE = "accountless_remote_mcp_history_attribution";
 const ACCOUNTLESS_HISTORY_ATTESTATION_SOURCE = "operator_verified_per_account_remote_mcp_token";
 
+// This value is intentionally writable only as operator-managed connection
+// metadata. There is no public API that can mint or alter an override: the
+// contract size is a financial identity attribute and must be backed by an
+// account-specific cTrader Symbol info observation.
+const VERIFIED_SYMBOL_OVERRIDES_KEY = "verifiedAccountSymbolOverrides";
+const VERIFIED_SYMBOL_OVERRIDE_PURPOSE = "operator_verified_ctrader_symbol_specification";
+const VERIFIED_SYMBOL_OVERRIDE_SOURCE = "verified_account_symbol_override";
+const MAX_VERIFIED_SYMBOL_OVERRIDES = 100;
+
 type AccountlessHistoryAttributionAttestation = {
   version: 1;
   purpose: typeof ACCOUNTLESS_HISTORY_ATTESTATION_PURPOSE;
@@ -45,6 +54,27 @@ type AccountlessHistoryAttributionAttestation = {
   tokenGeneration: string;
   acknowledgedAt: string;
   fingerprint: string;
+};
+
+type VerifiedAccountSymbolOverride = {
+  version: 1;
+  purpose: typeof VERIFIED_SYMBOL_OVERRIDE_PURPOSE;
+  source: typeof VERIFIED_SYMBOL_OVERRIDE_SOURCE;
+  userId: string;
+  connectionId: string;
+  externalAccountId: string;
+  environment: "live" | "demo";
+  tokenGeneration: string;
+  symbolId: string;
+  symbolName: string;
+  baseUnitsPerLot: number;
+  measurementUnit: string;
+  verifiedAt: string;
+};
+
+type VerifiedAccountSymbolOverrideSnapshot = {
+  fingerprint: string;
+  overrides: ReadonlyMap<string, VerifiedAccountSymbolOverride>;
 };
 
 const MCP_VOLUME_ALIASES = [
@@ -139,7 +169,8 @@ type McpSymbol = {
   name: string;
   category: string | null;
   lotSize: number | null;
-  lotSizeSource: "provider" | "unavailable";
+  lotSizeSource: "provider" | "unavailable" | typeof VERIFIED_SYMBOL_OVERRIDE_SOURCE;
+  verifiedOverride: VerifiedAccountSymbolOverride | null;
   raw: JsonRecord;
 };
 
@@ -547,6 +578,171 @@ function normalizedSymbolName(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function invalidVerifiedSymbolOverride(): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_INVALID",
+    "The operator-verified cTrader symbol specification is invalid or is not bound to this connection",
+    false,
+  );
+}
+
+function strictOverrideText(value: unknown, maxLength = 200): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > maxLength
+    || value.trim() !== value
+    || /[\u0000-\u001f\u007f]/.test(value)
+  ) throw invalidVerifiedSymbolOverride();
+  return value;
+}
+
+function verifiedAccountSymbolOverrides(
+  connection: Pick<McpConnectionRow, "id" | "user_id" | "external_account_id" | "provider_environment" | "token_generation">,
+  providerMetadata: JsonRecord,
+): VerifiedAccountSymbolOverrideSnapshot {
+  const nested = providerMetadata[VERIFIED_SYMBOL_OVERRIDES_KEY];
+  if (nested === undefined) {
+    return { fingerprint: json({ present: false }), overrides: new Map() };
+  }
+  if (typeof nested !== "object" || nested === null || Array.isArray(nested)) {
+    throw invalidVerifiedSymbolOverride();
+  }
+  const rawMap = objectValue(nested);
+  const entries = Object.entries(rawMap).sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length > MAX_VERIFIED_SYMBOL_OVERRIDES) throw invalidVerifiedSymbolOverride();
+  const overrides = new Map<string, VerifiedAccountSymbolOverride>();
+  const expectedKeys = [
+    "baseUnitsPerLot",
+    "connectionId",
+    "environment",
+    "externalAccountId",
+    "measurementUnit",
+    "purpose",
+    "source",
+    "symbolId",
+    "symbolName",
+    "tokenGeneration",
+    "userId",
+    "verifiedAt",
+    "version",
+  ];
+  for (const [mapSymbolId, value] of entries) {
+    const symbolId = strictOverrideText(mapSymbolId);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw invalidVerifiedSymbolOverride();
+    }
+    const raw = objectValue(value);
+    if (json(Object.keys(raw).sort()) !== json(expectedKeys)) throw invalidVerifiedSymbolOverride();
+    const verifiedAt = raw.verifiedAt;
+    const verifiedTimestamp = typeof verifiedAt === "string" ? Date.parse(verifiedAt) : Number.NaN;
+    const baseUnitsPerLot = raw.baseUnitsPerLot;
+    if (
+      raw.version !== 1
+      || raw.purpose !== VERIFIED_SYMBOL_OVERRIDE_PURPOSE
+      || raw.source !== VERIFIED_SYMBOL_OVERRIDE_SOURCE
+      || raw.userId !== connection.user_id
+      || raw.connectionId !== connection.id
+      || raw.externalAccountId !== connection.external_account_id
+      || raw.environment !== connection.provider_environment
+      || raw.tokenGeneration !== String(connection.token_generation)
+      || raw.symbolId !== symbolId
+      || !Number.isSafeInteger(baseUnitsPerLot)
+      || Number(baseUnitsPerLot) <= 0
+      || Number(baseUnitsPerLot) > Math.floor(Number.MAX_SAFE_INTEGER / 100)
+      || typeof verifiedAt !== "string"
+      || !Number.isSafeInteger(verifiedTimestamp)
+      || verifiedTimestamp <= 0
+      || verifiedTimestamp > Date.now() + 5 * 60 * 1_000
+      || new Date(verifiedTimestamp).toISOString() !== verifiedAt
+    ) throw invalidVerifiedSymbolOverride();
+    const symbolName = strictOverrideText(raw.symbolName);
+    const measurementUnit = strictOverrideText(raw.measurementUnit, 32);
+    if (!/^[A-Za-z][A-Za-z0-9 ./%_-]{0,31}$/.test(measurementUnit)) {
+      throw invalidVerifiedSymbolOverride();
+    }
+    overrides.set(symbolId, {
+      version: 1,
+      purpose: VERIFIED_SYMBOL_OVERRIDE_PURPOSE,
+      source: VERIFIED_SYMBOL_OVERRIDE_SOURCE,
+      userId: connection.user_id,
+      connectionId: connection.id,
+      externalAccountId: connection.external_account_id,
+      environment: connection.provider_environment,
+      tokenGeneration: String(connection.token_generation),
+      symbolId,
+      symbolName,
+      baseUnitsPerLot: Number(baseUnitsPerLot),
+      measurementUnit,
+      verifiedAt,
+    });
+  }
+  const canonical = [...overrides.entries()].map(([symbolId, override]) => ({ symbolId, override }));
+  return {
+    fingerprint: json({ present: true, overrides: canonical }),
+    overrides,
+  };
+}
+
+function applyVerifiedAccountSymbolOverrides(
+  symbols: readonly McpSymbol[],
+  snapshot: VerifiedAccountSymbolOverrideSnapshot,
+): McpSymbol[] {
+  const providerById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
+  for (const override of snapshot.overrides.values()) {
+    const providerSymbol = providerById.get(override.symbolId);
+    if (!providerSymbol || providerSymbol.name !== override.symbolName) {
+      throw new CTraderSyncError(
+        "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_SYMBOL_MISMATCH",
+        `The operator-verified cTrader specification no longer matches symbol ${override.symbolId}`,
+        false,
+      );
+    }
+    if (providerSymbol.lotSize !== null && providerSymbol.lotSize !== override.baseUnitsPerLot) {
+      throw new CTraderSyncError(
+        "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_PROVIDER_CONFLICT",
+        `cTrader now reports a different authoritative contract size for ${providerSymbol.name}`,
+        false,
+      );
+    }
+  }
+  return symbols.map((symbol) => {
+    const override = snapshot.overrides.get(symbol.id);
+    if (!override || symbol.lotSize !== null) return symbol;
+    return {
+      ...symbol,
+      lotSize: override.baseUnitsPerLot,
+      lotSizeSource: VERIFIED_SYMBOL_OVERRIDE_SOURCE,
+      verifiedOverride: override,
+    };
+  });
+}
+
+function assertVerifiedAccountSymbolOverridesUnchanged(
+  locked: LockedMcpConnectionAttestationRow,
+  expected: VerifiedAccountSymbolOverrideSnapshot,
+): void {
+  let current: VerifiedAccountSymbolOverrideSnapshot | null;
+  try {
+    current = verifiedAccountSymbolOverrides({
+      id: locked.connection_id,
+      user_id: locked.connection_user_id,
+      external_account_id: locked.external_account_id,
+      provider_environment: locked.provider_environment,
+      token_generation: locked.token_generation,
+    }, objectValue(locked.provider_metadata));
+  } catch {
+    current = null;
+  }
+  if (current?.fingerprint !== expected.fingerprint) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_CHANGED",
+      "The operator-verified cTrader symbol specification changed during sync",
+      false,
+    );
+  }
+}
+
 function compareDealIds(left: string, right: string): number {
   if (/^\d+$/.test(left) && /^\d+$/.test(right)) {
     const leftNumber = BigInt(left);
@@ -564,11 +760,33 @@ function normalizeSymbols(value: unknown): McpSymbol[] {
     const id = textValue(firstValue(raw, ["id", "symbolId", "symbol_id"]), "symbol ID");
     const name = textValue(firstValue(raw, ["name", "symbolName", "symbol_name"]), "symbol name");
     if (!id || !name) continue;
-    const providerLot = firstValue(raw, ["lotSize", "lot_size", "contractSize", "contract_size"]);
-    const providerLotNumber = providerLot === null ? null : Number(providerLot);
-    const hasProviderLot = providerLotNumber !== null
-      && Number.isSafeInteger(providerLotNumber)
-      && providerLotNumber > 0;
+    const providerLotAliases = ["lotSize", "lot_size", "contractSize", "contract_size"] as const;
+    const providerLots = providerLotAliases.flatMap((key) => {
+      const candidate = raw[key];
+      if (candidate === undefined || candidate === null) return [];
+      const number = typeof candidate === "number"
+        ? candidate
+        : typeof candidate === "string" && /^\d+$/.test(candidate.trim())
+          ? Number(candidate.trim())
+          : Number.NaN;
+      if (!Number.isSafeInteger(number) || number <= 0 || number > Math.floor(Number.MAX_SAFE_INTEGER / 100)) {
+        throw new CTraderSyncError(
+          "CTRADER_MCP_SYMBOL_SPEC_INVALID",
+          `cTrader returned an invalid contract size for symbol ${id}`,
+          false,
+        );
+      }
+      return [number];
+    });
+    const providerLotNumber = providerLots[0] ?? null;
+    if (providerLots.some((candidate) => candidate !== providerLotNumber)) {
+      throw new CTraderSyncError(
+        "CTRADER_MCP_SYMBOL_CONFLICT",
+        `cTrader returned conflicting contract sizes for symbol ${id}`,
+        false,
+      );
+    }
+    const hasProviderLot = providerLotNumber !== null;
     const normalized: McpSymbol = {
       id,
       name,
@@ -577,6 +795,7 @@ function normalizeSymbols(value: unknown): McpSymbol[] {
       ]), "symbol category"),
       lotSize: hasProviderLot ? providerLotNumber : null,
       lotSizeSource: hasProviderLot ? "provider" : "unavailable",
+      verifiedOverride: null,
       raw,
     };
     const previous = symbols.get(id);
@@ -584,7 +803,8 @@ function normalizeSymbols(value: unknown): McpSymbol[] {
       const sameCanonicalSpecification = normalizedSymbolName(previous.name) === normalizedSymbolName(normalized.name)
         && previous.category === normalized.category
         && previous.lotSize === normalized.lotSize
-        && previous.lotSizeSource === normalized.lotSizeSource;
+        && previous.lotSizeSource === normalized.lotSizeSource
+        && previous.verifiedOverride === normalized.verifiedOverride;
       if (!sameCanonicalSpecification) {
         throw new CTraderSyncError(
           "CTRADER_MCP_SYMBOL_CONFLICT",
@@ -1046,6 +1266,16 @@ function projectMcpPosition(
       false,
     );
   }
+  if (
+    symbol.lotSizeSource === VERIFIED_SYMBOL_OVERRIDE_SOURCE
+    && deals.some((deal) => deal.filledVolumeSourceKey !== "filledVolume")
+  ) {
+    throw new CTraderSyncError(
+      "CTRADER_MCP_VOLUME_SCALE_UNAVAILABLE",
+      `The operator-verified contract size for ${symbol.name} is not paired with the verified cTrader filledVolume provenance`,
+      false,
+    );
+  }
   if (symbol.lotSize === null) {
     throw new CTraderSyncError(
       "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
@@ -1153,6 +1383,7 @@ function projectMcpPosition(
       pnlConversionFee: null,
       realizedEvents,
       accountCurrency,
+      verifiedAccountSymbolOverride: symbol.verifiedOverride,
       classification: {
         symbolCategoryName: symbol.category,
         reviewNeeded: attestedBoundaryInference || (closing.length > 0 && totalPnl === null) || asset === null,
@@ -1356,6 +1587,7 @@ export class CTraderMcpSyncEngine {
     const connection = await this.loadConnection(connectionId);
     const providerMetadata = objectValue(connection.provider_metadata);
     const operatorAccountAttestation = accountlessHistoryAttestation(connection, providerMetadata);
+    const operatorSymbolOverrides = verifiedAccountSymbolOverrides(connection, providerMetadata);
     if (!connection.access_token_ciphertext) {
       throw new CTraderSyncError("CTRADER_REAUTH_REQUIRED", "Reconnect cTrader before syncing", false, true);
     }
@@ -1387,7 +1619,10 @@ export class CTraderMcpSyncEngine {
           true,
         ),
       );
-      const symbols = normalizeSymbols(symbolsRaw);
+      const symbols = applyVerifiedAccountSymbolOverrides(
+        normalizeSymbols(symbolsRaw),
+        operatorSymbolOverrides,
+      );
       const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
       const cursorBefore = safeCursor(connection.sync_cursor);
       if (!hasValidNoOpenPositionsAttestation(connection, providerMetadata)) {
@@ -1423,6 +1658,7 @@ export class CTraderMcpSyncEngine {
         syncedThroughTimestamp: now,
         accountCurrency: currency,
         operatorAccountAttestation,
+        operatorSymbolOverrides,
       });
       await this.events.publish(connection.user_id, "ctrader.synced", {
         connectionId,
@@ -1480,6 +1716,7 @@ export class CTraderMcpSyncEngine {
     }
     const providerMetadata = objectValue(connection.provider_metadata);
     const operatorAccountAttestation = accountlessHistoryAttestation(connection, providerMetadata);
+    const operatorSymbolOverrides = verifiedAccountSymbolOverrides(connection, providerMetadata);
     const normalHistoryFloor = metadataTimestamp(providerMetadata.historyFloorTimestamp);
     const requestedNormalFloor = dateValue(
       historicalImport.normal_history_floor_at_request,
@@ -1528,7 +1765,10 @@ export class CTraderMcpSyncEngine {
           true,
         ),
       );
-      const symbols = normalizeSymbols(symbolsRaw);
+      const symbols = applyVerifiedAccountSymbolOverrides(
+        normalizeSymbols(symbolsRaw),
+        operatorSymbolOverrides,
+      );
       const symbolById = new Map(symbols.map((symbol) => [symbol.id, symbol]));
       const fetched = await this.fetchHistoricalPreviewDeals(
         client,
@@ -1549,6 +1789,7 @@ export class CTraderMcpSyncEngine {
         historicalImport,
         connection,
         fetched,
+        symbols,
         symbolById,
         boundaryTimestamp,
         throughTimestamp,
@@ -1557,6 +1798,7 @@ export class CTraderMcpSyncEngine {
         previewDeadline,
         heartbeat,
         operatorAccountAttestation,
+        operatorSymbolOverrides,
       });
       await this.events.publish(connection.user_id, "ctrader.historical_import.review_ready", {
         connectionId: connection.id,
@@ -1869,6 +2111,7 @@ export class CTraderMcpSyncEngine {
     historicalImport: HistoricalImportRow;
     connection: McpConnectionRow;
     fetched: McpDeal[];
+    symbols: McpSymbol[];
     symbolById: ReadonlyMap<string, McpSymbol>;
     boundaryTimestamp: number;
     throughTimestamp: number;
@@ -1877,6 +2120,7 @@ export class CTraderMcpSyncEngine {
     previewDeadline: number;
     heartbeat: () => Promise<void>;
     operatorAccountAttestation: AccountlessHistoryAttributionAttestation | null;
+    operatorSymbolOverrides: VerifiedAccountSymbolOverrideSnapshot;
   }): Promise<CTraderSyncResult> {
     const counters = await withTransaction(this.database, async (client) => {
       const enforcePersistenceDeadline = (): void => {
@@ -1942,6 +2186,7 @@ export class CTraderMcpSyncEngine {
         );
       }
       assertAccountlessHistoryAttestationUnchanged(state, input.operatorAccountAttestation);
+      assertVerifiedAccountSymbolOverridesUnchanged(state, input.operatorSymbolOverrides);
       // A replay of an already-committed preview is a read-only success. This
       // protects a run whose final worker acknowledgement was lost.
       if (state.status === "review" || state.status === "completed") {
@@ -1963,6 +2208,11 @@ export class CTraderMcpSyncEngine {
           "The normal cTrader cursor moved while the historical preview was running; retry the preview safely",
           true,
         );
+      }
+
+      const verifiedSymbols = input.symbols.filter((symbol) => symbol.verifiedOverride !== null);
+      if (verifiedSymbols.length > 0) {
+        await this.upsertSymbols(client, input.connection, verifiedSymbols);
       }
 
       const previewCounters: CTraderHistoricalPreviewCounters = {
@@ -2410,6 +2660,7 @@ export class CTraderMcpSyncEngine {
     syncedThroughTimestamp: number;
     accountCurrency: string | null;
     operatorAccountAttestation: AccountlessHistoryAttributionAttestation | null;
+    operatorSymbolOverrides: VerifiedAccountSymbolOverrideSnapshot;
   }): Promise<CTraderSyncResult> {
     const persisted = await withTransaction(this.database, async (client) => {
       const locked = await client.query<LockedMcpConnectionAttestationRow>(
@@ -2436,6 +2687,7 @@ export class CTraderMcpSyncEngine {
         throw new CTraderSyncError("CTRADER_CONNECTION_CHANGED", "The cTrader connection changed during sync", true);
       }
       assertAccountlessHistoryAttestationUnchanged(lockedConnection, input.operatorAccountAttestation);
+      assertVerifiedAccountSymbolOverridesUnchanged(lockedConnection, input.operatorSymbolOverrides);
       const counters: CTraderSyncCounters = {
         inserted: 0,
         updated: 0,
@@ -2845,6 +3097,7 @@ export class CTraderMcpSyncEngine {
             symbolName: symbol.name,
             lotSize: symbol.lotSize,
             lotSizeSource: symbol.lotSizeSource,
+            verifiedAccountSymbolOverride: symbol.verifiedOverride,
             symbolCategory: symbol.category,
             connectionMode: "mcp_read",
           }),

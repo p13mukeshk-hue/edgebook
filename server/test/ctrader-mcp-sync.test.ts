@@ -70,6 +70,27 @@ function accountlessHistoryAttestation(overrides: Record<string, unknown> = {}) 
   };
 }
 
+function verifiedSymbolOverrides(overrides: Record<string, unknown> = {}) {
+  return {
+    "41": {
+      version: 1,
+      purpose: "operator_verified_ctrader_symbol_specification",
+      source: "verified_account_symbol_override",
+      userId,
+      connectionId,
+      externalAccountId: "5032134",
+      environment: "live",
+      tokenGeneration: "1",
+      symbolId: "41",
+      symbolName: "XAU/USD",
+      baseUnitsPerLot: 100,
+      measurementUnit: "Oz",
+      verifiedAt: "2026-08-11T11:59:00.000Z",
+      ...overrides,
+    },
+  };
+}
+
 function harness(dealsResponse: unknown, options: {
   symbolsResponse?: unknown;
   balanceResponse?: unknown;
@@ -625,6 +646,174 @@ describe("CTraderMcpSyncEngine", () => {
       lastWarningCode: "CTRADER_MCP_POSITIONS_AWAITING_REVIEW",
     });
   });
+
+  it("reprocesses a previously withheld position with no new deals after an exact operator symbol override", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const providerMetadata: Record<string, unknown> = {
+      historyFloorTimestamp: historyFloor,
+      historyFloorKind: "registration",
+    };
+    const syncCursor: Record<string, unknown> = {};
+    const providerDeals = [
+      deal({ filledVolume: "200" }),
+      deal({
+        dealId: "1002",
+        orderId: "8002",
+        tradeSide: "SELL",
+        dealType: "EXIT",
+        filledVolume: "200",
+        executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      }),
+    ];
+    const { engine, clientQueries, storedExecutions } = harness(providerDeals, {
+      symbolsResponse: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+      providerMetadata,
+      syncCursor,
+    });
+
+    const first = await engine.syncConnection(connectionId);
+    expect(first.counters).toMatchObject({
+      insertedExecutions: 2,
+      insertedTrades: 0,
+      positionsAwaitingReview: 1,
+    });
+    expect(storedExecutions).toHaveLength(2);
+    Object.assign(syncCursor, first.cursorAfter);
+    providerMetadata.verifiedAccountSymbolOverrides = verifiedSymbolOverrides();
+    providerDeals.splice(0, providerDeals.length);
+    clientQueries.splice(0, clientQueries.length);
+
+    const retried = await engine.syncConnection(connectionId);
+
+    expect(retried.counters).toMatchObject({
+      fetchedDeals: 0,
+      insertedExecutions: 0,
+      insertedTrades: 1,
+      positionsProjected: 1,
+      positionsAwaitingReview: 0,
+    });
+    const tradeInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[12]).toBe("0.02");
+    expect(tradeInsert?.values[13]).toBeNull();
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      pnlMethod: "unavailable",
+      verifiedAccountSymbolOverride: {
+        source: "verified_account_symbol_override",
+        symbolId: "41",
+        baseUnitsPerLot: 100,
+        measurementUnit: "Oz",
+      },
+      classification: {
+        lotSizeSource: "verified_account_symbol_override",
+        projectionQuarantined: false,
+      },
+    });
+    const symbolUpsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO symbol_specs"));
+    expect(JSON.parse(String(symbolUpsert?.values[5]))).toMatchObject({
+      lotSize: 100,
+      lotSizeSource: "verified_account_symbol_override",
+      verifiedAccountSymbolOverride: { source: "verified_account_symbol_override" },
+    });
+    expect(retried.cursorAfter).toMatchObject({ positionsAwaitingReviewIds: [] });
+  });
+
+  it.each([
+    { field: "userId", value: "00000000-0000-4000-8000-000000000003" },
+    { field: "connectionId", value: "00000000-0000-4000-8000-000000000091" },
+    { field: "externalAccountId", value: "999999" },
+    { field: "environment", value: "demo" },
+    { field: "tokenGeneration", value: "2" },
+    { field: "baseUnitsPerLot", value: 100.5 },
+    { field: "measurementUnit", value: "Oz\nunsafe" },
+    { field: "purpose", value: "untrusted" },
+  ])("rejects an invalid operator symbol override binding: $field", async ({ field, value }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database, readClient } = harness([], {
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        verifiedAccountSymbolOverrides: verifiedSymbolOverrides({ [field]: value }),
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_INVALID",
+    });
+    expect(readClient.getBalance).not.toHaveBeenCalled();
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects an override whose exact symbol name no longer matches cTrader", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([], {
+      symbolsResponse: [{ id: "41", name: "XAUUSD", symbolCategory: "Metals" }],
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        verifiedAccountSymbolOverrides: verifiedSymbolOverrides(),
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_SYMBOL_MISMATCH",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { lotSize: 50, expectedCode: "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_PROVIDER_CONFLICT" },
+    { lotSize: "100.5", expectedCode: "CTRADER_MCP_SYMBOL_SPEC_INVALID" },
+    { lotSize: -100, expectedCode: "CTRADER_MCP_SYMBOL_SPEC_INVALID" },
+  ])("does not mask a provider contract-size disagreement ($lotSize)", async ({ lotSize, expectedCode }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([], {
+      symbolsResponse: [{ id: "41", name: "XAU/USD", lotSize, symbolCategory: "Metals" }],
+      providerMetadata: {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        verifiedAccountSymbolOverrides: verifiedSymbolOverrides(),
+      },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({ code: expectedCode });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each(["revoked", "changed"] as const)(
+    "rolls back before writes when an operator symbol override is $case after fetch",
+    async (race) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      const providerMetadata = {
+        historyFloorTimestamp: historyFloor,
+        historyFloorKind: "registration",
+        verifiedAccountSymbolOverrides: verifiedSymbolOverrides(),
+      };
+      const lockedProviderMetadata = race === "revoked"
+        ? { historyFloorTimestamp: historyFloor, historyFloorKind: "registration" }
+        : {
+            ...providerMetadata,
+            verifiedAccountSymbolOverrides: verifiedSymbolOverrides({ baseUnitsPerLot: 101 }),
+          };
+      const { engine, clientQueries, storedExecutions } = harness([deal({ filledVolume: "200" })], {
+        symbolsResponse: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+        providerMetadata,
+        lockedProviderMetadata,
+      });
+
+      await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+        code: "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_CHANGED",
+      });
+      expect(storedExecutions).toHaveLength(0);
+      expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trade_executions"))).toBe(false);
+      expect(clientQueries.some(({ sql }) => sql.includes("UPDATE broker_connections SET"))).toBe(false);
+    },
+  );
 
   it("keeps P&L null when cTrader supplies no authoritative realized P&L", async () => {
     vi.useFakeTimers();

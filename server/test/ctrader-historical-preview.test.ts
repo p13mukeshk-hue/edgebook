@@ -74,6 +74,27 @@ function accountlessHistoryAttestation(overrides: Record<string, unknown> = {}) 
   };
 }
 
+function verifiedSymbolOverrides(overrides: Record<string, unknown> = {}) {
+  return {
+    "41": {
+      version: 1,
+      purpose: "operator_verified_ctrader_symbol_specification",
+      source: "verified_account_symbol_override",
+      userId,
+      connectionId,
+      externalAccountId: "5050060",
+      environment: "live",
+      tokenGeneration: "1",
+      symbolId: "41",
+      symbolName: "XAU/USD",
+      baseUnitsPerLot: 100,
+      measurementUnit: "Oz",
+      verifiedAt: "2026-08-12T12:00:00.000Z",
+      ...overrides,
+    },
+  };
+}
+
 function closedPosition(withPnl = true): unknown[] {
   return [
     deal(),
@@ -134,6 +155,7 @@ function harness(options: {
   balanceResponse?: unknown;
   accountInfoResponse?: unknown;
   operatorAccountAttestation?: Record<string, unknown>;
+  verifiedSymbolOverrides?: Record<string, unknown>;
   lockedProviderMetadata?: Record<string, unknown>;
 } = {}) {
   const appConfig = config();
@@ -153,6 +175,9 @@ function harness(options: {
     ...(options.operatorAccountAttestation === undefined
       ? {}
       : { accountlessHistoryAttributionAttestation: options.operatorAccountAttestation }),
+    ...(options.verifiedSymbolOverrides === undefined
+      ? {}
+      : { verifiedAccountSymbolOverrides: options.verifiedSymbolOverrides }),
   };
   let status = options.importStatus ?? "running";
   let counters: Record<string, unknown> = {};
@@ -624,6 +649,92 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     expect(values?.[8]).toBe("execution_only");
     expect(JSON.parse(String(values?.[10]))).toContain("CTRADER_MCP_LOT_SIZE_UNAVAILABLE");
     expect(values?.[13]).toBeNull();
+  });
+
+  it("uses an exact account-bound operator symbol override in historical preview", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, candidateRows, queries } = harness({
+      deals: closedPosition(false).map((row) => ({
+        ...(row as Record<string, unknown>),
+        filledVolume: "200",
+      })),
+      symbols: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+      verifiedSymbolOverrides: verifiedSymbolOverrides(),
+      manualRows: [],
+    });
+
+    const preview = await engine.previewHistoricalImport(importId, connectionId);
+
+    expect(preview.counters).toMatchObject({ positionsProjected: 1, positionsAwaitingReview: 0 });
+    const values = candidateRows[0]?.values;
+    expect(values?.[8]).toBe("unmatched");
+    const projected = JSON.parse(String(values?.[13])) as Record<string, unknown>;
+    expect(projected).toMatchObject({
+      quantityLots: "0.02",
+      pnl: null,
+      brokerData: {
+        pnlMethod: "unavailable",
+        verifiedAccountSymbolOverride: {
+          source: "verified_account_symbol_override",
+          symbolId: "41",
+          baseUnitsPerLot: 100,
+        },
+      },
+    });
+    const symbolUpsert = queries.find(({ sql }) => sql.includes("INSERT INTO symbol_specs"));
+    expect(JSON.parse(String(symbolUpsert?.values[5]))).toMatchObject({
+      lotSize: 100,
+      lotSizeSource: "verified_account_symbol_override",
+    });
+  });
+
+  it("rolls back historical staging when an operator symbol override changes after fetch", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const verified = verifiedSymbolOverrides();
+    const { engine, candidateRows, queries } = harness({
+      deals: closedPosition(false).map((row) => ({
+        ...(row as Record<string, unknown>),
+        filledVolume: "200",
+      })),
+      symbols: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+      verifiedSymbolOverrides: verified,
+      lockedProviderMetadata: {
+        historyFloorTimestamp: through.getTime(),
+        historyFloorKind: "connection_time_empty_attested",
+        historyReadValidated: true,
+        noOpenPositionsAttestation: {
+          version: 1,
+          userId,
+          connectionId,
+          accountId: "5050060",
+          environment: "live",
+          boundaryTimestamp: through.getTime(),
+        },
+      },
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_CHANGED",
+    });
+    expect(candidateRows).toHaveLength(0);
+    expect(queries.some(({ sql }) => sql.includes("INSERT INTO trade_executions"))).toBe(false);
+    expect(queries.some(({ sql }) => sql.includes("UPDATE ctrader_historical_imports SET") && sql.includes("counters="))).toBe(false);
+  });
+
+  it("fails historical preview when provider emits an invalid explicit contract size", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      symbols: [{ id: "41", name: "XAU/USD", lotSize: "100.5", symbolCategory: "Metals" }],
+      verifiedSymbolOverrides: verifiedSymbolOverrides(),
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_SYMBOL_SPEC_INVALID",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
   });
 
   it("rejects conflicting duplicate provider symbol specifications", async () => {
