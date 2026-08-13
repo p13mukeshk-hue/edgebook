@@ -287,6 +287,34 @@ requireMatch(migrationExportSource, /const bundle=\{users:\{\[legacyUid\]:\{[\s\
 requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]vps['"][\s\S]*?return this\._syncVpsTrades\(t\);[\s\S]*?return false;/, 'trade save returns false without a selected provider');
 requireMatch(dataStoreSource, /async _syncVpsTrades\(items\)[\s\S]*?const results=await Promise\.allSettled\(pending\);[\s\S]*?return failed\.length===0;/, 'trade save awaits every VPS mutation');
 requireMatch(dataStoreSource, /saveTrade\(trade\)\{[\s\S]{0,700}?_syncVpsTrades\(\[trade\]\)/, 'trade modal persists only its owned mutation');
+requireMatch(dataStoreSource, /exists&&isCTraderTrade\(trade\)[\s\S]{0,120}?cTraderJournalPatch\(trade\)/, 'existing cTrader edits send a journal-owned PATCH');
+try {
+  const { exports: journalPatch } = evaluateSecurityFixture(
+    quantityProjectionSource,
+    {},
+    '{cTraderJournalPatch}',
+  );
+  const payload = journalPatch.cTraderJournalPatch({
+    version: 3,
+    date: '2026-08-13',
+    sl: 4390,
+    notes: 'Waited for confirmation',
+    psychology: { review: 'patient' },
+    custom: { setup: 'breakout' },
+    legacyFirebaseDocId: null,
+    brokerData: { provider: 'ctrader' },
+    entryAt: new Date('2026-08-13T04:36:00.819Z'),
+    sourceSystem: 'ctrader',
+    screenshots: [{ id: 'server-file' }],
+  });
+  const keys = Object.keys(payload).sort();
+  if (keys.some(key => ['legacyFirebaseDocId','brokerData','entryAt','sourceSystem','screenshots'].includes(key))
+    || payload.version !== 3 || payload.date !== '2026-08-13' || payload.notes !== 'Waited for confirmation') {
+    failures.push('cTrader journal PATCH leaked canonical provider/server fields or omitted editable fields');
+  }
+} catch (error) {
+  failures.push(`cTrader journal PATCH fixture failed: ${error.message}`);
+}
 requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrade\((?:trades\[i\]|trade)\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(/, 'manual trade success waits for targeted persistence');
 rejectMatch(newTradeScreenshotPersistenceSource, /if\(!synced\)[\s\S]{0,500}?reloadCommittedTradeKeepingScreenshotDraft/, 'unsafe same-ID recovery after failed trade create');
 requireMatch(dataStoreSource, /_lastTradeSyncWarning=null[\s\S]*?promoteTradeScreenshots[\s\S]*?catch\(error\)[\s\S]*?_lastTradeSyncWarning=error[\s\S]*?const results=await Promise\.allSettled/, 'screenshot post-processing cannot misreport a committed trade as unsaved');
@@ -2548,18 +2576,20 @@ try {
     abort() { this.aborted = true; }
   }
   const noop=()=>{};
-  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,djAutoSaveTimer=null;\n${dictationSource}`;
+  let microphoneTrackStopped=false;
+  const voiceToasts=[];
+  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,dictationMicVerified=false,dictationPendingTarget=null,dictationStartRequest=0,djAutoSaveTimer=null;\n${dictationSource}`;
   const { exports: voice } = evaluateSecurityFixture(
     fixtureSource,
     {
       document: {documentElement:{lang:'en'},getElementById:id=>voiceElements.get(id)||null,querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],addEventListener:noop,visibilityState:'visible'},
       window: { SpeechRecognition: FakeSpeechRecognition,addEventListener:noop },
-      navigator: { language: 'en-IN' },
-      isSecureContext:true,showToast(){},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout:()=>1,
+      navigator: { language: 'en-IN',mediaDevices:{async getUserMedia(){return {getTracks:()=>[{stop(){microphoneTrackStopped=true;}}]};}} },
+      isSecureContext:true,showToast(message,type){voiceToasts.push({message,type});},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout:()=>1,
     },
     '{toggleDictation,stopDictation,dictationErrorMessage}',
   );
-  voice.toggleDictation('dj-notes');
+  await voice.toggleDictation('dj-notes');
   const recognition = recognizers[0];
   const finalResult = [{ transcript: 'Waited for confirmation' }];
   finalResult.isFinal = true;
@@ -2567,7 +2597,7 @@ try {
   interimResult.isFinal = false;
   recognition.onresult({ resultIndex: 0, results: [finalResult,interimResult] });
   const expectedTranscript = 'Existing note.\nWaited for confirmation while risk stayed small';
-  if (!recognition.started || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
+  if (!microphoneTrackStopped || !recognition.started || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
     failures.push('Daily-journal dictation did not append its live transcript without overwriting existing notes');
   }
   voice.stopDictation({immediate:true});
@@ -2576,6 +2606,11 @@ try {
   }
   if (!/permission/i.test(voice.dictationErrorMessage('not-allowed'))) {
     failures.push('Daily-journal dictation does not explain blocked microphone permission');
+  }
+  await voice.toggleDictation('dj-notes');
+  recognizers[1].onerror({error:'service-not-allowed'});
+  if (!voiceToasts.some(item=>item.type==='error'&&/speech service/i.test(item.message)) || !voiceButton.disabled) {
+    failures.push('Dictation service failure was not surfaced visibly and disabled for the page');
   }
 } catch (error) {
   failures.push(`Daily-journal voice fixture failed: ${error.message}`);

@@ -1,9 +1,30 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { cTraderJournalPatchBody } from "../src/modules/trades/routes.js";
 
 const source = async (path: string): Promise<string> => readFile(new URL(path, import.meta.url), "utf8");
 
 describe("cTrader journal-date ownership", () => {
+  it("accepts only journal-owned fields from a canonical cTrader edit", () => {
+    expect(cTraderJournalPatchBody({
+      version: 3,
+      date: "2026-08-13",
+      sl: 4390,
+      notes: "Waited for confirmation",
+      psychology: { review: "Good patience" },
+      legacyFirebaseDocId: null,
+      brokerData: { provider: "ctrader" },
+      entryAt: new Date("2026-08-13T04:36:00.819Z"),
+      sourceSystem: "ctrader",
+    })).toEqual({
+      version: 3,
+      date: "2026-08-13",
+      sl: 4390,
+      notes: "Waited for confirmation",
+      psychology: { review: "Good patience" },
+    });
+  });
+
   it("initializes the official projection date but never overwrites an existing journal date", async () => {
     const sync = await source("../src/ctrader/sync.ts");
     expect(sync).toContain("providerTradeDate: projection.tradeDate");

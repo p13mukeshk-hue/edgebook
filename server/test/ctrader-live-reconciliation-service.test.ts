@@ -287,6 +287,7 @@ describe("cTrader live reconciliation service", () => {
     })]);
     const listQuery = queries.find(({ sql }) => sql.includes("FROM ctrader_live_reconciliation_candidates candidate"));
     expect(listQuery?.sql).toContain("candidate.status='pending'");
+    expect(listQuery?.sql).toContain("JOIN broker_connections connection");
   });
 
   it("keeps the pending review usable after more than 500 terminal lifetime decisions", async () => {

@@ -900,6 +900,9 @@ const liveReconciliationCandidateSelect = `
           WHERE file.user_id=candidate.user_id AND file.trade_id=manual.id
             AND file.deleted_at IS NULL) AS screenshot_count
   FROM ctrader_live_reconciliation_candidates candidate
+  JOIN broker_connections connection
+    ON connection.user_id=candidate.user_id
+   AND connection.id=candidate.broker_connection_id
   LEFT JOIN trades manual
     ON manual.user_id=candidate.user_id AND manual.id=candidate.manual_trade_id
   LEFT JOIN ctrader_live_reconciliation_resolutions resolution

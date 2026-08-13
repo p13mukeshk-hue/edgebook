@@ -3023,7 +3023,14 @@ const DataStore = {
       const outboundSource=(pendingScreenshots.length||draftScreenshots.length)
         ? {...trade,screenshots:(trade.screenshots||[]).filter(isPrivateVpsScreenshot)}
         : trade;
-      const outbound=JSON.parse(JSON.stringify(outboundSource));
+      // Existing cTrader rows contain canonical server fields that are not a
+      // valid journal PATCH payload (for example a null legacy id or Date
+      // instance). Send only fields the user owns; the server merges these
+      // into the latest provider facts under row-version protection.
+      const patchSource=exists&&isCTraderTrade(trade)
+        ? cTraderJournalPatch(trade)
+        : outboundSource;
+      const outbound=JSON.parse(JSON.stringify(patchSource));
       const request=exists
         ? window._vpsData.trades.patch(key,outbound)
         : window._vpsData.trades.create(outbound);
@@ -3501,7 +3508,7 @@ let editId=null, moodEmoji='', modalEmoji='';
 let _tradeModalGeneration=0;
 let _tradeDraftCommittedId=null;
 let _tradeDraftId=null, _tradeSaveInFlight=false, _dupResolutionInFlight=false;
-let dictationSession=null, dictationServiceBlocked=false;
+let dictationSession=null, dictationServiceBlocked=false, dictationMicVerified=false, dictationPendingTarget=null, dictationStartRequest=0;
 let activeAcctId='all';   // 'all' or account id string
 let activeSymbolTab='eq'; // symbol manager tab
 let selectedNewAcctColor=ACCT_COLORS[0];
@@ -6913,6 +6920,22 @@ function dictationCapability(){
   if(dictationServiceBlocked)return {available:false,message:'This browser cannot access its speech service. Use Chrome or Edge, or type here.'};
   return {available:true,message:''};
 }
+async function ensureDictationMicrophone(){
+  if(dictationMicVerified||!navigator.mediaDevices?.getUserMedia)return;
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    for(const track of stream?.getTracks?.()||[])track.stop();
+    dictationMicVerified=true;
+  }catch(error){
+    const name=String(error?.name||'');
+    const code=name==='NotAllowedError'||name==='SecurityError'
+      ? 'not-allowed'
+      : name==='NotFoundError'||name==='NotReadableError'||name==='OverconstrainedError'
+        ? 'audio-capture'
+        : name==='AbortError'?'aborted':'audio-capture';
+    const failure=new Error(dictationErrorMessage(code));failure.code=code;throw failure;
+  }
+}
 function dictationLanguage(){
   const value=String(navigator.language||navigator.languages?.[0]||document.documentElement.lang||'en-IN').trim();
   return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value)?value:'en-IN';
@@ -6946,9 +6969,9 @@ function dictationButtons(){return Array.from(document.querySelectorAll('[data-d
 function refreshDictationControls(){
   const capability=dictationCapability();
   dictationButtons().forEach(button=>{
-    const target=button.dataset.dictationTarget,spec=dictationTargetSpec(target),active=!!dictationSession&&dictationSession.target===target;
-    button.disabled=!capability.available||!spec;button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
-    button.setAttribute('aria-label',active?'Stop dictation':`Dictate ${spec?.label||'note'}`);
+    const target=button.dataset.dictationTarget,spec=dictationTargetSpec(target),pending=dictationPendingTarget===target,active=(!!dictationSession&&dictationSession.target===target)||pending;
+    button.disabled=!capability.available||!spec||(dictationPendingTarget!==null&&!pending);button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
+    button.setAttribute('aria-label',pending?'Checking microphone permission':active?'Stop dictation':`Dictate ${spec?.label||'note'}`);
     const icon=button.querySelector('i');if(icon)icon.className=active?'fa-solid fa-stop':'fa-solid fa-microphone';
     button.title=capability.available?(active?'Stop dictation':"Audio is handled by your browser's speech service and is not stored by Edgebook."):capability.message;
     if(!capability.available)setDictationStatus(target,capability.message);
@@ -6968,6 +6991,7 @@ function finishDictation(session,message,state='is-ready'){
   refreshDictationControls();setDictationStatus(session.target,message,state);
 }
 function stopDictation({quiet=false,immediate=false}={}){
+  if(dictationPendingTarget!==null){dictationStartRequest+=1;dictationPendingTarget=null;refreshDictationControls();}
   const session=dictationSession;if(!session)return;
   if(immediate){
     promoteDictationInterim(session);clearTimeout(session.watchdog);dictationSession=null;session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
@@ -6981,12 +7005,21 @@ function stopDictation({quiet=false,immediate=false}={}){
     if(dictationSession===session){const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,captured?dictationReviewMessage(session.spec.context):'Listening stopped. No transcript was added.',captured?'is-ready':'');}
   },1800);
 }
-function toggleDictation(target){
+async function toggleDictation(target){
   const spec=dictationTargetSpec(target),element=document.getElementById(target),capability=dictationCapability();
   if(!spec||!element)return;
   if(dictationSession?.target===target){stopDictation();return;}
   if(dictationSession)stopDictation({immediate:true});
   if(!capability.available){refreshDictationControls();setDictationStatus(target,capability.message);showToast(capability.message,'info');return;}
+  const requestId=++dictationStartRequest;dictationPendingTarget=target;refreshDictationControls();setDictationStatus(target,'Checking microphone permission…','is-listening');
+  try{await ensureDictationMicrophone();}
+  catch(error){
+    if(requestId!==dictationStartRequest)return;
+    dictationPendingTarget=null;refreshDictationControls();const message=error?.message||'Microphone access failed. Check browser permissions and try again.';
+    setDictationStatus(target,message);showToast(message,'error');return;
+  }
+  if(requestId!==dictationStartRequest)return;
+  dictationPendingTarget=null;
   const Recognition=speechRecognitionCtor(),recognition=new Recognition();
   if(spec.context==='dailyjournal'&&typeof djAutoSaveTimer!=='undefined'){clearTimeout(djAutoSaveTimer);djAutoSaveTimer=null;}
   const session={target,spec,element,recognition,baseText:element.value,finalText:'',interimText:'',wasReadOnly:element.readOnly,stopRequested:false,watchdog:null};
@@ -7008,11 +7041,13 @@ function toggleDictation(target){
   recognition.onerror=event=>{
     if(dictationSession!==session)return;
     if(event.error==='service-not-allowed')dictationServiceBlocked=true;
-    const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,dictationErrorMessage(event.error),captured?'is-ready':'');
+    const captured=!!(session.finalText.trim()||session.interimText.trim()),message=dictationErrorMessage(event.error);finishDictation(session,message,captured?'is-ready':'');showToast(message,'error');
   };
   recognition.onend=()=>{
     if(dictationSession!==session)return;
-    const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,captured?dictationReviewMessage(spec.context):'Listening ended. No transcript was added.',captured?'is-ready':'');
+    const captured=!!(session.finalText.trim()||session.interimText.trim());
+    const message=captured?dictationReviewMessage(spec.context):session.stopRequested?'Listening stopped. No transcript was added.':'Listening stopped before speech was captured. Check microphone access and try Chrome or Edge.';
+    finishDictation(session,message,captured?'is-ready':'');if(!captured&&!session.stopRequested)showToast(message,'info');
   };
   refreshDictationControls();setDictationStatus(target,'Requesting microphone permission…','is-listening');
   session.watchdog=setTimeout(()=>{if(dictationSession===session&&!session.finalText&&!session.interimText)stopDictation();},15000);
@@ -7027,6 +7062,21 @@ document.addEventListener('DOMContentLoaded',refreshDictationControls);
 
 const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-time'];
 function isCTraderTrade(trade){return String(trade?.sourceSystem||trade?.source||trade?.broker||'').toLowerCase()==='ctrader';}
+function cTraderJournalPatch(trade){
+  const patch={
+    version:trade?.version,
+    date:trade?.date,
+    sl:trade?.sl??null,
+    tp:trade?.tp??null,
+    strategy:trade?.strategy??null,
+    emotion:trade?.emotion??null,
+    psychology:trade?.psychology&&typeof trade.psychology==='object'?trade.psychology:{},
+    notes:trade?.notes??null,
+    custom:trade?.custom&&typeof trade.custom==='object'?trade.custom:{},
+  };
+  if(Array.isArray(trade?.tags))patch.tags=trade.tags;
+  return patch;
+}
 function readCTraderQuantityProjection(trade){
   if(!isCTraderTrade(trade))return null;
   const value=trade?.brokerData?.quantityProjection;

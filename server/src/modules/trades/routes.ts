@@ -449,6 +449,34 @@ const providerOwnedTradeFields = [
   "calculationVersion",
 ] as const;
 
+const cTraderJournalOwnedTradeFields = [
+  "version",
+  "date",
+  "sl",
+  "tp",
+  "strategy",
+  "emotion",
+  "notes",
+  "tags",
+  "psychology",
+  "custom",
+] as const;
+
+/**
+ * Older cached clients sent the complete canonical cTrader row when editing a
+ * journal annotation. Canonical rows contain server-only nullable/date values
+ * that are intentionally not accepted by the public trade schema. Filter the
+ * request before validation so only explicitly user-owned fields participate.
+ */
+export function cTraderJournalPatchBody(input: unknown): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const source = input as Record<string, unknown>;
+  return Object.fromEntries(
+    cTraderJournalOwnedTradeFields.flatMap((field) =>
+      Object.prototype.hasOwnProperty.call(source, field) ? [[field, source[field]]] : []),
+  );
+}
+
 /** cTrader projection facts are provider-owned; PATCH may edit journal annotations only. */
 export function mergeTradePatch(
   existing: Record<string, unknown>,
@@ -591,13 +619,18 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch<{ Params: { id: string } }>("/api/trades/:id", protectedWrite, async (request) => {
     const auth = request.auth!;
-    const patchBody = unwrapTradeBody(request.body);
-    const patch = tradePatchSchema.parse(patchBody);
-    const expectedVersion = requireExpectedVersion(parseExpectedVersion(request.headers["if-match"], patch.version));
+    const rawPatchBody = unwrapTradeBody(request.body);
     const existing = await findTrade(app, auth.user.id, request.params.id);
     if (!existing) throw notFound("Trade");
+    const existingInput = rowAsInput(existing);
+    const patchBody = (existingInput.sourceSystem === "ctrader" || existingInput.source === "ctrader")
+      && typeof existingInput.brokerConnectionId === "string"
+      ? cTraderJournalPatchBody(rawPatchBody)
+      : rawPatchBody;
+    const patch = tradePatchSchema.parse(patchBody);
+    const expectedVersion = requireExpectedVersion(parseExpectedVersion(request.headers["if-match"], patch.version));
     const merged = {
-      ...mergeTradePatch(rowAsInput(existing), patch),
+      ...mergeTradePatch(existingInput, patch),
       id: existing.legacy_firebase_doc_id ?? undefined,
     };
     const normalized = normalizeTrade(merged);
