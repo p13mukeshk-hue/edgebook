@@ -1,10 +1,25 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { cTraderJournalPatchBody } from "../src/modules/trades/routes.js";
+import {
+  canonicalTradeDate,
+  canonicalTradeDurationSeconds,
+  cTraderJournalPatchBody,
+} from "../src/modules/trades/routes.js";
 
 const source = async (path: string): Promise<string> => readFile(new URL(path, import.meta.url), "utf8");
 
 describe("cTrader journal-date ownership", () => {
+  it("serializes a PostgreSQL date for an HTML date input and derives exact closed duration", () => {
+    expect(canonicalTradeDate(new Date("2026-08-13T00:00:00.000Z"))).toBe("2026-08-13");
+    expect(canonicalTradeDate("2026-08-13")).toBe("2026-08-13");
+    expect(canonicalTradeDurationSeconds(
+      "2026-08-13T12:42:09.034Z",
+      "2026-08-13T13:19:29.975Z",
+    )).toBe(2_240);
+    expect(canonicalTradeDurationSeconds("2026-08-13T13:00:00.000Z", null)).toBeNull();
+    expect(canonicalTradeDurationSeconds("2026-08-13T13:00:01.000Z", "2026-08-13T13:00:00.000Z")).toBeNull();
+  });
+
   it("accepts only journal-owned fields from a canonical cTrader edit", () => {
     expect(cTraderJournalPatchBody({
       version: 3,

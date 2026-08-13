@@ -329,6 +329,9 @@ requireMatch(app, /function renderCalStats[\s\S]*?Verified net[\s\S]*?Est\. gros
 requireMatch(app, /function renderHeatmap[\s\S]*?tradeFinancialPresentation[\s\S]*?Verified net[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'heatmap shared financial presentation');
 requireMatch(app, /function djDayStats[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?verifiedNet[\s\S]*?estimatedGross/, 'daily journal shared day-level financial aggregation');
 requireMatch(app, /function tradeJournalCsv[\s\S]*?P&L Status[\s\S]*?Calculated Gross[\s\S]*?Fees Included/, 'CSV financial provenance columns');
+requireMatch(app, /function tradeJournalCsv[\s\S]*?Duration Seconds/, 'CSV exact trade-duration columns');
+requireMatch(app, /const TABLE_HEADS[\s\S]*?Entry time[\s\S]*?Duration/, 'dashboard and journal trade-duration column');
+requireMatch(app, /Average hold:[\s\S]*?timed trade/, 'analytics average holding-duration metric');
 requireMatch(app, /analytics-pnl-coverage[\s\S]*?calculated gross P&L[\s\S]*?excluded from win rate, profit factor, equity, drawdown and coaching/, 'verified-only analytics estimate disclosure');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
@@ -1068,6 +1071,7 @@ requireMatch(app, /const CTRADER_OWNED_FORM_IDS=[\s\S]*?function setTradeBrokerO
 requireMatch(app, /const CTRADER_OWNED_FORM_IDS=\[[^\]]*['"]t-time['"][^\]]*\]/, 'cTrader execution-time form lock');
 rejectMatch(app.match(/const CTRADER_OWNED_FORM_IDS=\[[^\]]*\]/)?.[0] || '', /['"]t-date['"]/, 'cTrader journal-date form lock');
 requireMatch(app, /id="t-date-label"[\s\S]*?id="t-date"[\s\S]*?id="t-date-help"/, 'editable cTrader journal-date explanation');
+requireMatch(app, /getElementById\('t-date'\)\.value=tradeJournalDate\(t\)\|\|todayIST\(\)/, 'cTrader journal date is populated from canonical provider date');
 requireMatch(app, /cTraderReviewBadge\(t\)/, 'cTrader needs-review table badge');
 requireMatch(app, /function renderHmInsert[\s\S]*?getTradeSizeValue\(t\)[\s\S]*?getSizeLabel\(t\)[\s\S]*?Size \(\$\{escapeHtml\(sizeUnit\)\}\)/, 'heatmap cTrader quantity unit label');
 requireMatch(app, /id="sn-brokers"[^>]*showBrokerConnections/, 'dedicated broker sync settings navigation');
@@ -1737,6 +1741,7 @@ try {
       acctCur: () => '$',
       normalizeFxCurrency: value => value === '$' ? 'USD' : /^[A-Z]{3}$/.test(String(value)) ? String(value) : null,
       cTraderCalculatedGross: trade => trade?.brokerData?.calculatedGrossPnl ? { valueText: String(trade.brokerData.calculatedGrossPnl), currency: 'USD' } : null,
+      tradeJournalDate: trade => String(trade?.date||'').slice(0,10),
     },
     '{tradeJournalCsv}',
   );
@@ -1750,6 +1755,7 @@ try {
     pnl: -2, strategy: '+SUM(1,1)', custom: { playbook: { setup: '=HYPERLINK("bad")', grade: 'A' } }, emotion: 'Calm', accountId: 'acct-a', notes: 'line 1, "quoted"\nline 2', isOpen: false,
   }, {
     date: '2026-01-02', symbol: 'XAUUSD', asset: 'cm', direction: 'Long', entry: 2000, exit: 2001, size: 0.02,
+    entryTime:'10:00',exitTime:'10:37',entryAt:'2026-01-02T04:30:00.000Z',exitAt:'2026-01-02T05:07:20.000Z',durationSeconds:2240,
     pnl: 2, strategy: 'System', custom: { playbook: {} }, emotion: 'Calm', accountId: 'acct-a', notes: '', isOpen: false, source: 'ctrader',
     brokerData: { accountCurrency: 'EUR', quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
   }, {
@@ -1758,14 +1764,15 @@ try {
     brokerData: { accountCurrency: 'USD', calculatedGrossPnl: '-4.00' },
   }]);
   const journalRows = JSON.parse(JSON.stringify(parser.parseCSV(journalCsv)));
-  if (!journalCsv.includes('\r\n') || journalRows.length !== 4 || journalRows[1].length !== 27 || journalRows[1][1] !== "'=CMD()" ||
-      journalRows[1][10] !== '-2.00' || journalRows[1][11] !== 'USD' || journalRows[1][12] !== 'verified_net' || journalRows[1][16] !== "'+SUM(1,1)" || journalRows[1][17] !== "'=HYPERLINK(\"bad\")" || journalRows[1][25] !== "'@Desk" || journalRows[1][26] !== 'line 1, "quoted"\nline 2') {
+  if (!journalCsv.includes('\r\n') || journalRows.length !== 4 || journalRows[1].length !== 31 || journalRows[1][5] !== "'=CMD()" ||
+      journalRows[1][14] !== '-2.00' || journalRows[1][15] !== 'USD' || journalRows[1][16] !== 'verified_net' || journalRows[1][20] !== "'+SUM(1,1)" || journalRows[1][21] !== "'=HYPERLINK(\"bad\")" || journalRows[1][29] !== "'@Desk" || journalRows[1][30] !== 'line 1, "quoted"\nline 2') {
     failures.push('RFC 4180 journal export or spreadsheet-injection protection regressed');
   }
-  if (journalRows[0][7] !== 'Size Unit' || journalRows[0][11] !== 'PnL Currency' || journalRows[2][6] !== '2' || journalRows[2][7] !== 'XAU base units' || journalRows[2][11] !== 'EUR') {
+  if (journalRows[0][3] !== 'Duration' || journalRows[0][4] !== 'Duration Seconds' || journalRows[2][3] !== '37m' || journalRows[2][4] !== '2240' ||
+      journalRows[0][11] !== 'Size Unit' || journalRows[0][15] !== 'PnL Currency' || journalRows[2][10] !== '2' || journalRows[2][11] !== 'XAU base units' || journalRows[2][15] !== 'EUR') {
     failures.push('Journal CSV export mislabeled a cTrader base-unit quantity as lots');
   }
-  if (journalRows[3][10] !== '' || journalRows[3][12] !== 'estimated_gross' || journalRows[3][13] !== '-4.00' || journalRows[3][14] !== 'USD' || journalRows[3][15] !== 'No') {
+  if (journalRows[3][14] !== '' || journalRows[3][16] !== 'estimated_gross' || journalRows[3][17] !== '-4.00' || journalRows[3][18] !== 'USD' || journalRows[3][19] !== 'No') {
     failures.push('Journal CSV export mixed calculated gross into verified net or lost estimate provenance');
   }
 } catch (error) {
@@ -2057,6 +2064,7 @@ try {
       ASSET_LABELS: { eq: 'Equity', cx: 'Crypto', fx: 'Forex', cm: 'Commodity', ix: 'Index' },
       fmtDate: value => value,
       formatTime: value => value,
+      tradeJournalDate: trade => String(trade?.date||'').slice(0,10),
     },
     '{tradeRow}',
   );
@@ -2089,6 +2097,10 @@ try {
   assertInlineArgument(html, 'openLightbox', maliciousIdentifier, 'Trade screenshot action');
   const unsafeScreenshotHtml = tradeRenderer.tradeRow({ ...persistedTrade, screenshots: [{ src: 'javascript:alert(1)' }] });
   if (/javascript:/i.test(unsafeScreenshotHtml)) failures.push('Trade row retained an unsafe persisted screenshot URL');
+  const durationHtml=tradeRenderer.tradeRow({
+    ...persistedTrade,id:'duration-trade',date:'2026-08-13',entryAt:'2026-08-13T12:42:09.034Z',exitAt:'2026-08-13T13:19:29.975Z',durationSeconds:2240,
+  });
+  if (!durationHtml.includes('>37m</td>')) failures.push('Trade row did not show the exact provider entry-to-exit duration');
   const baseUnitHtml = tradeRenderer.tradeRow({
     ...persistedTrade,
     id: 'ctrader-base-units', source: 'ctrader', symbol: 'XAUUSD', asset: 'cm', size: 0.02,

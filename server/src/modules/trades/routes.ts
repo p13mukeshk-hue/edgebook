@@ -88,6 +88,22 @@ function toIso(value: Date | string | null): string | null {
   return value === null ? null : new Date(value).toISOString();
 }
 
+export function canonicalTradeDate(value: Date | string): string {
+  const text = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+  return calendarDateSchema.parse(text);
+}
+
+export function canonicalTradeDurationSeconds(
+  entryAt: Date | string | null,
+  exitAt: Date | string | null,
+): number | null {
+  if (entryAt === null || exitAt === null) return null;
+  const start = new Date(entryAt).getTime();
+  const end = new Date(exitAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return Math.floor((end - start) / 1_000);
+}
+
 export function mapTrade(row: TradeRow): Record<string, unknown> {
   const publicId = row.legacy_firebase_doc_id ?? row.id;
   const legacyScreenshots = Array.isArray(row.legacy_document.screenshots)
@@ -138,9 +154,10 @@ export function mapTrade(row: TradeRow): Record<string, unknown> {
     sl: numberOrNull(row.stop_loss),
     tp: numberOrNull(row.take_profit),
     isOpen: row.is_open,
-    date: row.trade_date,
+    date: canonicalTradeDate(row.trade_date),
     entryAt: toIso(row.entry_at),
     exitAt: toIso(row.exit_at),
+    durationSeconds: canonicalTradeDurationSeconds(row.entry_at, row.exit_at),
     entryTime: row.legacy_entry_time?.slice(0, 5) ?? null,
     exitTime: row.legacy_exit_time?.slice(0, 5) ?? null,
     strategy: row.strategy,

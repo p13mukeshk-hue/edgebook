@@ -7228,8 +7228,13 @@ function cTraderExactPnlBreakdownText(breakdown){
 function cTraderProviderTradeDate(trade){
   const providerDate=String(trade?.brokerData?.providerTradeDate||'');
   if(isRealIsoDate(providerDate))return providerDate;
-  const initialJournalDate=String(trade?.date||'');
-  return isRealIsoDate(initialJournalDate)?initialJournalDate:'';
+  const entryAt=trade?.entryAt,timeZone=String(trade?.brokerData?.providerTradeDateTimeZone||'UTC');
+  return financialPresentationDate(entryAt,timeZone,'');
+}
+function tradeJournalDate(trade){
+  const stored=String(trade?.date||'').slice(0,10);
+  if(isRealIsoDate(stored))return stored;
+  return isCTraderTrade(trade)?cTraderProviderTradeDate(trade):'';
 }
 function cTraderReviewRevision(trade){
   const events=Array.isArray(trade?.brokerData?.realizedEvents)?trade.brokerData.realizedEvents:[];
@@ -7320,7 +7325,7 @@ function openTradeModal(id=null){
     document.getElementById('t-size').value=getTradeSizeValue(t);
     document.getElementById('t-sl').value=t.sl??'';
     document.getElementById('t-tp').value=t.tp??'';
-    document.getElementById('t-date').value=t.date||todayIST();
+    document.getElementById('t-date').value=tradeJournalDate(t)||todayIST();
     document.getElementById('t-time').value=t.entryTime||'';
     buildTradePlaybookForm(t);
     document.getElementById('t-emo').value=t.emotion||'😌 Calm';
@@ -8183,6 +8188,27 @@ function getSizeLabel(trade){
   return size === 1 ? 'unit' : 'units';
 }
 
+function tradeDurationSeconds(trade,{includeOpen=true}={}){
+  const canonical=Number(trade?.durationSeconds);
+  if(!tradeIsOpen(trade)&&Number.isInteger(canonical)&&canonical>=0)return canonical;
+  const start=Date.parse(String(trade?.entryAt||''));
+  const end=trade?.exitAt?Date.parse(String(trade.exitAt)):(includeOpen&&tradeIsOpen(trade)?Date.now():NaN);
+  if(!Number.isFinite(start)||!Number.isFinite(end)||end<start)return null;
+  return Math.floor((end-start)/1000);
+}
+function formatTradeDurationSeconds(value){
+  const seconds=Number(value);if(!Number.isFinite(seconds)||seconds<0)return '—';
+  const whole=Math.floor(seconds),days=Math.floor(whole/86400),hours=Math.floor(whole%86400/3600),minutes=Math.floor(whole%3600/60),secs=whole%60;
+  if(days)return `${days}d${hours?` ${hours}h`:''}`;
+  if(hours)return `${hours}h${minutes?` ${minutes}m`:''}`;
+  if(minutes)return `${minutes}m${minutes<5&&secs?` ${secs}s`:''}`;
+  return `${secs}s`;
+}
+function tradeDurationText(trade,{includeOpen=true}={}){
+  const seconds=tradeDurationSeconds(trade,{includeOpen});
+  return seconds===null?'—':`${formatTradeDurationSeconds(seconds)}${tradeIsOpen(trade)&&!trade?.exitAt?' live':''}`;
+}
+
 function tradeRow(t){
   const c      = escapeHtml(acctCur(t.accountId));
   const pnlC   = escapeHtml(tradeMoneyPrefix(t));
@@ -8196,7 +8222,8 @@ function tradeRow(t){
   const exit   = t.exit     != null ? Number(t.exit)   : null;
   const sizeValue=getTradeSizeValue(t);
   const size   = sizeValue!=null ? sizeValue : '—';
-  const date   = t.date     || '—';
+  const date   = tradeJournalDate(t)||'—';
+  const duration=tradeDurationText(t);
 
   const bd       = pnlBreakdown(t);
   const futSpec  = FUTURES_SPECS[rawSym];
@@ -8231,6 +8258,7 @@ function tradeRow(t){
   return `<tr>
     <td class="td-mono" style="color:var(--text3)">${escapeHtml(fmtDate(date))}</td>
     <td class="td-mono" style="color:var(--text3)">${escapeHtml(formatTime(t.entryTime))}</td>
+    <td class="td-mono" style="color:var(--text3)" title="${tradeIsOpen(t)?'Elapsed since provider entry':'Provider entry-to-exit duration'}">${escapeHtml(duration)}</td>
     <td style="font-weight:600">${symCell}</td>
     <td><span class="badge badge-${asset}">${escapeHtml(ASSET_LABELS[asset]||asset)}</span></td>
     <td>
@@ -8366,7 +8394,7 @@ function setJournalPage(p){
   renderFullJournal();
 }
 
-const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Time</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
+const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Entry time</th><th>Duration</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
 
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
@@ -8764,10 +8792,10 @@ function csvEncodeRow(cells,textColumns=new Set()){
   return cells.map((value,index)=>csvEncodeCell(value,{text:textColumns.has(index)})).join(',');
 }
 function tradeJournalCsv(source){
-  const header=['Date','Symbol','Asset','Dir','Entry','Exit','Size','Size Unit','SL','TP','PnL','PnL Currency','P&L Status','Calculated Gross','Calculated Gross Currency','Fees Included','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
-  const textColumns=new Set([1,2,3,7,11,12,14,15,16,17,18,19,20,21,22,23,24,25,26]);
+  const header=['Date','Entry Time','Exit Time','Duration','Duration Seconds','Symbol','Asset','Dir','Entry','Exit','Size','Size Unit','SL','TP','PnL','PnL Currency','P&L Status','Calculated Gross','Calculated Gross Currency','Fees Included','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
+  const textColumns=new Set([0,1,2,3,5,6,7,11,15,16,18,19,20,21,22,23,24,25,26,27,28,29,30]);
   const body=source.map(t=>{const pb=t.custom?.playbook||{},gross=cTraderCalculatedGross(t);return csvEncodeRow([
-    t.date,t.symbol,ASSET_LABELS[t.asset]||t.asset||'',t.direction,t.entry,t.exit??'',getTradeSizeValue(t),getSizeLabel(t),t.sl??'',t.tp??'',
+    tradeJournalDate(t),t.entryTime||'',t.exitTime||'',tradeDurationText(t,{includeOpen:false}),tradeDurationSeconds(t,{includeOpen:false})??'',t.symbol,ASSET_LABELS[t.asset]||t.asset||'',t.direction,t.entry,t.exit??'',getTradeSizeValue(t),getSizeLabel(t),t.sl??'',t.tp??'',
     tradeIsOpen(t)?(tradeHasPnl(t)?`Open · realized ${Number(t.pnl).toFixed(2)}`:'Open'):(tradeHasPnl(t)?Number(t.pnl).toFixed(2):''),
     tradePnlCurrency(t)||'',tradeHasPnl(t)?'verified_net':gross?'estimated_gross':tradeIsOpen(t)?'open':'unavailable',gross?.valueText||'',gross?.currency||'',gross?'No':'',
     t.strategy||'',pb.setup||'',pb.grade||'',pb.probability||'',pb.horizon||'',pb.overnight||'',pb.condition||'',pb.execution||'',t.emotion||'',acctName(t.accountId||''),t.notes||'',
@@ -9357,8 +9385,10 @@ function renderAnalyticsCharts(){
       const observed=Object.entries(grid).filter(([,value])=>value.n>0);
       const bestSlot=[...observed].sort((a,b)=>(b[1].sum/b[1].n)-(a[1].sum/a[1].n))[0];
       const worstSlot=[...observed].sort((a,b)=>(a[1].sum/a[1].n)-(b[1].sum/b[1].n))[0];
-      if(bestSlot&&worstSlot&&n>=5) ti.textContent=`Highest observed average: ${bestSlot[0].replace('|',' ')} (${bestSlot[1].n} trades). Lowest: ${worstSlot[0].replace('|',' ')} (${worstSlot[1].n} trades).`;
-      else ti.textContent='Log more trades with timestamps to identify your best trading window.';
+      const durations=src.filter(t=>!tradeIsOpen(t)).map(t=>tradeDurationSeconds(t,{includeOpen:false})).filter(Number.isFinite);
+      const durationSummary=durations.length?` Average hold: ${formatTradeDurationSeconds(Math.round(durations.reduce((sum,value)=>sum+value,0)/durations.length))} across ${durations.length} timed trade${durations.length===1?'':'s'}.`:'';
+      if(bestSlot&&worstSlot&&n>=5) ti.textContent=`Highest observed average: ${bestSlot[0].replace('|',' ')} (${bestSlot[1].n} trades). Lowest: ${worstSlot[0].replace('|',' ')} (${worstSlot[1].n} trades).${durationSummary}`;
+      else ti.textContent=`Log more trades with timestamps to identify your best trading window.${durationSummary}`;
     }
   }
 
@@ -10492,6 +10522,7 @@ function renderHmInsert(t, container){
   const exit=t.exit==null?null:Number(t.exit);
   const sizeValue=getTradeSizeValue(t);
   const sizeUnit=getSizeLabel(t);
+  const duration=tradeDurationText(t);
 
   const ssGrid = ssCount
     ? screenshotSources.map((src,i)=>`
@@ -10514,7 +10545,8 @@ function renderHmInsert(t, container){
       <span class="hm-ins-pnl ${Number(value)>=0?'pos':'neg'}" style="color:${color}"${isEstimate?' title="Calculated gross estimate; fees and swap are excluded."':''}>${escapeHtml(str)}${isEstimate?' <span class="pnl-estimate-badge">est.</span>':''}</span>
       <span class="hm-mpill">${escapeHtml(t.optionType||t.direction)}</span>
       <span class="hm-mpill">${escapeHtml(ASSET_LABELS[t.asset]||t.asset||'Unknown')}</span>
-      ${t.date?`<span class="hm-mpill">${escapeHtml(formatDate(t.date))}</span>`:''}
+      ${tradeJournalDate(t)?`<span class="hm-mpill">${escapeHtml(formatDate(tradeJournalDate(t)))}</span>`:''}
+      ${duration!=='—'?`<span class="hm-mpill">${escapeHtml(duration)}</span>`:''}
       ${t.strategy?`<span class="hm-mpill">${escapeHtml(t.strategy)}</span>`:''}
       ${acct?`<span class="hm-mpill">${escapeHtml(acct.name)}</span>`:''}
       <button class="hm-ins-close" onclick="hmSelectTrade(${tradeArg})"><i class="fa-solid fa-xmark" style="font-size:11px"></i></button>
@@ -10524,6 +10556,7 @@ function renderHmInsert(t, container){
         <div><div class="hm-idf-label">Entry</div><div class="hm-idf-val">${Number.isFinite(entry)?ac+entry.toFixed(t.asset==='fx'?4:2):'—'}</div></div>
         <div><div class="hm-idf-label">Exit</div><div class="hm-idf-val">${Number.isFinite(exit)?ac+exit.toFixed(t.asset==='fx'?4:2):'Open'}</div></div>
         <div><div class="hm-idf-label">Size (${escapeHtml(sizeUnit)})</div><div class="hm-idf-val">${escapeHtml(sizeValue??'—')}</div></div>
+        <div><div class="hm-idf-label">Duration</div><div class="hm-idf-val">${escapeHtml(duration)}</div></div>
         <div><div class="hm-idf-label">R:R</div><div class="hm-idf-val">${escapeHtml(rr)}</div></div>
         <div><div class="hm-idf-label">Stop loss</div><div class="hm-idf-val">${t.sl?ac+escapeHtml(t.sl):'—'}</div></div>
         <div><div class="hm-idf-label">Emotion</div><div class="hm-idf-val">${escapeHtml(t.emotion||'—')}</div></div>
