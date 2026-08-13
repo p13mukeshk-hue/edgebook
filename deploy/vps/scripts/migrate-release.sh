@@ -21,7 +21,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$release_dir" && -n "$env_file" && -n "$image_tag" ]] || usage
-for cmd in docker flock realpath stat; do
+for cmd in docker flock jq realpath stat; do
   command -v "$cmd" >/dev/null 2>&1 || { printf 'Missing command: %s\n' "$cmd" >&2; exit 1; }
 done
 docker compose version >/dev/null 2>&1 || { printf 'Docker Compose v2 is required.\n' >&2; exit 1; }
@@ -125,8 +125,8 @@ compose=(
   -f "$compose_file"
   --profile tools
 )
-mapfile -t selected_migrate_images < <("${compose[@]}" config --images migrate)
-(( ${#selected_migrate_images[@]} == 1 )) && [[ "${selected_migrate_images[0]}" == "$image" ]] || {
+selected_migrate_image="$("${compose[@]}" config --format json | jq -er '.services.migrate.image | select(type == "string" and length > 0)')"
+[[ "$selected_migrate_image" == "$image" ]] || {
   printf 'Rendered release does not select the explicit migration image %s.\n' "$image" >&2
   exit 1
 }

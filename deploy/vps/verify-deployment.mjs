@@ -159,6 +159,8 @@ requireText(migrationHelper, /com\.docker\.compose\.project=edgebook[\s\S]*api\|
 requireText(migrationHelper, /\$postgres_health["']? == healthy/, 'migration helper requires healthy PostgreSQL');
 requireText(migrationHelper, /export COMPOSE_PROJECT_NAME=edgebook/, 'migration helper pins Compose project identity');
 requireText(migrationHelper, /export EDGEBOOK_IMAGE_TAG="\$image_tag"/, 'migration helper pins rendered image tag');
+requireText(migrationHelper, /config --format json[\s\S]*?jq -er '\.services\.migrate\.image/, 'migration helper validates the migrate service image without dependency-image ambiguity');
+rejectText(migrationHelper, /config --images migrate/, 'migration helper must not treat dependency images as the migrate service image');
 requireText(migrationHelper, /run --rm --no-deps --pull never migrate/, 'migration helper runs only the no-dependency migrator without pulling');
 rejectText(migrationHelper, /"\$\{compose\[@\]\}"\s+(?:up|stop|restart)\b/, 'migration helper changes application service state');
 rejectText(migrationHelper, /\bsource\s+"?\$?env_file|\bcat\s+"?\$?env_file/, 'migration helper reads secret env contents into the host shell or output');
