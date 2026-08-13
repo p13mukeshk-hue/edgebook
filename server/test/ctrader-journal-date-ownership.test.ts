@@ -4,7 +4,9 @@ import {
   canonicalTradeDate,
   canonicalTradeDurationSeconds,
   cTraderJournalPatchBody,
+  tradePatchInputForNormalization,
 } from "../src/modules/trades/routes.js";
+import { normalizeTrade } from "../src/modules/trades/schema.js";
 
 const source = async (path: string): Promise<string> => readFile(new URL(path, import.meta.url), "utf8");
 
@@ -38,6 +40,48 @@ describe("cTrader journal-date ownership", () => {
       notes: "Waited for confirmation",
       psychology: { review: "Good patience" },
     });
+  });
+
+  it("normalizes a journal edit when the canonical cTrader row has no legacy Firebase id", () => {
+    const existing = {
+      legacyFirebaseDocId: null,
+      brokerConnectionId: "00000000-0000-4000-8000-000000000090",
+      source: "ctrader",
+      sourceSystem: "ctrader",
+      ingestionMethod: "api",
+      symbol: "XAUUSD",
+      asset: "cm",
+      direction: "Short",
+      entry: 4398.04,
+      exit: 4406.32,
+      size: 0.02,
+      pnl: null,
+      sl: null,
+      tp: null,
+      isOpen: false,
+      date: "2026-08-13",
+      entryAt: "2026-08-13T12:42:09.034Z",
+      exitAt: "2026-08-13T13:19:29.975Z",
+      entryTime: "18:12",
+      exitTime: "18:49",
+      strategy: "",
+      emotion: "Focused",
+      notes: "",
+      tags: [],
+      psychology: {},
+      custom: {},
+      brokerData: { providerTradeDate: "2026-08-13" },
+      calculationVersion: 1,
+    };
+    const merged = tradePatchInputForNormalization(existing, {
+      version: 3,
+      date: "2026-08-13",
+      notes: "Dictated review",
+      psychology: { review: "Waited for confirmation" },
+    }, null);
+
+    expect(() => normalizeTrade(merged)).not.toThrow();
+    expect(merged.legacyFirebaseDocId).toBeUndefined();
   });
 
   it("initializes the official projection date but never overwrites an existing journal date", async () => {

@@ -494,6 +494,21 @@ export function cTraderJournalPatchBody(input: unknown): unknown {
   );
 }
 
+export function tradePatchInputForNormalization(
+  existing: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  legacyFirebaseDocId: string | null,
+): Record<string, unknown> {
+  return {
+    ...mergeTradePatch(existing, patch),
+    // A canonical VPS row legitimately has no Firebase id. Zod treats an
+    // omitted optional field differently from null, so remove the canonical
+    // null before the merged document is normalized for persistence.
+    legacyFirebaseDocId: legacyFirebaseDocId ?? undefined,
+    id: legacyFirebaseDocId ?? undefined,
+  };
+}
+
 /** cTrader projection facts are provider-owned; PATCH may edit journal annotations only. */
 export function mergeTradePatch(
   existing: Record<string, unknown>,
@@ -646,10 +661,7 @@ export async function registerTradeRoutes(app: FastifyInstance): Promise<void> {
       : rawPatchBody;
     const patch = tradePatchSchema.parse(patchBody);
     const expectedVersion = requireExpectedVersion(parseExpectedVersion(request.headers["if-match"], patch.version));
-    const merged = {
-      ...mergeTradePatch(existingInput, patch),
-      id: existing.legacy_firebase_doc_id ?? undefined,
-    };
+    const merged = tradePatchInputForNormalization(existingInput, patch, existing.legacy_firebase_doc_id);
     const normalized = normalizeTrade(merged);
     const row = await replaceTrade(app, auth.user.id, existing.id, normalized, expectedVersion);
     const response = mapTrade(row);
