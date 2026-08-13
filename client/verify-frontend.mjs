@@ -301,11 +301,122 @@ requireMatch(app, /async function commitSettings\([\s\S]*?const saved=await Sett
 requireMatch(browserDataMigrationSource, /remoteStillAtBase=dirty\.baseKnown===true&&remoteFingerprint===dirty\.baseFingerprint/, 'dirty journal retry compares the remote row with its captured base');
 requireMatch(browserDataMigrationSource, /if\(!remoteAlreadyHasLocal&&!remoteStillAtBase&&!safelyCreating\)[\s\S]*?djRecordConflict\(date,dirty,existing\);[\s\S]*?continue;/, 'divergent journal edits are preserved as conflicts without a PUT');
 requireMatch(browserDataMigrationSource, /if\(journalConflicts\.includes\(date\)\) continue;[\s\S]*?await djClearDirty\(date,localEntry\)/, 'journal dirty marker clears only after verified non-conflicting content');
-for (const mutation of ['saveBrokerMapping','addAccount','saveEditAccount','toggleFormField','addCustomField','removeCustomField','saveEditCF','moveCFInSection','moveCFSection','setTheme','toggleSidebarPin','addSymbol','removeSymbol']) {
+for (const mutation of ['saveBrokerMapping','addAccount','saveEditAccount','toggleFormField','addCustomField','removeCustomField','saveEditCF','moveCFInSection','moveCFSection','setTheme','setThemeChoice','toggleSidebarPin','addSymbol','removeSymbol']) {
   requireMatch(app, new RegExp(`async function ${mutation}\\b[\\s\\S]{0,1800}?await (?:commitSettings\\(|SettingsManager\\.set\\(S\\))`), `${mutation} awaits settings persistence`);
 }
 requireMatch(app, /function removeAccount\b[\s\S]{0,800}?async\(\)=>\{[\s\S]*?await SettingsManager\.set\(S\)/, 'removeAccount awaits settings persistence');
 requireMatch(app, /function clearSymbolsForTab\b[\s\S]{0,800}?async\(\)=>\{[\s\S]*?await commitSettings\(/, 'clearSymbolsForTab awaits settings persistence');
+
+// Theme palettes keep the legacy dark/light preference contract while adding
+// one allowlisted dark-palette field shared by topbar and Settings controls.
+requireMatch(app, /theme:'dark',darkPalette:'midnight'/, 'backward-compatible default theme preferences');
+for (const [value, label] of [
+  ['dark-midnight', 'Midnight Violet'],
+  ['dark-obsidian', 'Obsidian Teal'],
+  ['dark-navy', 'Deep Navy'],
+  ['light-paper', 'Paper Ledger'],
+]) {
+  requireMatch(app, new RegExp(`id=["']theme-palette-select["'][\\s\\S]{0,800}?value=["']${value}["']>${label}`), `topbar theme option ${label}`);
+  requireMatch(app, new RegExp(`id=["']pref-theme-palette["'][\\s\\S]{0,800}?value=["']${value}["']>${label}`), `settings theme option ${label}`);
+}
+requireMatch(app, /sessionStorage\.getItem\(['"]edgebook_theme_uid['"]\)[\s\S]{0,500}?tradedesk_settings_\$\{uid\}/, 'session-scoped cached theme prepaint');
+requireMatch(app, /function applyTheme\(theme,darkPalette\)[\s\S]{0,500}?document\.documentElement\.dataset\.theme=state\.choice[\s\S]{0,250}?classList\.toggle\(['"]light['"],state\.theme===['"]light['"]\)/, 'resolved data-theme with legacy body.light compatibility');
+requireMatch(app, /function restoreSettingsSnapshot\(previous\)[\s\S]{0,120}?applyTheme\(S\.prefs\?\.theme,S\.prefs\?\.darkPalette\)/, 'failed settings write restores the applied theme');
+requireMatch(app, /let _themeMutationChain=Promise\.resolve\(\)[\s\S]{0,260}?_themeMutationChain\.then\(mutation,mutation\)[\s\S]{0,180}?request\.catch\(\(\)=>undefined\)/, 'theme mutations are serialized across persistence and rollback');
+requireMatch(app, /@media\(max-width:900px\)\{[\s\S]{0,240}?#topbar-acct-badge\{display:none\}[\s\S]{0,180}?\.theme-choice-select\{max-width:116px\}/, 'theme selector preserves topbar space at compact desktop widths');
+requireMatch(app, /@media\(max-width:720px\)\{[\s\S]{0,220}?\.topbar-left\{display:none\}[\s\S]{0,260}?\.theme-choice-select\{max-width:104px\}/, 'theme selector remains visible without overflowing narrow topbars');
+try {
+  const themeSource=sourceBetween('const DARK_THEME_PALETTES=', 'let _themeChartRedrawToken=0;');
+  const { exports: theme }=evaluateSecurityFixture(
+    themeSource,
+    {},
+    '{normalizeDarkPalette,themeChoiceFromPreferences,parseThemeChoice}',
+  );
+  const legacyDark=theme.themeChoiceFromPreferences({theme:'dark'});
+  const legacyLight=theme.themeChoiceFromPreferences({theme:'light'});
+  const navy=theme.themeChoiceFromPreferences({theme:'dark',darkPalette:'navy'});
+  if(legacyDark.choice!=='dark-midnight'||legacyLight.choice!=='light-paper'||navy.choice!=='dark-navy') {
+    failures.push('Legacy dark/light preferences do not resolve to canonical theme choices');
+  }
+  if(theme.parseThemeChoice('dark-obsidian')?.darkPalette!=='obsidian'||theme.parseThemeChoice('light-paper')?.theme!=='light') {
+    failures.push('Canonical theme choices are not parsed correctly');
+  }
+  for(const untrusted of ['dark-ember','dark-__proto__','light','paper',null,{toString:()=> 'navy'}]) {
+    if(theme.parseThemeChoice(untrusted)!==null)failures.push(`Unallowlisted theme choice was accepted: ${String(untrusted)}`);
+  }
+  if(theme.normalizeDarkPalette('ember')!=='midnight')failures.push('Unknown persisted dark palette does not fail closed to Midnight Violet');
+} catch(error) {
+  failures.push(`Theme preference fixture failed: ${error.message}`);
+}
+
+try {
+  const settingsSource=sourceBetween('function settingsSnapshot()', '/* ═══ END SETTINGS MANAGER');
+  const themeMutationSource=sourceBetween('const DARK_THEME_PALETTES=', 'async function toggleSidebarPin');
+  const elements=new Map();
+  const element=()=>({value:'',title:'',style:{},classList:{toggle(){}},querySelector(){return null;}});
+  const deferredWrites=[];
+  const themeMutationContext={
+    console,
+    setTimeout:callback=>callback(),
+    requestAnimationFrame:()=>{},
+    document:{
+      documentElement:{dataset:{},style:{}},
+      body:{classList:{toggle(){}}},
+      getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);},
+      querySelector:()=>null,
+    },
+    SettingsManager:{set(value){return new Promise(resolve=>deferredWrites.push({value:JSON.parse(JSON.stringify(value)),resolve}));}},
+    applySettings(){},buildSettingsUI(){},buildAcctDropdown(){},updateAccountSelect(){},renderPageAcctTabs(){},refreshAll(){},
+    renderCharts(){},dashboardChartPalette(){return{};},showToast(){},
+  };
+  const {context:themeRace,exports:themeRaceApi}=evaluateSecurityFixture(
+    `let S={prefs:{theme:'dark',darkPalette:'midnight'}},CH={};\n${settingsSource}\n${themeMutationSource}`,
+    themeMutationContext,
+    '{setThemeChoice,getState:()=>JSON.parse(JSON.stringify(S)),getDomTheme:()=>document.documentElement.dataset.theme}',
+  );
+  const first=themeRaceApi.setThemeChoice('dark-navy');
+  const second=themeRaceApi.setThemeChoice('dark-obsidian');
+  await Promise.resolve();
+  const firstWrite=deferredWrites[0];
+  if(!firstWrite)throw new Error('First rapid theme choice did not start its persistence transaction');
+  if(deferredWrites.length!==1||firstWrite.value?.prefs?.darkPalette!=='navy') {
+    failures.push('Rapid theme choices started concurrently or persisted the wrong first choice');
+  }
+  firstWrite.resolve(false);
+  await first;
+  await Promise.resolve();
+  const secondWrite=deferredWrites[1];
+  if(!secondWrite)throw new Error('Second theme choice did not run after the first rollback settled');
+  if(deferredWrites.length!==2||secondWrite.value?.prefs?.darkPalette!=='obsidian') {
+    failures.push('Second serialized theme choice persisted the wrong value');
+  }
+  secondWrite.resolve(true);
+  const [,secondResult]=await Promise.all([first,second]);
+  const settled=themeRaceApi.getState();
+  if(secondResult!==true||settled?.prefs?.darkPalette!=='obsidian'||themeRaceApi.getDomTheme()!=='dark-obsidian') {
+    failures.push('Failed first theme choice rolled back a later successful choice');
+  }
+  deferredWrites.length=0;
+  const successThenFail=themeRaceApi.setThemeChoice('dark-navy');
+  const finalFailure=themeRaceApi.setThemeChoice('dark-obsidian');
+  await Promise.resolve();
+  const successfulWrite=deferredWrites[0];
+  if(!successfulWrite)throw new Error('Success-then-failure theme sequence did not start');
+  successfulWrite.resolve(true);
+  await successThenFail;
+  await Promise.resolve();
+  const failingWrite=deferredWrites[1];
+  if(!failingWrite)throw new Error('Latest failing theme choice did not run after the prior success');
+  failingWrite.resolve(false);
+  const finalFailureResult=await finalFailure;
+  const afterFinalFailure=themeRaceApi.getState();
+  if(finalFailureResult!==false||afterFinalFailure?.prefs?.darkPalette!=='navy'||themeRaceApi.getDomTheme()!=='dark-navy') {
+    failures.push('Failed latest theme choice did not restore the preceding successful choice');
+  }
+  void themeRace;
+} catch(error) {
+  failures.push(`Theme mutation serialization fixture failed: ${error.message}`);
+}
 
 // Trading Playbook: recommended defaults remain a low-friction starting point,
 // while user terminology, nested setups, ordered fields, and option libraries
@@ -353,9 +464,14 @@ try {
 // presenting them on a proportionate, intelligible horizontal axis.
 requireMatch(app, /class=["']equity-chart-wrap["'][\s\S]{0,120}?canvas id=["']equity-chart["']/, 'responsive equity chart wrapper');
 requireMatch(app, /\.equity-chart-wrap\{[^}]*height:clamp\(300px,25vw,420px\)/, 'proportional equity chart height');
-requireMatch(app, /#page-dashboard\{--text2:#adb6cd;--text3:#8d98b6\}/, 'dashboard-scoped dark text contrast');
-requireMatch(app, /body\.light #page-dashboard\{--text2:#4a4438;--text3:#6f6658\}/, 'dashboard light-theme text hierarchy');
-requireMatch(app, /DASH_TC='#8d98b6'/, 'readable dashboard canvas labels');
+requireMatch(app, /#page-dashboard\{--text2:var\(--dashboard-text2\);--text3:var\(--dashboard-text3\)\}/, 'dashboard text hierarchy uses active semantic theme tokens');
+for (const chartToken of ['--chart-grid', '--chart-tick', '--chart-zero', '--chart-tooltip-bg']) {
+  requireMatch(app, new RegExp(chartToken), `semantic canvas token ${chartToken}`);
+}
+requireMatch(app, /function dashboardChartPalette\([^)]*\)[\s\S]{0,240}?getComputedStyle\(scope\)[\s\S]{0,1100}?read\('--green'[\s\S]{0,220}?read\('--red'[\s\S]{0,260}?read\('--chart-tick'[\s\S]{0,600}?read\('--chart-grid'[\s\S]{0,300}?read\('--chart-zero'[\s\S]{0,400}?read\('--chart-tooltip-bg'/, 'dashboard charts read computed semantic CSS colors');
+requireMatch(app, /function scheduleThemeChartRedraw\(\)[\s\S]{0,500}?activePage==='dashboard'[\s\S]{0,80}?renderCharts\(\)/, 'active dashboard charts redraw after a theme switch');
+requireMatch(app, /chart\.canvas\.closest\?\.\(['"]\.page-content['"]\)[\s\S]{0,120}?chartPage&&!chartPage\.classList\.contains\(['"]active['"]\)/, 'theme redraw skips charts mounted in inactive pages');
+requireMatch(app, /function applyTheme\([^)]*\)[\s\S]{0,700}?scheduleThemeChartRedraw\(\)/, 'theme application schedules safe chart recoloring');
 requireMatch(app, /setEquityAxisMode\(['"]date['"]\)[\s\S]{0,260}?By date/, 'date-based equity axis control');
 requireMatch(app, /setEquityAxisMode\(['"]trade['"]\)[\s\S]{0,260}?By trade #/, 'explicit trade-number equity axis control');
 requireMatch(app, /function equityTradeTimestamp\b/, 'equity close timestamp projection');
@@ -368,8 +484,10 @@ requireMatch(app, /ensureEquityStartAnchor\(displayedEquityPoints,chartAxisMode\
 requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,160}?equityAxisDomain\(visibleEquityValues\)/, 'dynamic equity Y-domain from visible points');
 requireMatch(app, /y:\{[\s\S]{0,100}?min:yDomain\.min,[\s\S]{0,60}?max:yDomain\.max/, 'exact equity Y-domain without library tick expansion');
 requireMatch(app, /insertEquityZeroCrossings\(plotEquityPoints\)/, 'exact zero crossing projection');
-requireMatch(app, /segment:\{borderColor:[\s\S]{0,180}?EQUITY_POS_COLOR[\s\S]{0,80}?EQUITY_NEG_COLOR/, 'zero-aware equity line colors');
-requireMatch(app, /backgroundColor:equityFillGradient/, 'zero-aware gradual equity fill');
+requireMatch(app, /segment:\{borderColor:context=>equityDirectionColor\(context\.p0\.parsed\.y,context\.p1\.parsed\.y,palette\)\}/, 'direction-aware theme-derived equity line colors');
+requireMatch(app, /backgroundColor:context=>equityDirectionFillGradient\(context,palette\)/, 'direction-aware theme-derived subtle equity fill');
+requireMatch(app, /pointBackgroundColor:context=>equityPointDirectionColor\(context,palette\)[\s\S]{0,120}?pointBorderColor:context=>equityPointDirectionColor\(context,palette\)/, 'direction-aware theme-derived equity point colors');
+rejectMatch(app, /\(context\.p0\.parsed\.y\+context\.p1\.parsed\.y\)\/2/, 'above-or-below-zero equity segment colors');
 requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 'empty equity curve guidance');
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
 for (const insightCanvas of ['symbol-chart', 'outcome-chart', 'direction-chart', 'day-chart']) {
@@ -384,7 +502,67 @@ requireMatch(app, /class=["']insight-mini-card insight-ring-card["'][\s\S]{0,220
 requireMatch(app, /bySymbol[\s\S]{0,500}?Math\.abs\(b\.pnl\)-Math\.abs\(a\.pnl\)/, 'signed symbol P&L ranking retains gains and losses');
 requireMatch(app, /outcomeCounts=\[outcomes\.filter\(value=>value>0\)[\s\S]{0,160}?value===0/, 'outcome mix includes break-even trades');
 requireMatch(app, /dayCounts=\[dayValues\.filter\(value=>value>\.005\)[\s\S]{0,180}?Math\.abs\(value\)<=\.005/, 'day consistency includes profitable losing and flat days');
+requireMatch(app, /function renderDashboardInsights\([^)]*palette\)[\s\S]*?backgroundColor:\[palette\.positive,palette\.negative,palette\.neutral\]/, 'dashboard doughnuts use semantic theme colors');
+requireMatch(app, /symbolRows\.map\(row=>row\.pnl>=0\?palette\.positiveStrong:palette\.negativeStrong\)/, 'symbol P&L bars use semantic theme colors');
+requireMatch(app, /directionNames\.map\(name=>directionStats\[name\]\.pnl>=0\?palette\.positiveStrong:palette\.negativeStrong\)/, 'direction P&L bars use semantic theme colors');
+requireMatch(app, /grid:\{color:context=>Number\(context\.tick\?\.value\)===0\?palette\.zeroGrid:palette\.grid/, 'dashboard chart grids use semantic theme colors');
+requireMatch(app, /dashboardTooltipOptions\(palette\)/, 'dashboard tooltips use semantic theme colors');
 rejectMatch(app, /id=["']asset-chart["']|Object\.keys\(apnl\)\.filter\(k=>apnl\[k\]>0\)/, 'positive-only asset-class doughnut');
+
+try {
+  const paletteSource = sourceBetween('function chartColorWithAlpha', 'function tradeChronologyKey');
+  const semanticColors = {
+    '--green': '#16875e', '--red': '#c84550', '--chart-tick': '#68756d',
+    '--chart-grid': 'rgba(38,43,39,.075)', '--chart-zero': 'rgba(38,43,39,.24)',
+    '--chart-tooltip-bg': '#fcfbf7', '--text': '#1b211e', '--dashboard-text2': '#4f5c54',
+    '--accent': '#b87512', '--border2': 'rgba(38,43,39,.17)',
+  };
+  const paletteContext = {
+    document: { getElementById: () => ({}), body: {} },
+    getComputedStyle: () => ({ getPropertyValue: name => semanticColors[name] || '' }),
+  };
+  vm.runInNewContext(`${paletteSource}\nglobalThis.palette=dashboardChartPalette();`, paletteContext);
+  const palette = paletteContext.palette;
+  if (palette?.positive !== '#16875e' || palette?.negative !== '#c84550' || palette?.tick !== '#68756d' ||
+      palette?.grid !== 'rgba(38,43,39,.075)' || palette?.zeroGrid !== 'rgba(38,43,39,.24)' ||
+      palette?.tooltipBackground !== '#fcfbf7' || palette?.positiveStrong !== 'rgba(22,135,94,0.78)') {
+    failures.push('Dashboard Chart.js palette did not resolve computed semantic CSS variables');
+  }
+} catch (error) {
+  failures.push(`Dashboard chart palette fixture failed: ${error.message}`);
+}
+
+try {
+  const redrawSource = sourceBetween('let _themeChartRedrawToken', 'function applyTheme');
+  const frames = [];
+  let activePageId = 'page-dashboard', dashboardRenders = 0, hiddenDashboardUpdates = 0, activePageUpdates = 0;
+  const pageFor = id => ({ id, classList: { contains: name => name === 'active' && id === activePageId } });
+  const redrawContext = {
+    document: { querySelector: () => ({ id: activePageId }), body: {} },
+    requestAnimationFrame: callback => { frames.push(callback); return frames.length; },
+    setTimeout: callback => callback(),
+    renderCharts: () => { dashboardRenders += 1; },
+    dashboardChartPalette: () => ({ grid: 'g', tick: 't', tooltipBackground: 'b', text: 'x', text2: 'x2', borderStrong: 's' }),
+    CH: {
+      hiddenDashboard: { canvas: { closest: () => pageFor('page-dashboard') }, ctx: {}, options: { scales: {}, plugins: {} }, update: () => { hiddenDashboardUpdates += 1; } },
+      activeSettings: { canvas: { closest: () => pageFor('page-settings') }, ctx: {}, options: { scales: {}, plugins: {} }, update: mode => { if (mode === 'none') activePageUpdates += 1; } },
+      destroyed: { options: { scales: {}, plugins: {} }, update: () => { activePageUpdates += 100; } },
+    },
+  };
+  vm.runInNewContext(`${redrawSource}\nglobalThis.schedule=scheduleThemeChartRedraw;`, redrawContext);
+  redrawContext.schedule();
+  redrawContext.schedule();
+  frames[0]();
+  frames[1]();
+  activePageId = 'page-settings';
+  redrawContext.schedule();
+  frames[2]();
+  if (dashboardRenders !== 1 || hiddenDashboardUpdates !== 0 || activePageUpdates !== 1) {
+    failures.push('Theme chart redraw is not coalesced, updates a hidden dashboard canvas, or skips an active-page chart');
+  }
+} catch (error) {
+  failures.push(`Theme chart redraw fixture failed: ${error.message}`);
+}
 
 // Daily Journal dictation must remain a review-first, browser-native feature:
 // append to existing notes, expose live status, and never save automatically.
@@ -411,6 +589,7 @@ const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'f
 const equityAxisDomainSource = sourceBetween('function equityAxisDomain', 'function setDashboardInsightEmpty');
 const equityProjectionContext = {};
 vm.runInNewContext(`
+  const palette={positive:'#light-green',negative:'#light-red',neutral:'#light-neutral',positiveFill:'rgba(15,158,101,.105)',negativeFill:'rgba(217,59,71,.095)',neutralFill:'rgba(111,102,88,.045)'};
   function isRealIsoDate(value){
     const match=/^(\\d{4})-(\\d{2})-(\\d{2})$/.exec(String(value??''));
     if(!match)return false;
@@ -430,8 +609,13 @@ vm.runInNewContext(`
   ]);
   globalThis.firstClose=ensureEquityStartAnchor([{x:dayOne,y:60,timestamp:dayOne,tradeNumber:1,tradePnl:60,trade:{}}],'date');
   globalThis.crossings=insertEquityZeroCrossings([{x:0,y:20,timestamp:0},{x:10,y:-20,timestamp:10}]);
+  globalThis.directions=[equityDirection(-20,-10),equityDirection(20,10),equityDirection(10,10)];
+  globalThis.directionColors=[equityDirectionColor(20,10,palette),equityDirectionColor(-20,-10,palette)];
   const stops=[];
-  equityFillGradient({chart:{chartArea:{top:0,bottom:100},scales:{y:{getPixelForValue:()=>40}},ctx:{createLinearGradient:()=>({addColorStop:(offset,color)=>stops.push([offset,color])})}}});
+  equityDirectionFillGradient({
+    dataset:{data:[{x:0,y:-20},{x:5,y:10},{x:10,y:0}]},
+    chart:{chartArea:{left:0,right:100},scales:{x:{getPixelForValue:value=>Number(value)*10}},ctx:{createLinearGradient:()=>({addColorStop:(offset,color)=>stops.push([offset,color])})}}
+  },palette);
   globalThis.gradientStops=stops;
   globalThis.axisDomain=equityAxisDomain([-3000,2800]);
 `, equityProjectionContext);
@@ -445,10 +629,16 @@ if (equityProjectionContext.firstClose?.length !== 2 || equityProjectionContext.
   failures.push('First equity close has no zero baseline segment');
 }
 if (equityProjectionContext.crossings?.length !== 3 || equityProjectionContext.crossings[1]?.y !== 0 || equityProjectionContext.crossings[1]?.x !== 5 || !equityProjectionContext.crossings[1]?.synthetic) {
-  failures.push('Equity color boundary is not projected at the exact zero crossing');
+  failures.push('Equity curve no longer preserves its exact synthetic zero crossing');
 }
-if (equityProjectionContext.gradientStops?.length !== 4 || !equityProjectionContext.gradientStops[0]?.[1]?.includes('34,201,135') || !equityProjectionContext.gradientStops[3]?.[1]?.includes('255,94,106')) {
-  failures.push('Equity area gradient does not transition from positive green to negative red');
+if (equityProjectionContext.directions?.join(',') !== 'up,down,flat') {
+  failures.push('Equity segment direction is not derived from the change between consecutive cumulative values');
+}
+if (equityProjectionContext.directionColors?.join(',') !== '#light-red,#light-green') {
+  failures.push('Equity colors still follow absolute zero instead of red-down and green-up movement');
+}
+if (equityProjectionContext.gradientStops?.length !== 4 || !equityProjectionContext.gradientStops[0]?.[1]?.includes('15,158,101') || !equityProjectionContext.gradientStops[3]?.[1]?.includes('217,59,71')) {
+  failures.push('Equity area fill does not transition from rising green to falling red');
 }
 if (equityProjectionContext.axisDomain?.min !== -3348 || equityProjectionContext.axisDomain?.max !== 3148) {
   failures.push('Equity axis does not stay close to the actual visible P&L range');
@@ -493,6 +683,12 @@ try {
     constructor(element, config) { this.element = element; this.config = config; renderedInsightCharts.set(element.id, this); }
     destroy() { this.destroyed = true; }
   }
+  const insightPalette = {
+    positive: '#theme-green', negative: '#theme-red', neutral: '#theme-neutral',
+    positiveStrong: 'theme-green-strong', negativeStrong: 'theme-red-strong',
+    tick: 'theme-tick', grid: 'theme-grid', zeroGrid: 'theme-zero-grid',
+    tooltipBackground: 'theme-surface', text: 'theme-text', text2: 'theme-text2', borderStrong: 'theme-border',
+  };
   const insightSource = sourceBetween('function setDashboardInsightEmpty', 'function renderCharts');
   const { exports: insightRenderer } = evaluateSecurityFixture(
     insightSource,
@@ -512,6 +708,7 @@ try {
       escapeHtml: value => String(value),
       signedMoney: (value, symbol) => `${Number(value) < 0 ? '-' : Number(value) > 0 ? '+' : ''}${symbol}${Math.abs(Number(value)).toFixed(0)}`,
       equityMoneyTick: (value, symbol) => `${symbol}${value}`,
+      dashboardTooltipOptions: palette => ({ backgroundColor: palette.tooltipBackground }),
     },
     '{renderDashboardInsights}',
   );
@@ -526,7 +723,7 @@ try {
     { pnl: -200, direction: 'Short', accountId: 'a' },
     { pnl: 0, direction: 'Short', accountId: 'a' },
   ];
-  insightRenderer.renderDashboardInsights(realised, closedOutcomes, '$', false);
+  insightRenderer.renderDashboardInsights(realised, closedOutcomes, '$', false, insightPalette);
   const symbolConfig = renderedInsightCharts.get('symbol-chart')?.config;
   const outcomeConfig = renderedInsightCharts.get('outcome-chart')?.config;
   const directionConfig = renderedInsightCharts.get('direction-chart')?.config;
@@ -542,6 +739,15 @@ try {
   }
   if (dayConfig?.data?.datasets?.[0]?.data?.join(',') !== '1,1,1' || insightDocument.getElementById('day-rate').textContent !== '33%') {
     failures.push('Day-consistency insight does not reconcile profitable losing and flat days');
+  }
+  if (symbolConfig?.data?.datasets?.[0]?.backgroundColor?.join(',') !== 'theme-red-strong,theme-green-strong,theme-green-strong' || directionConfig?.data?.datasets?.[0]?.backgroundColor?.join(',') !== 'theme-green-strong,theme-red-strong') {
+    failures.push('Dashboard P&L bars did not consume the supplied semantic chart palette');
+  }
+  if (outcomeConfig?.data?.datasets?.[0]?.backgroundColor?.join(',') !== '#theme-green,#theme-red,#theme-neutral' || dayConfig?.data?.datasets?.[0]?.backgroundColor?.join(',') !== '#theme-green,#theme-red,#theme-neutral') {
+    failures.push('Dashboard doughnuts did not consume the supplied semantic chart palette');
+  }
+  if (symbolConfig?.options?.scales?.x?.ticks?.color !== 'theme-tick' || symbolConfig?.options?.plugins?.tooltip?.backgroundColor !== 'theme-surface') {
+    failures.push('Dashboard axes or tooltips did not consume the supplied semantic chart palette');
   }
 } catch (error) {
   failures.push(`Dashboard insight fixture failed: ${error.message}`);
