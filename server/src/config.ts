@@ -24,7 +24,7 @@ const storageCleanupConfigSchema = databaseConfigSchema.extend({
   MAX_IMAGE_PIXELS: z.coerce.number().int().min(1_000_000).max(100_000_000).default(40_000_000),
   USER_STORAGE_QUOTA_BYTES: z.coerce.number().int().min(1_048_576).default(250 * 1024 * 1024),
   TOTAL_STORAGE_QUOTA_BYTES: z.coerce.number().int().min(1_048_576).default(10 * 1024 * 1024 * 1024),
-  MIN_DISK_FREE_BYTES: z.coerce.number().int().min(0).default(1024 * 1024 * 1024),
+  MIN_DISK_FREE_BYTES: z.coerce.number().int().min(0).default(5 * 1024 * 1024 * 1024),
 });
 
 const configSchema = z
@@ -49,7 +49,7 @@ const configSchema = z
     MAX_IMAGE_PIXELS: z.coerce.number().int().min(1_000_000).max(100_000_000).default(40_000_000),
     USER_STORAGE_QUOTA_BYTES: z.coerce.number().int().min(1_048_576).default(250 * 1024 * 1024),
     TOTAL_STORAGE_QUOTA_BYTES: z.coerce.number().int().min(1_048_576).default(10 * 1024 * 1024 * 1024),
-    MIN_DISK_FREE_BYTES: z.coerce.number().int().min(0).default(1024 * 1024 * 1024),
+    MIN_DISK_FREE_BYTES: z.coerce.number().int().min(0).default(5 * 1024 * 1024 * 1024),
     SSE_HEARTBEAT_MS: z.coerce.number().int().min(5_000).max(60_000).default(20_000),
     CTRADER_CLIENT_ID: optionalSecret,
     CTRADER_CLIENT_SECRET: optionalSecret,

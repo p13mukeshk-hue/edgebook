@@ -66,11 +66,11 @@ server code, migration utilities, and deployment material.
 
    It must report `127.0.0.1:3210` as unused. Do not stop or replace the process
    on `*:8787`; it is outside the Edge Book deployment.
-   The preflight requires at least 10 GiB available on both the Edge Book data
+   The preflight requires at least 5 GiB available on both the Edge Book data
    filesystem and Docker filesystem. It prints a cleanup warning below 15 GiB,
    but percentage free is informational and never blocks a deployment. A reviewed
    operator may raise the absolute hard floor; it cannot be configured below
-   10 GiB. Recheck after image build and before every release/backup. No automatic
+   5 GiB. Recheck after image build and before every release/backup. No automatic
    Docker prune or deletion is part of this deployment.
 4. Create the directories using the reviewed `tmpfiles.d/edgebook.conf` template,
    or create equivalent paths manually. This includes `/run/edgebook`, used only

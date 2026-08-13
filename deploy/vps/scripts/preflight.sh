@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # reload, chmod, chown, create, or delete anything.
 
 EDGEBOOK_HOST_PORT="${EDGEBOOK_HOST_PORT:-3210}"
-EDGEBOOK_MIN_FREE_BYTES="${EDGEBOOK_MIN_FREE_BYTES:-10737418240}"
+EDGEBOOK_MIN_FREE_BYTES="${EDGEBOOK_MIN_FREE_BYTES:-5368709120}"
 EDGEBOOK_WARN_FREE_BYTES="${EDGEBOOK_WARN_FREE_BYTES:-16106127360}"
 
 [[ "$EDGEBOOK_HOST_PORT" =~ ^[0-9]+$ ]] && (( EDGEBOOK_HOST_PORT >= 1 && EDGEBOOK_HOST_PORT <= 65535 )) || {
@@ -14,8 +14,8 @@ EDGEBOOK_WARN_FREE_BYTES="${EDGEBOOK_WARN_FREE_BYTES:-16106127360}"
 [[ "$EDGEBOOK_HOST_PORT" == 3210 ]] || {
   printf 'ERROR: this reviewed shared-VPS deployment is fixed to 127.0.0.1:3210.\n' >&2; exit 1;
 }
-[[ "$EDGEBOOK_MIN_FREE_BYTES" =~ ^[0-9]+$ ]] && (( EDGEBOOK_MIN_FREE_BYTES >= 10737418240 )) || {
-  printf 'ERROR: EDGEBOOK_MIN_FREE_BYTES must be at least 10737418240 (10 GiB).\n' >&2; exit 1;
+[[ "$EDGEBOOK_MIN_FREE_BYTES" =~ ^[0-9]+$ ]] && (( EDGEBOOK_MIN_FREE_BYTES >= 5368709120 )) || {
+  printf 'ERROR: EDGEBOOK_MIN_FREE_BYTES must be at least 5368709120 (5 GiB).\n' >&2; exit 1;
 }
 [[ "$EDGEBOOK_WARN_FREE_BYTES" =~ ^[0-9]+$ ]] && (( EDGEBOOK_WARN_FREE_BYTES >= EDGEBOOK_MIN_FREE_BYTES )) || {
   printf 'ERROR: EDGEBOOK_WARN_FREE_BYTES must be an integer at least as large as EDGEBOOK_MIN_FREE_BYTES.\n' >&2; exit 1;
@@ -95,7 +95,7 @@ check_disk_floor() {
   used_percent="$(awk '{gsub(/%/, "", $2); print $2}' <<<"$row")"
   free_percent=$((100 - used_percent))
   if (( available < EDGEBOOK_MIN_FREE_BYTES )); then
-    printf 'ERROR: %s disk floor failed: %s bytes available (%s%% free); require at least %s bytes (10 GiB).\n' \
+    printf 'ERROR: VPS storage limit reached on %s: %s bytes available (%s%% free); deployment requires at least %s bytes (5 GiB).\n' \
       "$label" "$available" "$free_percent" "$EDGEBOOK_MIN_FREE_BYTES" >&2
     exit 1
   fi

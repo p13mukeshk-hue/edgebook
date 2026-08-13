@@ -173,7 +173,7 @@ export async function registerFileRoutes(app: FastifyInstance): Promise<void> {
             throw new AppError(413, "USER_STORAGE_QUOTA", "Your screenshot storage quota has been reached");
           }
           if (BigInt(quota?.total_bytes ?? 0) + BigInt(image.bytes.length) > BigInt(app.config.totalStorageQuotaBytes)) {
-            throw new AppError(507, "STORAGE_QUOTA", "Screenshot storage is temporarily full");
+            throw new AppError(507, "VPS_STORAGE_QUOTA", "VPS screenshot storage quota reached. The screenshot was not saved.");
           }
 
           // Keep the filesystem free-space check in the same global critical

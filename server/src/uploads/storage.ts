@@ -35,7 +35,12 @@ export class LocalScreenshotStorage implements ScreenshotStorage {
     const stats = await statfs(this.config.uploadRoot, { bigint: true });
     const available = stats.bavail * stats.bsize;
     if (available - BigInt(bytesToAdd) < BigInt(this.config.minDiskFreeBytes)) {
-      throw new AppError(507, "STORAGE_LOW", "Screenshot storage is temporarily unavailable");
+      const minimumGiB = Math.ceil(this.config.minDiskFreeBytes / (1024 * 1024 * 1024));
+      throw new AppError(
+        507,
+        "VPS_STORAGE_LIMIT",
+        `VPS storage limit reached. The screenshot was not saved because the server must keep at least ${minimumGiB} GiB free.`,
+      );
     }
   }
 

@@ -188,6 +188,17 @@ export async function buildApp(config: AppConfig, dependencies: AppDependencies 
       return;
     }
     const fastifyError = error as Error & { code?: string; statusCode?: number };
+    if (fastifyError.code === "53100" || fastifyError.code === "ENOSPC") {
+      request.log.error({ errorCode: fastifyError.code }, "VPS storage limit prevented a save");
+      void reply.code(507).send({
+        error: {
+          code: "VPS_STORAGE_LIMIT",
+          message: "VPS storage limit reached. Your changes were not saved; please retry after server storage is cleared.",
+          requestId: request.id,
+        },
+      });
+      return;
+    }
     if (fastifyError.code === "23505") {
       void reply.code(409).send({ error: { code: "CONFLICT", message: "The record already exists", requestId: request.id } });
       return;

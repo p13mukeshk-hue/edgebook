@@ -133,9 +133,9 @@ Only the replacement VPS may schedule cTrader sync after cutover. Requirements:
 Before first start and every port/config change:
 
 1. Run `deploy/vps/scripts/preflight.sh`.
-   It enforces a 10 GiB absolute free-space floor on `/srv` and the Docker data
+   It enforces a 5 GiB absolute free-space floor on `/srv` and the Docker data
    filesystem. Below 15 GiB it warns that cleanup should be planned, but the free
-   percentage is informational and does not stop deployment. The 10 GiB hard
+   percentage is informational and does not stop deployment. The 5 GiB hard
    floor cannot be lowered through environment overrides. No automatic
    cache/image prune is authorized.
 2. Render `docker compose config` from the protected env file and verify the API

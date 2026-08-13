@@ -179,10 +179,13 @@ for (const contract of [
 
 const deployReadme = read('deploy/vps/README.md');
 const preflight = read('deploy/vps/scripts/preflight.sh');
-requireText(preflight, /EDGEBOOK_MIN_FREE_BYTES="\$\{EDGEBOOK_MIN_FREE_BYTES:-10737418240\}"/, 'absolute 10 GiB deployment disk floor');
+requireText(preflight, /EDGEBOOK_MIN_FREE_BYTES="\$\{EDGEBOOK_MIN_FREE_BYTES:-5368709120\}"/, 'absolute 5 GiB deployment disk floor');
 requireText(preflight, /EDGEBOOK_WARN_FREE_BYTES="\$\{EDGEBOOK_WARN_FREE_BYTES:-16106127360\}"/, '15 GiB cleanup warning threshold');
 requireText(preflight, /if \(\( available < EDGEBOOK_MIN_FREE_BYTES \)\)/, 'deployment blocks only on the absolute byte floor');
 rejectText(preflight, /EDGEBOOK_MIN_FREE_PERCENT|free_percent\s*</, 'percentage-based deployment rejection');
+requireText(preflight, /VPS storage limit reached/, 'explicit VPS capacity preflight error');
+requireText(compose, /MIN_DISK_FREE_BYTES:\s*\$\{MIN_DISK_FREE_BYTES:-5368709120\}/, 'runtime screenshot writes use the 5 GiB VPS floor');
+requireText(read('server/src/app.ts'), /code: "VPS_STORAGE_LIMIT"[\s\S]*VPS storage limit reached\. Your changes were not saved/, 'runtime save failure identifies VPS storage');
 requireText(deployReadme, /percentage free is informational and never blocks a deployment/, 'absolute-only disk policy documentation');
 requireText(deployReadme, /migrate-release\.sh[\s\S]*--release-dir[\s\S]*--env-file[\s\S]*--image-tag/, 'documented guarded migration invocation');
 requireText(deployReadme, /verify-rollback-candidate\.sh[\s\S]*--candidate/, 'documented rollback compatibility invocation');
