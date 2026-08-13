@@ -9,6 +9,7 @@ import {
   parseAuthorizedAccounts,
   parseAssetClasses,
   parseAssets,
+  parseCashFlows,
   parseDeals,
   parseEnvelope,
   parseLightSymbols,
@@ -18,6 +19,7 @@ import {
   type CTraderAsset,
   type CTraderAssetClass,
   type CTraderAuthorizedAccount,
+  type CTraderCashFlow,
   type CTraderDeal,
   type CTraderEnvironment,
   type CTraderEnvelope,
@@ -50,6 +52,7 @@ export interface CTraderAccountSession {
   listSymbols(): Promise<CTraderLightSymbol[]>;
   getSymbolDetails(symbolIds: readonly string[], names: ReadonlyMap<string, string>): Promise<CTraderSymbolSpec[]>;
   listDeals(fromTimestamp: number, toTimestamp: number, maxRows: number): Promise<{ deals: CTraderDeal[]; hasMore: boolean }>;
+  listCashFlows(fromTimestamp: number, toTimestamp: number): Promise<CTraderCashFlow[]>;
   close(): Promise<void>;
 }
 
@@ -301,6 +304,15 @@ class OfficialAccountSession implements CTraderAccountSession {
       { ctidTraderAccountId: this.#accountId, fromTimestamp, toTimestamp, maxRows },
     );
     return parseDeals(payload);
+  }
+
+  async listCashFlows(fromTimestamp: number, toTimestamp: number): Promise<CTraderCashFlow[]> {
+    const payload = await this.#session.historicalRequest(
+      CTraderPayload.CASH_FLOW_HISTORY_LIST_REQ,
+      CTraderPayload.CASH_FLOW_HISTORY_LIST_RES,
+      { ctidTraderAccountId: this.#accountId, fromTimestamp, toTimestamp },
+    );
+    return parseCashFlows(payload);
   }
 
   close(): Promise<void> {

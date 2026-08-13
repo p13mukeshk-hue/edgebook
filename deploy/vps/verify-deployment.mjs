@@ -131,6 +131,56 @@ requireText(build, /sed -i [^\n]*client\/\$asset\.js\?v=\$asset_hash/, 'versione
 requireText(build, /! -e "\$destination\/client\/firebase-fallback\.js"/, 'Firebase fallback module absence gate');
 rejectText(build, /install[^\n]*firebase-fallback\.js/, 'Firebase fallback module copied into VPS artifact');
 rejectText(build, /sed[^\n]*enableFirebaseFallback/, 'artifact-only fallback flag rewrite');
+for (const contract of [
+  /brokerData\?\.quantityProjection/,
+  /base units from cTrader; lot conversion unavailable/,
+  /const excluded=open\.filter\(t=>readCTraderQuantityProjection\(t\)\?\.unit===['"]base_units['"]\)/,
+  /const measurable=open\.filter\(t=>readCTraderQuantityProjection\(t\)\?\.unit!==['"]base_units['"]\)/,
+  /excluded from exposure: size is available in base units/,
+]) {
+  requireText(build, contract, 'public builder cTrader base-unit compatibility gate');
+}
+requireText(build, /tradeQuantityCompatibility["']?:["']ctrader-quantity-projection-base-units-v1["']/, 'public base-unit compatibility marker');
+const buildCompatibilityGate = build.indexOf('base_unit_contracts=(');
+const buildCompatibilityMarker = build.indexOf('tradeQuantityCompatibility');
+if (buildCompatibilityGate < 0 || buildCompatibilityMarker < 0 || buildCompatibilityGate >= buildCompatibilityMarker) {
+  failures.push('Public compatibility marker must be written only after source contract gates');
+}
+
+const migrationHelper = read('deploy/vps/scripts/migrate-release.sh');
+requireText(migrationHelper, /--release-dir \/opt\/edgebook\/releases\/<release-id> --env-file \/etc\/edgebook\/edgebook\.env --image-tag <immutable-tag>/, 'migration helper requires explicit release/env/tag');
+requireText(migrationHelper, /\/run\/edgebook\/maintenance\.lock/, 'migration helper shared maintenance lock');
+requireText(migrationHelper, /flock -n 9/, 'migration helper nonblocking lock acquisition');
+requireText(migrationHelper, /\^\/opt\/edgebook\/releases\//, 'migration helper fixed release root');
+requireText(migrationHelper, /env_file["']? == \/etc\/edgebook\/edgebook\.env/, 'migration helper fixed secret env file');
+requireText(migrationHelper, /image_tag["']? != latest[\s\S]*image_tag["']? != local/, 'migration helper rejects mutable image tags');
+requireText(migrationHelper, /seven-character lowercase Git commit prefix/, 'migration helper requires Git-bound image tag');
+requireText(migrationHelper, /com\.docker\.compose\.project=edgebook[\s\S]*api\|worker\)/, 'migration helper refuses running API/worker containers across releases');
+requireText(migrationHelper, /\$postgres_health["']? == healthy/, 'migration helper requires healthy PostgreSQL');
+requireText(migrationHelper, /export COMPOSE_PROJECT_NAME=edgebook/, 'migration helper pins Compose project identity');
+requireText(migrationHelper, /export EDGEBOOK_IMAGE_TAG="\$image_tag"/, 'migration helper pins rendered image tag');
+requireText(migrationHelper, /run --rm --no-deps --pull never migrate/, 'migration helper runs only the no-dependency migrator without pulling');
+rejectText(migrationHelper, /"\$\{compose\[@\]\}"\s+(?:up|stop|restart)\b/, 'migration helper changes application service state');
+rejectText(migrationHelper, /\bsource\s+"?\$?env_file|\bcat\s+"?\$?env_file/, 'migration helper reads secret env contents into the host shell or output');
+
+const rollbackGate = read('deploy/vps/scripts/verify-rollback-candidate.sh');
+requireText(rollbackGate, /\^\/opt\/edgebook\/releases\//, 'rollback verifier fixed release root');
+requireText(rollbackGate, /tradeQuantityCompatibility["']?:["']ctrader-quantity-projection-base-units-v1["']/, 'rollback verifier requires base-unit marker');
+requireText(rollbackGate, /ROLLBACK REJECTED: candidate UI predates canonical cTrader base-unit quantities/, 'rollback verifier fail-closed old-UI message');
+for (const contract of [
+  /brokerData\?\.quantityProjection/,
+  /base units from cTrader; lot conversion unavailable/,
+  /excluded from exposure: size is available in base units/,
+]) {
+  requireText(rollbackGate, contract, 'rollback verifier checks marker against candidate UI source');
+}
+
+const deployReadme = read('deploy/vps/README.md');
+requireText(deployReadme, /migrate-release\.sh[\s\S]*--release-dir[\s\S]*--env-file[\s\S]*--image-tag/, 'documented guarded migration invocation');
+requireText(deployReadme, /verify-rollback-candidate\.sh[\s\S]*--candidate/, 'documented rollback compatibility invocation');
+requireText(deployReadme, /5039ae4/, 'known incompatible rollback release warning');
+const ci = read('.github/workflows/edgebook-ci.yml');
+requireText(ci, /Exercise release compatibility gates[\s\S]*build-public\.sh[\s\S]*verify-rollback-candidate\.sh[\s\S]*tradeQuantityCompatibility/, 'CI exercises the built public compatibility marker and rollback verifier');
 
 for (const page of ['app.html', 'index.html', 'landing.html']) {
   rejectText(read(page), /enableFirebaseFallback|firebase-fallback|www\.gstatic\.com\/firebasejs/, `${page} Firebase runtime dependency`);

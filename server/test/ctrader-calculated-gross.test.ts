@@ -74,6 +74,8 @@ describe("cTrader calculated gross fallback", () => {
       depositAssetId: "15",
       conversionRate: "1",
       symbolSpec: { baseUnitsPerLot: 100, measurementUnit: "Oz" },
+      volumeInterpretation: "provider_filled_volume_cents_to_base_units",
+      contractSizeRequiredForCalculation: false,
       accountMoneyDigits: 2,
       baseAssetId: "17",
       baseAssetName: "XAU",
@@ -137,7 +139,7 @@ describe("cTrader calculated gross fallback", () => {
     expect(result?.calculatedGrossEvents[0]?.executionId).toBe("10");
   });
 
-  it("requires resolved base-asset identity and an attested or explicitly scaled contract size", () => {
+  it("requires resolved base-asset identity but not a contract size for base-unit P&L", () => {
     const deals = [deal(), deal({ dealId: "2", side: "SELL", role: "CLOSE", executionPrice: 4_410 })];
     expect(calculateCTraderGrossFallback({
       deals, openingSide: "BUY", symbol: { ...symbol, baseAssetId: null }, currency,
@@ -146,7 +148,7 @@ describe("cTrader calculated gross fallback", () => {
       deals, openingSide: "BUY", symbol,
       currency: { ...currency, assetNames: new Map([["15", "USD"]]) },
     })).toBeNull();
-    expect(calculateCTraderGrossFallback({
+    const noVerifiedContract = calculateCTraderGrossFallback({
       deals,
       openingSide: "BUY",
       symbol: {
@@ -156,7 +158,15 @@ describe("cTrader calculated gross fallback", () => {
         verifiedOverride: null,
       },
       currency,
-    })).toBeNull();
+    });
+    expect(noVerifiedContract?.calculatedGrossPnl).toBe("20");
+    expect(noVerifiedContract?.calculatedGrossProvenance.symbolSpec).toMatchObject({
+      baseUnitsPerLot: null,
+      lotSizeSource: "provider",
+      providerLotSizeScale: null,
+      measurementUnit: null,
+      quantityLotsConversionAvailable: false,
+    });
     const explicitProviderScale = calculateCTraderGrossFallback({
       deals,
       openingSide: "BUY",
@@ -172,6 +182,51 @@ describe("cTrader calculated gross fallback", () => {
     expect(explicitProviderScale?.calculatedGrossProvenance.symbolSpec).toMatchObject({
       lotSizeSource: "provider",
       providerLotSizeScale: "base_units_per_lot_v1",
+      quantityLotsConversionAvailable: true,
+    });
+  });
+
+  it("is invariant to unavailable or changing lot metadata because exact base units drive P&L", () => {
+    const deals = [
+      deal({ filledVolumeCents: 125n, executionPrice: 100 }),
+      deal({ dealId: "2", side: "SELL", role: "CLOSE", filledVolumeCents: 125n, executionPrice: 101 }),
+    ];
+    const unavailable = calculateCTraderGrossFallback({
+      deals,
+      openingSide: "BUY",
+      symbol: {
+        ...symbol,
+        lotSize: null,
+        lotSizeSource: "unavailable",
+        providerLotSizeScale: null,
+        verifiedOverride: null,
+      },
+      currency,
+    });
+    const unscaledProviderValue = calculateCTraderGrossFallback({
+      deals,
+      openingSide: "BUY",
+      symbol: {
+        ...symbol,
+        lotSize: 1_000,
+        lotSizeSource: "provider",
+        providerLotSizeScale: null,
+        verifiedOverride: null,
+      },
+      currency,
+    });
+
+    expect(unavailable?.calculatedGrossPnl).toBe("1.25");
+    expect(unscaledProviderValue?.calculatedGrossPnl).toBe("1.25");
+    expect(unavailable?.calculatedGrossProvenance.inputFingerprintSha256)
+      .toBe(unscaledProviderValue?.calculatedGrossProvenance.inputFingerprintSha256);
+    expect(unavailable?.calculatedGrossProvenance.symbolSpec).toMatchObject({
+      baseUnitsPerLot: null,
+      quantityLotsConversionAvailable: false,
+    });
+    expect(unscaledProviderValue?.calculatedGrossProvenance.symbolSpec).toMatchObject({
+      baseUnitsPerLot: null,
+      quantityLotsConversionAvailable: false,
     });
   });
 

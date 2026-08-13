@@ -98,6 +98,22 @@ jobs:
             bash -n "$script"
           done
 
+      - name: Exercise release compatibility gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_id="ci-${GITHUB_SHA::7}"
+          release_dir="/opt/edgebook/releases/$release_id"
+          sudo install -d -m 0755 "$release_dir"
+          sudo chown -R "$(id -u):$(id -g)" /opt/edgebook
+          ./deploy/vps/scripts/build-public.sh \
+            --mode rehearsal \
+            --destination "$release_dir/public"
+          ./deploy/vps/scripts/verify-rollback-candidate.sh \
+            --candidate "$release_dir"
+          node -e "const fs=require('fs'); const marker=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); if(marker.tradeQuantityCompatibility!=='ctrader-quantity-projection-base-units-v1') process.exit(1)" \
+            "$release_dir/public/edgebook-build.json"
+
       - name: Verify deployment script executable modes
         shell: bash
         run: |

@@ -10,7 +10,12 @@ import {
   CTraderCalculatedGrossError,
 } from "./calculated-gross.js";
 import { CTraderMcpError, CTraderMcpReadClient } from "./mcp.js";
-import { CTraderSyncError, type CTraderSyncCounters, type CTraderSyncResult } from "./sync.js";
+import {
+  CTraderSyncError,
+  lockAndValidateMappedAccountCurrency,
+  type CTraderSyncCounters,
+  type CTraderSyncResult,
+} from "./sync.js";
 
 const MAX_HISTORY_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_HISTORICAL_PREVIEW_SPLIT_DEPTH = 16;
@@ -275,7 +280,11 @@ type McpProjection = {
   direction: "Long" | "Short";
   entryPrice: string;
   exitPrice: string | null;
-  quantityLots: string;
+  /** Canonical stored quantity. Its unit is always declared in brokerData.quantityProjection. */
+  quantity: string;
+  quantityUnit: "lots" | "base_units";
+  quantityLots: string | null;
+  quantityBaseUnits: string;
   pnl: string | null;
   isOpen: boolean;
   tradeDate: string;
@@ -1046,7 +1055,11 @@ function applyVerifiedAccountSymbolOverrides(
         false,
       );
     }
-    if (providerSymbol.lotSize !== null && providerSymbol.lotSize !== override.baseUnitsPerLot) {
+    if (
+      providerSymbol.lotSize !== null
+      && providerSymbol.providerLotSizeScale === PROVIDER_BASE_UNITS_PER_LOT_SCALE
+      && providerSymbol.lotSize !== override.baseUnitsPerLot
+    ) {
       throw new CTraderSyncError(
         "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_PROVIDER_CONFLICT",
         `cTrader now reports a different authoritative contract size for ${providerSymbol.name}`,
@@ -1056,11 +1069,18 @@ function applyVerifiedAccountSymbolOverrides(
   }
   return symbols.map((symbol) => {
     const override = snapshot.overrides.get(symbol.id);
-    if (!override || symbol.lotSize !== null) return symbol;
+    if (
+      !override
+      || (
+        symbol.lotSize !== null
+        && symbol.providerLotSizeScale === PROVIDER_BASE_UNITS_PER_LOT_SCALE
+      )
+    ) return symbol;
     return {
       ...symbol,
       lotSize: override.baseUnitsPerLot,
       lotSizeSource: VERIFIED_SYMBOL_OVERRIDE_SOURCE,
+      providerLotSizeScale: null,
       verifiedOverride: override,
     };
   });
@@ -1236,10 +1256,11 @@ const REVIEWABLE_PROJECTION_ERRORS = new Set([
   "CTRADER_MCP_CALCULATION_INVALID",
 ]);
 
-// Missing symbol/contract metadata prevents a safe price/quantity projection,
-// but it does not invalidate exact provider money already tied to the same
-// stored execution lineage. Structural lineage errors intentionally do not
-// appear here and continue to clear the aggregate when quarantined.
+// A missing symbol or a legacy/invalid contract-size quarantine does not
+// invalidate exact provider money already tied to the same stored execution
+// lineage. Ordinary missing lot metadata now projects in explicit base units.
+// Structural lineage errors intentionally do not appear here and continue to
+// clear the aggregate when quarantined.
 const QUARANTINE_REASONS_PRESERVING_EXACT_MONEY = new Set([
   "CTRADER_MCP_SYMBOL_UNAVAILABLE",
   "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
@@ -1720,6 +1741,37 @@ function assetForSymbol(symbol: McpSymbol): McpProjection["asset"] {
   return null;
 }
 
+function quantityLotSpecification(symbol: McpSymbol): {
+  baseUnitsPerLot: number;
+  source: "provider_versioned" | "verified_account_symbol_override";
+  measurementUnit: string | null;
+} | null {
+  if (!Number.isSafeInteger(symbol.lotSize) || (symbol.lotSize ?? 0) <= 0) return null;
+  if (
+    symbol.lotSizeSource === "provider"
+    && symbol.providerLotSizeScale === PROVIDER_BASE_UNITS_PER_LOT_SCALE
+  ) {
+    return {
+      baseUnitsPerLot: symbol.lotSize ?? 0,
+      source: "provider_versioned",
+      measurementUnit: null,
+    };
+  }
+  const override = symbol.verifiedOverride;
+  if (
+    symbol.lotSizeSource !== VERIFIED_SYMBOL_OVERRIDE_SOURCE
+    || override === null
+    || override.symbolId !== symbol.id
+    || override.symbolName !== symbol.name
+    || override.baseUnitsPerLot !== symbol.lotSize
+  ) return null;
+  return {
+    baseUnitsPerLot: override.baseUnitsPerLot,
+    source: VERIFIED_SYMBOL_OVERRIDE_SOURCE,
+    measurementUnit: override.measurementUnit,
+  };
+}
+
 function projectMcpPosition(
   dealsValue: readonly McpDeal[],
   symbol: McpSymbol,
@@ -1782,13 +1834,6 @@ function projectMcpPosition(
     throw new CTraderSyncError(
       "CTRADER_MCP_VOLUME_SCALE_UNAVAILABLE",
       `The operator-verified contract size for ${symbol.name} is not paired with the verified cTrader filledVolume provenance`,
-      false,
-    );
-  }
-  if (symbol.lotSize === null) {
-    throw new CTraderSyncError(
-      "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
-      `cTrader did not provide an authoritative contract size for ${symbol.name}`,
       false,
     );
   }
@@ -1901,15 +1946,22 @@ function projectMcpPosition(
       false,
     );
   }
-  const lotDenominator = symbol.lotSize * 100;
-  if (!Number.isSafeInteger(lotDenominator) || lotDenominator <= 0) {
+  const lotSpecification = quantityLotSpecification(symbol);
+  const lotDenominator = lotSpecification === null ? null : lotSpecification.baseUnitsPerLot * 100;
+  if (lotDenominator !== null && (!Number.isSafeInteger(lotDenominator) || lotDenominator <= 0)) {
     throw new CTraderSyncError(
       "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
       `cTrader provided an unsafe contract size for ${symbol.name}`,
       false,
     );
   }
-  const quantityLots = Number(opened) / lotDenominator;
+  const quantityBaseUnits = decimal(Number(opened) / 100);
+  const quantityLots = lotDenominator === null ? null : decimal(Number(opened) / lotDenominator);
+  const quantityUnit = quantityLots === null ? "base_units" : "lots";
+  const quantity = quantityLots ?? quantityBaseUnits;
+  const quantityBaseAssetName = symbol.baseAssetId === null
+    ? null
+    : currency.assetNames.get(symbol.baseAssetId) ?? null;
   const asset = assetForSymbol(symbol);
   const providerExecutionLineage = {
     version: 1,
@@ -1934,7 +1986,10 @@ function projectMcpPosition(
     direction,
     entryPrice: decimal(entry),
     exitPrice: exit === null ? null : decimal(exit),
-    quantityLots: decimal(quantityLots),
+    quantity,
+    quantityUnit,
+    quantityLots,
+    quantityBaseUnits,
     pnl: totalPnl,
     isOpen: openVolume > 0n,
     tradeDate: entryLocal.date,
@@ -1954,6 +2009,22 @@ function projectMcpPosition(
       closedVolumeCents: closed.toString(),
       openVolumeCents: openVolume.toString(),
       providerExecutionLineage,
+      quantityProjection: {
+        version: 1,
+        value: quantity,
+        unit: quantityUnit,
+        lots: quantityLots,
+        baseUnits: quantityBaseUnits,
+        baseAssetId: symbol.baseAssetId,
+        baseAssetName: quantityBaseAssetName,
+        volumeScale: "unit_cents",
+        source: "provider_filled_volume",
+        contractSizeUsed: lotSpecification === null ? null : {
+          baseUnitsPerLot: lotSpecification.baseUnitsPerLot,
+          source: lotSpecification.source,
+          measurementUnit: lotSpecification.measurementUnit,
+        },
+      },
       pnlMethod: totalPnl === null
         ? "unavailable"
         : completeAuthoritativeCloseMoney
@@ -1989,6 +2060,8 @@ function projectMcpPosition(
         symbolCategoryName: symbol.category,
         reviewNeeded: attestedBoundaryInference || (closing.length > 0 && totalPnl === null) || asset === null,
         lotSizeSource: symbol.lotSizeSource,
+        quantityUnit,
+        quantityLotsConversionAvailable: quantityLots !== null,
         openingLineage: explicitOpening[0] === first
           ? "provider"
           : attestedBoundaryInference
@@ -2057,13 +2130,19 @@ function historicalCandidateForPosition(
   differences: JsonRecord;
   candidateData: JsonRecord;
 } {
-  const plausible = manualRows.filter((manual) =>
+  // Existing manual cTrader journals record quantity in lots. If this MCP
+  // projection only has base units, even a same-symbol/date row is not a safe
+  // duplicate candidate because its quantity identity cannot be compared.
+  const plausible = projection.quantityLots === null ? [] : manualRows.filter((manual) =>
     reconciliationSymbolName(manual.symbol) === reconciliationSymbolName(projection.symbol)
     && manual.direction === projection.direction
     && localDate(manual.trade_date) === projection.tradeDate);
   const strict = plausible.filter((manual) =>
     numericMatch(manual.entry_price, projection.entryPrice, 0.0005, 0.00000001)
     && numericMatch(manual.exit_price, projection.exitPrice, 0.0005, 0.00000001)
+    // Manual cTrader journals historically store lots. Never compare those
+    // against an execution-only base-unit quantity as if they shared a unit.
+    && projection.quantityLots !== null
     && numericMatch(manual.quantity, projection.quantityLots, 0.005, 0.00000001)
     && (manual.pnl === null || projection.pnl === null
       || numericMatch(manual.pnl, projection.pnl, 0.005, 0.01))
@@ -2171,7 +2250,10 @@ function projectedTradeRecord(projection: McpProjection): JsonRecord {
     direction: projection.direction,
     entryPrice: projection.entryPrice,
     exitPrice: projection.exitPrice,
+    quantity: projection.quantity,
+    quantityUnit: projection.quantityUnit,
     quantityLots: projection.quantityLots,
+    quantityBaseUnits: projection.quantityBaseUnits,
     pnl: projection.pnl,
     isOpen: projection.isOpen,
     tradeDate: projection.tradeDate,
@@ -2195,6 +2277,7 @@ function liveCandidateForPosition(
   manualRows: readonly LiveManualTradeRow[],
 ): LiveReconciliationMatch {
   const exactDate = historicalCandidateForPosition(projection, manualRows);
+  if (projection.quantityLots === null) return { ...exactDate, choices: [] };
   const exactChoices = manualRows.filter((manual) =>
     reconciliationSymbolName(manual.symbol) === reconciliationSymbolName(projection.symbol)
     && manual.direction === projection.direction
@@ -2211,6 +2294,7 @@ function liveCandidateForPosition(
       && manual.direction === projection.direction
       && numericMatch(manual.entry_price, projection.entryPrice, 0.0005, 0.00000001)
       && numericMatch(manual.exit_price, projection.exitPrice, 0.0005, 0.00000001)
+      && projection.quantityLots !== null
       && numericMatch(manual.quantity, projection.quantityLots, 0.005, 0.00000001);
   });
   if (adjacentChoices.length === 0) return { ...exactDate, choices: [] };
@@ -2952,6 +3036,12 @@ export class CTraderMcpSyncEngine {
         }
       };
       enforcePersistenceDeadline();
+      await lockAndValidateMappedAccountCurrency(client, {
+        userId: input.connection.user_id,
+        mappedAccountId: input.connection.mapped_account_id,
+        legacyMappedAccountId: input.connection.legacy_mapped_account_id,
+        providerCurrency: input.currency.accountCurrency,
+      });
       const locked = await client.query<LockedMcpConnectionAttestationRow & {
         status: HistoricalImportRow["status"];
         counters: unknown;
@@ -2963,7 +3053,9 @@ export class CTraderMcpSyncEngine {
                 connection.user_id AS connection_user_id,
                 connection.external_account_id,
                 connection.provider_environment,
-                connection.provider_metadata
+                connection.provider_metadata,
+                connection.mapped_account_id,
+                connection.legacy_mapped_account_id
          FROM ctrader_historical_imports import
          JOIN broker_connections connection
            ON connection.user_id=import.user_id
@@ -2978,6 +3070,8 @@ export class CTraderMcpSyncEngine {
            AND import.no_open_positions_attested=true
            AND import.attestation_version=1
            AND import.attestation_purpose='historical_preview_reconciliation'
+           AND connection.connection_mode='mcp_read'
+           AND connection.oauth_scope='mcp_read'
          FOR UPDATE OF import, connection`,
         [
           input.historicalImport.id,
@@ -3001,6 +3095,14 @@ export class CTraderMcpSyncEngine {
         throw new CTraderSyncError(
           "CTRADER_CONNECTION_CHANGED",
           "The cTrader connection changed during historical preview",
+          true,
+        );
+      }
+      if (state.mapped_account_id !== input.connection.mapped_account_id
+        || state.legacy_mapped_account_id !== input.connection.legacy_mapped_account_id) {
+        throw new CTraderSyncError(
+          "CTRADER_ACCOUNT_MAPPING_CHANGED",
+          "The mapped Edgebook account changed during the cTrader historical preview; retry with the current mapping",
           true,
         );
       }
@@ -3411,7 +3513,10 @@ export class CTraderMcpSyncEngine {
             direction: projection.direction,
             entryPrice: projection.entryPrice,
             exitPrice: projection.exitPrice,
+            quantity: projection.quantity,
+            quantityUnit: projection.quantityUnit,
             quantityLots: projection.quantityLots,
+            quantityBaseUnits: projection.quantityBaseUnits,
             pnl: projection.pnl,
             isOpen: projection.isOpen,
             tradeDate: projection.tradeDate,
@@ -3531,6 +3636,12 @@ export class CTraderMcpSyncEngine {
     operatorSymbolOverrides: VerifiedAccountSymbolOverrideSnapshot;
   }): Promise<CTraderSyncResult> {
     const persisted = await withTransaction(this.database, async (client) => {
+      await lockAndValidateMappedAccountCurrency(client, {
+        userId: input.connection.user_id,
+        mappedAccountId: input.connection.mapped_account_id,
+        legacyMappedAccountId: input.connection.legacy_mapped_account_id,
+        providerCurrency: input.currency.accountCurrency,
+      });
       const locked = await client.query<LockedMcpConnectionAttestationRow>(
         `SELECT connected, token_generation,
                 id AS connection_id, user_id AS connection_user_id,
@@ -3554,6 +3665,14 @@ export class CTraderMcpSyncEngine {
       }
       if (String(lockedConnection.token_generation) !== String(input.connection.token_generation)) {
         throw new CTraderSyncError("CTRADER_CONNECTION_CHANGED", "The cTrader connection changed during sync", true);
+      }
+      if (lockedConnection.mapped_account_id !== input.connection.mapped_account_id
+        || lockedConnection.legacy_mapped_account_id !== input.connection.legacy_mapped_account_id) {
+        throw new CTraderSyncError(
+          "CTRADER_ACCOUNT_MAPPING_CHANGED",
+          "The mapped Edgebook account changed during cTrader sync; retry with the current mapping",
+          true,
+        );
       }
       assertAccountlessHistoryAttestationUnchanged(lockedConnection, input.operatorAccountAttestation);
       assertVerifiedAccountSymbolOverridesUnchanged(lockedConnection, input.operatorSymbolOverrides);
@@ -3699,8 +3818,10 @@ export class CTraderMcpSyncEngine {
       const positionIds = [...new Set([
         ...input.fetched.map((deal) => deal.positionId),
         ...cursorPositionIds(input.cursorBefore.positionsAwaitingReviewIds),
+        ...cursorPositionIds(input.cursorBefore.positionsAwaitingLotConversionIds),
       ])];
       const awaitingReview = new Map<string, string>();
+      const awaitingLotConversion = new Set<string>();
       if (positionIds.length > 0) {
         const stored = await client.query<StoredExecutionRow>(
           `SELECT external_position_id, raw_payload
@@ -3757,10 +3878,12 @@ export class CTraderMcpSyncEngine {
             continue;
           }
           if (await this.stageLiveReconciliation(client, lockedConnectionState, projection)) {
+            if (projection.quantityLots === null) awaitingLotConversion.add(positionId);
             counters.positionsProjected += 1;
             continue;
           }
           await this.upsertProjection(client, lockedConnectionState, projection, counters);
+          if (projection.quantityLots === null) awaitingLotConversion.add(positionId);
           counters.positionsProjected += 1;
         }
       }
@@ -3789,6 +3912,7 @@ export class CTraderMcpSyncEngine {
           ? lastDeal.dealId
           : typeof input.cursorBefore.lastDealId === "string" ? input.cursorBefore.lastDealId : null,
         positionsAwaitingReviewIds: [...awaitingReview.keys()].sort(),
+        positionsAwaitingLotConversionIds: [...awaitingLotConversion].sort(),
       };
       const reviewReasonCounts = reasonCounts(awaitingReview);
       const reviewWarning = awaitingReview.size > 0
@@ -4378,7 +4502,7 @@ export class CTraderMcpSyncEngine {
           projection.direction,
           projection.entryPrice,
           projection.exitPrice,
-          projection.quantityLots,
+          projection.quantity,
           projection.pnl,
           projection.isOpen,
           projection.tradeDate,
@@ -4557,7 +4681,7 @@ export class CTraderMcpSyncEngine {
         projection.direction,
         projection.entryPrice,
         projection.exitPrice,
-        projection.quantityLots,
+        projection.quantity,
         projection.pnl,
         projection.isOpen,
         projection.tradeDate,

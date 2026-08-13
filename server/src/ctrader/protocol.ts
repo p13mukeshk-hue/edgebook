@@ -25,6 +25,8 @@ export const CTraderPayload = {
   DEAL_LIST_REQ: 2133,
   DEAL_LIST_RES: 2134,
   ERROR_RES: 2142,
+  CASH_FLOW_HISTORY_LIST_REQ: 2143,
+  CASH_FLOW_HISTORY_LIST_RES: 2144,
   ACCOUNTS_TOKEN_INVALIDATED_EVENT: 2147,
   CLIENT_DISCONNECT_EVENT: 2148,
   GET_ACCOUNTS_BY_ACCESS_TOKEN_REQ: 2149,
@@ -130,6 +132,60 @@ export type CTraderDeal = {
   raw: JsonObject;
 };
 
+// ProtoOAChangeBalanceType values from Spotware's official model schema. Keep
+// the provider enum name as well as the numeric value: the JSON gateway emits
+// names, and retaining an unknown future name lets sync preserve a new charge
+// instead of silently dropping it until Edgebook is upgraded.
+export const CTRADER_CHANGE_BALANCE_TYPES = {
+  BALANCE_DEPOSIT: 0,
+  BALANCE_WITHDRAW: 1,
+  BALANCE_DEPOSIT_STRATEGY_COMMISSION_INNER: 3,
+  BALANCE_WITHDRAW_STRATEGY_COMMISSION_INNER: 4,
+  BALANCE_DEPOSIT_IB_COMMISSIONS: 5,
+  BALANCE_WITHDRAW_IB_SHARED_PERCENTAGE: 6,
+  BALANCE_DEPOSIT_IB_SHARED_PERCENTAGE_FROM_SUB_IB: 7,
+  BALANCE_DEPOSIT_IB_SHARED_PERCENTAGE_FROM_BROKER: 8,
+  BALANCE_DEPOSIT_REBATE: 9,
+  BALANCE_WITHDRAW_REBATE: 10,
+  BALANCE_DEPOSIT_STRATEGY_COMMISSION_OUTER: 11,
+  BALANCE_WITHDRAW_STRATEGY_COMMISSION_OUTER: 12,
+  BALANCE_WITHDRAW_BONUS_COMPENSATION: 13,
+  BALANCE_WITHDRAW_IB_SHARED_PERCENTAGE_TO_BROKER: 14,
+  BALANCE_DEPOSIT_DIVIDENDS: 15,
+  BALANCE_WITHDRAW_DIVIDENDS: 16,
+  BALANCE_WITHDRAW_GSL_CHARGE: 17,
+  BALANCE_WITHDRAW_ROLLOVER: 18,
+  BALANCE_DEPOSIT_NONWITHDRAWABLE_BONUS: 19,
+  BALANCE_WITHDRAW_NONWITHDRAWABLE_BONUS: 20,
+  BALANCE_DEPOSIT_SWAP: 21,
+  BALANCE_WITHDRAW_SWAP: 22,
+  BALANCE_DEPOSIT_MANAGEMENT_FEE: 27,
+  BALANCE_WITHDRAW_MANAGEMENT_FEE: 28,
+  BALANCE_DEPOSIT_PERFORMANCE_FEE: 29,
+  BALANCE_WITHDRAW_FOR_SUBACCOUNT: 30,
+  BALANCE_DEPOSIT_TO_SUBACCOUNT: 31,
+  BALANCE_WITHDRAW_FROM_SUBACCOUNT: 32,
+  BALANCE_DEPOSIT_FROM_SUBACCOUNT: 33,
+  BALANCE_WITHDRAW_COPY_FEE: 34,
+  BALANCE_WITHDRAW_INACTIVITY_FEE: 35,
+  BALANCE_DEPOSIT_TRANSFER: 36,
+  BALANCE_WITHDRAW_TRANSFER: 37,
+  BALANCE_DEPOSIT_CONVERTED_BONUS: 38,
+  BALANCE_DEPOSIT_NEGATIVE_BALANCE_PROTECTION: 39,
+} as const;
+
+export type CTraderCashFlow = {
+  balanceHistoryId: string;
+  operationType: number | null;
+  operationName: string;
+  balance: bigint;
+  delta: bigint;
+  changeBalanceTimestamp: number;
+  balanceVersion: bigint | null;
+  equity: bigint | null;
+  moneyDigits: number | null;
+};
+
 export class CTraderProtocolError extends Error {
   constructor(message: string) {
     super(message);
@@ -167,10 +223,18 @@ export function protocolBigInt(value: unknown, label: string, positive = false):
 }
 
 function protocolSignedBigInt(value: unknown, label: string): bigint {
-  if (typeof value === "string" && /^-?(?:0|[1-9]\d*)$/.test(value)) return BigInt(value);
-  if (typeof value === "bigint") return value;
-  if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
-  throw new CTraderProtocolError(`${label} must be a lossless integer`);
+  const parsed = typeof value === "string" && /^-?(?:0|[1-9]\d*)$/.test(value)
+    ? BigInt(value)
+    : typeof value === "bigint"
+      ? value
+      : typeof value === "number" && Number.isSafeInteger(value)
+        ? BigInt(value)
+        : null;
+  if (parsed === null) throw new CTraderProtocolError(`${label} must be a lossless integer`);
+  if (parsed < -9_223_372_036_854_775_808n || parsed > 9_223_372_036_854_775_807n) {
+    throw new CTraderProtocolError(`${label} exceeds the signed 64-bit protocol range`);
+  }
+  return parsed;
 }
 
 function protocolNumber(value: unknown, label: string): number {
@@ -208,6 +272,26 @@ function protocolDealStatus(value: unknown): 2 | 3 | null {
   if (value === 2 || value === "2" || value === "FILLED") return 2;
   if (value === 3 || value === "3" || value === "PARTIALLY_FILLED") return 3;
   return null;
+}
+
+function protocolChangeBalanceType(value: unknown, label: string): { code: number | null; name: string } {
+  const names = CTRADER_CHANGE_BALANCE_TYPES as Record<string, number>;
+  if (typeof value === "string" && Object.hasOwn(names, value)) {
+    return { code: names[value] ?? null, name: value };
+  }
+  if (typeof value === "string" && /^BALANCE_[A-Z0-9_]{1,100}$/.test(value)) {
+    return { code: null, name: value };
+  }
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value)
+      ? Number(value)
+      : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 2_147_483_647) {
+    throw new CTraderProtocolError(`${label} must be a cTrader balance operation`);
+  }
+  const entry = Object.entries(names).find(([, code]) => code === parsed);
+  return { code: parsed, name: entry?.[0] ?? `BALANCE_UNKNOWN_${parsed}` };
 }
 
 function protocolTradeSide(value: unknown): "BUY" | "SELL" {
@@ -352,6 +436,31 @@ export function parseDeals(payload: JsonObject): { deals: CTraderDeal[]; hasMore
   });
   if (typeof payload.hasMore !== "boolean") throw new CTraderProtocolError("deal response hasMore must be boolean");
   return { deals, hasMore: payload.hasMore };
+}
+
+export function parseCashFlows(payload: JsonObject): CTraderCashFlow[] {
+  return optionalArray(payload.depositWithdraw, "depositWithdraw").map((entry, index) => {
+    const raw = requireObject(entry, `depositWithdraw[${index}]`);
+    const operation = protocolChangeBalanceType(raw.operationType, `depositWithdraw[${index}].operationType`);
+    return {
+      balanceHistoryId: protocolIntegerString(raw.balanceHistoryId, `depositWithdraw[${index}].balanceHistoryId`),
+      operationType: operation.code,
+      operationName: operation.name,
+      balance: protocolSignedBigInt(raw.balance, `depositWithdraw[${index}].balance`),
+      delta: protocolSignedBigInt(raw.delta, `depositWithdraw[${index}].delta`),
+      changeBalanceTimestamp: protocolTimestamp(
+        raw.changeBalanceTimestamp,
+        `depositWithdraw[${index}].changeBalanceTimestamp`,
+      ),
+      balanceVersion: raw.balanceVersion === undefined
+        ? null
+        : protocolSignedBigInt(raw.balanceVersion, `depositWithdraw[${index}].balanceVersion`),
+      equity: raw.equity === undefined
+        ? null
+        : protocolSignedBigInt(raw.equity, `depositWithdraw[${index}].equity`),
+      moneyDigits: protocolMoneyDigits(raw.moneyDigits, `depositWithdraw[${index}].moneyDigits`),
+    };
+  });
 }
 
 export function parseTraderMetadata(payload: JsonObject): CTraderTraderMetadata {

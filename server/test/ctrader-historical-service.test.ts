@@ -434,6 +434,67 @@ describe("cTrader historical preview service", () => {
     expect(candidateLock).toBeGreaterThan(connectionLock);
   });
 
+  it("publishes a reviewed calculated-gross trade in explicit base units without inventing lots", async () => {
+    const baseUnitProjection = {
+      positionId: "9001",
+      symbol: "XAUUSD",
+      asset: "cm",
+      direction: "Long",
+      entryPrice: "2400",
+      exitPrice: "2410",
+      quantity: "10",
+      quantityUnit: "base_units",
+      quantityLots: null,
+      quantityBaseUnits: "10",
+      pnl: null,
+      isOpen: false,
+      tradeDate: "2026-08-11",
+      entryAt: "2026-08-11T04:00:00.000Z",
+      exitAt: "2026-08-11T05:00:00.000Z",
+      entryTime: "09:30:00",
+      exitTime: "10:30:00",
+      brokerData: {
+        provider: "ctrader",
+        quantityProjection: {
+          version: 1, value: "10", unit: "base_units", lots: null, baseUnits: "10",
+          volumeScale: "unit_cents", source: "provider_filled_volume",
+        },
+        calculatedGrossPnl: "100",
+        calculatedGrossCurrency: "USD",
+        calculatedGrossMethod: "fill_price_base_units_identity_conversion_v1",
+        calculatedGrossProvenance: {
+          version: 1, feesIncluded: false, analyticsTreatment: "excluded_from_net_pnl",
+        },
+      },
+    };
+    const { service, queries } = reviewHarness({
+      candidateOverrides: { projected_trade: baseUnitProjection },
+    });
+    const listed = await service.listReconciliationCandidates(userId, connectionId, importId);
+    expect(listed.candidates[0]).toMatchObject({
+      allowedActions: ["link_manual", "publish_separate", "reject"],
+      brokerTrade: { quantity: "10", quantityUnit: "base_units", quantityLots: null, quantityBaseUnits: "10" },
+    });
+    const request = "00000000-0000-4000-8000-000000000073";
+    await service.resolveReconciliationCandidate({
+      auth,
+      connectionId,
+      candidateId,
+      importId,
+      action: "publish_separate",
+      expectedVersion: 1,
+      clientRequestId: request,
+      idempotencyKey: request,
+    });
+    const insert = queries.find((entry) => entry.sql.includes("INSERT INTO trades"));
+    expect(insert?.values[9]).toBe("10");
+    expect(insert?.values[10]).toBeNull();
+    expect(JSON.parse(String(insert?.values[17]))).toMatchObject({
+      quantityProjection: { value: "10", unit: "base_units", lots: null, baseUnits: "10" },
+      calculatedGrossPnl: "100",
+    });
+  });
+
   it("detects a normal-sync identity owner before a reviewed link can race it", async () => {
     const { service, queries } = reviewHarness({ identityConflict: true });
     const decisionId = "00000000-0000-4000-8000-000000000073";

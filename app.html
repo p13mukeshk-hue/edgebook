@@ -1229,8 +1229,8 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .badge-review:hover{filter:brightness(1.15)}
 .broker-owned-note{display:none;margin:0 0 14px;padding:10px 12px;border:1px solid var(--accent-border);border-radius:9px;background:var(--accent-wash-soft);color:var(--text2);font-size:11px;line-height:1.55}
 .broker-owned-note.visible{display:block}
-.broker-calculated-gross{display:none;margin-top:7px;padding-top:7px;border-top:1px solid var(--accent-border);color:var(--text1)}
-.broker-calculated-gross.visible{display:block}
+.broker-calculated-gross,.broker-pnl-breakdown{display:none;margin-top:7px;padding-top:7px;border-top:1px solid var(--accent-border);color:var(--text1)}
+.broker-calculated-gross.visible,.broker-pnl-breakdown.visible{display:block}
 .trade-date-help{margin-top:5px;color:var(--text3);font-size:10px;line-height:1.45}
 .trade-date-help:empty{display:none}
 </style>
@@ -2262,7 +2262,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
   <div class="modal">
     <div class="modal-head"><div class="modal-title" id="trade-modal-title">Log a trade</div><button class="modal-close" onclick="closeModal('trade-modal')"><i class="fa-solid fa-xmark"></i></button></div>
     <div class="modal-body">
-      <div id="broker-owned-note" class="broker-owned-note"><i class="fa-solid fa-shield-halved" style="color:var(--accent2);margin-right:5px"></i> Broker prices, size, symbol and execution timestamps are read-only and update automatically from cTrader. Journal date, stop loss, take profit, playbook, psychology, notes and screenshots remain yours.<div id="broker-calculated-gross" class="broker-calculated-gross"></div></div>
+      <div id="broker-owned-note" class="broker-owned-note"><i class="fa-solid fa-shield-halved" style="color:var(--accent2);margin-right:5px"></i> Broker prices, size, symbol and execution timestamps are read-only and update automatically from cTrader. Journal date, stop loss, take profit, playbook, psychology, notes and screenshots remain yours.<div id="broker-pnl-breakdown" class="broker-pnl-breakdown"></div><div id="broker-calculated-gross" class="broker-calculated-gross"></div></div>
       <div class="section-divider">Trade details</div>
       <div class="form-grid three" style="margin-bottom:14px">
         <div class="field" id="tf-asset"><label>Asset class</label><select id="t-asset" onchange="updateSymbolDropdown();updateSizeLabel()"><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select></div>
@@ -4256,7 +4256,8 @@ function dupTradeCard(t, compareWith){
   const date  = t.date || (t.fill_timestamp?String(t.fill_timestamp).slice(0,10):'—');
   const entry = t.entry??t.average_price??null;
   const exit  = t.exit??null;
-  const size  = t.size??t.quantity??null;
+  const size  = getTradeSizeValue(t);
+  const sizeLabel=getSizeLabel(t);
   const pnl   = t.pnl??null;
   const strat = t.strategy||'—';
   const notes = t.notes ? (t.notes.length>80?t.notes.slice(0,80)+'…':t.notes) : '—';
@@ -4266,7 +4267,7 @@ function dupTradeCard(t, compareWith){
   if(compareWith){
     const cEntry = compareWith.entry??compareWith.average_price??null;
     const cExit  = compareWith.exit??null;
-    const cSize  = compareWith.size??compareWith.quantity??null;
+    const cSize  = getTradeSizeValue(compareWith);
     const cPnl   = compareWith.pnl??null;
     d.entry = cEntry!==null && entry!==null && Math.abs(cEntry-entry)>0.001;
     d.exit  = String(cExit)!==String(exit);
@@ -4282,7 +4283,7 @@ function dupTradeCard(t, compareWith){
     ${_dupFld('Date',     formatDate(date))}
     ${_dupFld('Entry',    entry!==null?entry.toFixed(4):'—', d.entry)}
     ${_dupFld('Exit',     exit!==null?exit.toFixed(4):'—',  d.exit)}
-    ${_dupFld('Size',     size!==null?String(size):'—',     d.size)}
+    ${_dupFld(`Size (${sizeLabel})`,size!==null?String(size):'—',d.size)}
     ${_dupFld('P&L',      pnl!==null?(pnl>=0?'+':'')+pnl.toFixed(2):'—', d.pnl)}
     ${_dupFld('Strategy', strat)}
     ${_dupFld('Notes',    notes)}
@@ -4449,6 +4450,10 @@ function findLocalDuplicate(incoming,candidates=trades){
     if(String(existing?.accountId||'')!==String(incoming?.accountId||''))return false;
     if(String(existing?.instrument||'')!==String(incoming?.instrument||''))return false;
     if(String(existing?.optionType||'')!==String(incoming?.optionType||''))return false;
+    const existingQuantity=readCTraderQuantityProjection(existing);
+    const incomingQuantity=readCTraderQuantityProjection(incoming);
+    if((existingQuantity?.unit==='base_units'||incomingQuantity?.unit==='base_units')&&
+       (existingQuantity?.unit!==incomingQuantity?.unit||existingQuantity?.baseAssetName!==incomingQuantity?.baseAssetName))return false;
     return duplicateNumericClose(existing.entry,incoming.entry,.005)
       && duplicateNumericClose(existing.exit,incoming.exit,.005)
       && duplicateNumericClose(existing.size,incoming.size,.02);
@@ -4558,6 +4563,25 @@ function ctraderAccountOptions(selected=''){
     `<option value="${escapeCtraderText(account.id)}" ${String(account.id)===String(selected)?'selected':''}>${escapeCtraderText(account.name)}</option>`
   ).join('');
 }
+function ctraderCashFlowLabel(value){
+  const words=String(value||'Account adjustment').replace(/^BALANCE_/,'').split('_').filter(Boolean);
+  return words.map(word=>word==='GSL'||word==='IB'?word:word.charAt(0)+word.slice(1).toLowerCase()).join(' ')||'Account adjustment';
+}
+function ctraderCashFlowAmount(flow){
+  const amount=String(flow?.amount??'');
+  if(!/^-?\d+(?:\.\d+)?$/.test(amount)){
+    const raw=String(flow?.rawAmountUnits??'');
+    return /^-?\d+$/.test(raw)?`Exact scale unavailable (raw provider units ${raw})`:'Amount unavailable';
+  }
+  return `${amount.startsWith('-')||amount==='0'?amount:`+${amount}`} ${String(flow?.currency||'').trim()}`.trim();
+}
+function ctraderAccountCashFlowLedger(status,isMcpConnection){
+  if(isMcpConnection)return '';
+  const flows=Array.isArray(status?.accountCashFlows)?status.accountCashFlows.filter(flow=>flow&&typeof flow==='object'):[];
+  const rows=flows.slice(0,10).map(flow=>`<div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:7px 0;border-top:1px solid var(--border)"><div style="min-width:0"><div style="color:var(--text2);font-weight:600">${escapeCtraderText(ctraderCashFlowLabel(flow.operationName))}</div><div style="font-size:10px;color:var(--text3)">${escapeCtraderText(formatCtraderWhen(flow.occurredAt))} &middot; Broker ledger ID ${escapeCtraderText(flow.balanceHistoryId||'unknown')}</div></div><div style="font-variant-numeric:tabular-nums;color:${flow?.scalingStatus==='money_digits_unavailable'?'var(--text3)':String(flow.amount||'').startsWith('-')?'var(--red)':'var(--green)'}">${escapeCtraderText(ctraderCashFlowAmount(flow))}</div></div>`).join('');
+  const body=rows||'<div style="padding-top:7px;color:var(--text3)">No separate account cash-flow entries have been returned by cTrader yet.</div>';
+  return `<details style="margin:0 16px 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg2)"><summary style="cursor:pointer;color:var(--text2);font-size:11px;font-weight:700"><i class="fa-solid fa-receipt" style="color:var(--accent2);margin-right:6px"></i>Broker account cash-flow ledger${flows.length?` (${flows.length}${flows.length===50?'+':''} recent)`:''}</summary><div style="padding-top:7px;font-size:11px;line-height:1.45"><div style="color:var(--text3);margin-bottom:5px">Official cTrader account adjustments such as GSL, rollover, swap, copy or management fees, dividends, rebates, deposits and withdrawals appear here. cTrader supplies no position/deal link for these rows, so Edgebook does not assign them to a trade and does not assume an absent charge is zero.</div>${body}</div></details>`;
+}
 function ctraderConnectionCard(connection,status){
   const current={...connection,...(status?.connection&&typeof status.connection==='object'?status.connection:{})};
   const id=String(current.id);
@@ -4614,12 +4638,14 @@ function ctraderConnectionCard(connection,status){
       : vpsCtraderState.mcpEnabled
         ? '<button class="btn-accent" onclick="openVpsCtraderMcp()"><i class="fa-solid fa-arrow-rotate-right"></i> Reconnect</button>'
         : '<button class="btn-ghost" disabled>Reconnect unavailable</button>';
+  const accountCashFlowLedger=ctraderAccountCashFlowLedger(status,isMcpConnection);
   return `<div class="broker-account-card">
     <div class="broker-account-card-header">
       <div style="min-width:0"><div class="broker-account-card-title" style="flex-wrap:wrap"><i class="fa-solid fa-chart-line" style="color:var(--accent2)"></i>${escapeCtraderText(title)} <span class="ctrader-env ${current.environment==='demo'?'demo':''}">${escapeCtraderText(current.environment||'')}</span></div><div class="broker-account-card-sub">${broker}${login}Account ${escapeCtraderText(current.ctidTraderAccountId)}</div></div>
       <div class="broker-account-card-actions"><span style="font-size:10px;padding:3px 9px;border-radius:14px;background:${stateBg};color:${stateColor}">${busy?'<i class="fa-solid fa-spinner fa-spin"></i> ':''}${stateText}</span>${reauth?reconnectAction:`<button class="btn-ghost" onclick="syncVpsCtraderConnection(${idArg},this)" ${busy?'disabled':''}><i class="fa-solid fa-rotate"></i> Sync now</button><button class="btn-ghost" onclick="disconnectVpsCtraderConnection(${idArg})" style="color:var(--red)"><i class="fa-solid fa-unlink"></i></button>`}</div>
     </div>
     <div style="padding:10px 16px;font-size:11px;color:var(--text3);line-height:1.7"><div><i class="fa-regular fa-clock"></i> Last sync: ${escapeCtraderText(formatCtraderWhen(current.lastSyncAt))}${counterText}</div><div><i class="fa-solid fa-plug"></i> Connection: ${escapeCtraderText(authModeLabel)}</div><div><i class="fa-solid fa-shield-halved"></i> ${isMcpConnection?'Edgebook invokes read tools only; the cTrader Remote MCP token itself remains trading-capable.':'Official OAuth uses read-only account access.'}</div><div><i class="fa-solid fa-wallet"></i> Edgebook account: ${escapeCtraderText(mappedAccount?.name||'Not mapped')}</div>${current.accountCurrency?`<div><i class="fa-solid fa-coins"></i> Account currency: ${escapeCtraderText(current.accountCurrency)}</div>`:''}${warningText?`<div style="margin-top:6px;color:var(--amber)"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeCtraderText(warningText)}</div>`:''}${error?`<div style="margin-top:6px;color:var(--red)"><i class="fa-solid fa-circle-exclamation"></i> ${escapeCtraderText(error)}</div>`:''}</div>
+    ${accountCashFlowLedger}
     <section class="ctrader-live-review" aria-labelledby="ctrader-live-title-${liveReviewId}"><div class="ctrader-live-review-head"><div><div id="ctrader-live-title-${liveReviewId}" class="ctrader-live-review-title"><i class="fa-solid fa-code-compare" style="color:var(--amber);margin-right:6px"></i>Possible cTrader matches</div><div class="ctrader-live-review-sub">Nothing is merged automatically. Merge keeps one record: the chosen manual trade ID becomes cTrader-linked while its strategy, psychology, notes, custom fields, and screenshots survive. Manual P&amp;L survives only when cTrader has no verified P&amp;L; otherwise the broker value is used.</div></div><div style="display:flex;align-items:center;gap:7px"><span class="ctrader-live-review-count" id="ctrader-live-count-${liveReviewId}">${liveLoading?'…':livePending}</span><button class="btn-ghost" type="button" onclick="refreshLiveCtraderReconciliation(${idArg})" ${liveLoading?'disabled':''}><i class="fa-solid fa-rotate${liveLoading?' fa-spin':''}"></i> Refresh</button></div></div><div id="ctrader-live-list-${liveReviewId}" class="ctrader-live-review-list" data-connection-id="${escapeCtraderText(id)}"></div></section>
     ${reauth?'':`<div class="ctrader-history-summary"><div><strong>${escapeCtraderText(historyActionLabel)}</strong><div style="margin-top:2px;color:var(--text3)">${escapeCtraderText(historySummaryText)}</div></div><button class="btn-ghost" type="button" onclick="openCtraderHistoryModal(${idArg})" ${historyBusy?'disabled':''}>${historyBusy?'<i class="fa-solid fa-spinner fa-spin"></i> Preparing preview':`<i class="fa-solid fa-clock-rotate-left"></i> ${escapeCtraderText(historyActionLabel)}`}</button></div>`}
   </div>`;
@@ -4741,7 +4767,13 @@ function renderLiveCtraderCandidate(connectionId,candidate){
 
   const columns=document.createElement('div');columns.className='ctrader-review-columns';
   const brokerColumn=document.createElement('div');brokerColumn.className='ctrader-review-column';const brokerTitle=document.createElement('h5');brokerTitle.textContent='Verified cTrader facts';brokerColumn.append(brokerTitle);
-  for(const [label,value] of [['Broker trade',broker.id],['Position',broker.positionId],['Date / time',broker.entryAt||broker.tradeDate],['Direction',broker.direction],['Entry',broker.entryPrice],['Exit',broker.exitPrice],['Size (lots)',broker.quantityLots],['P&L',broker.pnl],['Position state',broker.isOpen===true?'Open':broker.isOpen===false?'Closed':null]])appendLiveCtraderFact(brokerColumn,label,value);
+  const brokerQuantityUnit=broker.quantityUnit==='base_units'
+    ? 'base units'
+    : broker.quantityUnit==='lots'||broker.quantityLots!=null?'lots':'unit not verified';
+  const brokerQuantity=broker.quantityUnit==='base_units'
+    ? broker.quantityBaseUnits??broker.quantity
+    : broker.quantityUnit==='lots'||broker.quantityLots!=null?broker.quantityLots??broker.quantity:broker.quantity;
+  for(const [label,value] of [['Broker trade',broker.id],['Position',broker.positionId],['Date / time',broker.entryAt||broker.tradeDate],['Direction',broker.direction],['Entry',broker.entryPrice],['Exit',broker.exitPrice],[`Size (${brokerQuantityUnit})`,brokerQuantity],['P&L',broker.pnl],['Position state',broker.isOpen===true?'Open':broker.isOpen===false?'Closed':null]])appendLiveCtraderFact(brokerColumn,label,value);
   const manualColumn=document.createElement('div');manualColumn.className='ctrader-review-column';const manualTitle=document.createElement('h5');manualTitle.textContent=manual?.deleted?'Deleted manual journal (protected)':'Manual journal details preserved';manualColumn.append(manualTitle);
   if(manual){
     const preserved=value=>value===true?'Saved and preserved':value===false?'None saved':'Protected';
@@ -5185,7 +5217,13 @@ function renderCtraderCandidate(candidate){
   head.append(heading,badge);card.append(head);
   const columns=document.createElement('div');columns.className='ctrader-review-columns';
   const brokerColumn=document.createElement('div');brokerColumn.className='ctrader-review-column';const brokerTitle=document.createElement('h5');brokerTitle.textContent=classification==='execution-only'?'Broker-provided execution data (incomplete)':'Broker-provided facts';brokerColumn.append(brokerTitle);
-  for(const [label,value] of [['Position / deal',broker?.positionId||broker?.externalTradeKey||broker?.dealId],['Date / time',broker?.entryAt||broker?.date||candidate?.boundaryAt],['Symbol',broker?.symbol],['Direction',broker?.direction],['Entry',broker?.entryPrice??broker?.entry],['Exit',broker?.exitPrice??broker?.exit],['Size',broker?.quantityLots??broker?.quantity??broker?.size],['P&L',broker?.pnl]])appendCtraderReviewFact(brokerColumn,label,value);
+  const brokerQuantityUnit=broker?.quantityUnit==='base_units'
+    ? 'base units'
+    : broker?.quantityUnit==='lots'||broker?.quantityLots!=null?'lots':'unit not verified';
+  const brokerQuantity=broker?.quantityUnit==='base_units'
+    ? broker?.quantityBaseUnits??broker?.quantity
+    : broker?.quantityUnit==='lots'||broker?.quantityLots!=null?broker?.quantityLots??broker?.quantity:broker?.quantity??broker?.size;
+  for(const [label,value] of [['Position / deal',broker?.positionId||broker?.externalTradeKey||broker?.dealId],['Date / time',broker?.entryAt||broker?.date||candidate?.boundaryAt],['Symbol',broker?.symbol],['Direction',broker?.direction],['Entry',broker?.entryPrice??broker?.entry],['Exit',broker?.exitPrice??broker?.exit],[`Size (${brokerQuantityUnit})`,brokerQuantity],['P&L',broker?.pnl]])appendCtraderReviewFact(brokerColumn,label,value);
   const manualColumn=document.createElement('div');manualColumn.className='ctrader-review-column';const manualTitle=document.createElement('h5');manualTitle.textContent=manual?.deletedAt||manual?.deleted?'Protected deleted manual record':'Existing manual journal (preserved)';manualColumn.append(manualTitle);
   if(manual){
     const preserved=value=>value===true?'Saved and preserved':value===false?'None saved':'Protected';
@@ -6987,6 +7025,41 @@ document.addEventListener('DOMContentLoaded',refreshDictationControls);
 
 const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-time'];
 function isCTraderTrade(trade){return String(trade?.sourceSystem||trade?.source||trade?.broker||'').toLowerCase()==='ctrader';}
+function readCTraderQuantityProjection(trade){
+  if(!isCTraderTrade(trade))return null;
+  const value=trade?.brokerData?.quantityProjection;
+  if(!value||value.version!==1||value.volumeScale!=='unit_cents'||value.source!=='provider_filled_volume')return null;
+  if(value.unit!=='lots'&&value.unit!=='base_units')return null;
+  if(typeof value.value!=='string'||!/^\d+(?:\.\d+)?$/.test(value.value))return null;
+  const baseAssetName=typeof value.baseAssetName==='string'&&/^[A-Z0-9._-]{1,20}$/.test(value.baseAssetName)?value.baseAssetName:null;
+  return {unit:value.unit,value:value.value,baseAssetName};
+}
+function getTradeSizeValue(trade){
+  return readCTraderQuantityProjection(trade)?.value??trade?.size??trade?.quantity??null;
+}
+function cTraderAccountCurrency(trade){
+  if(!isCTraderTrade(trade))return null;
+  const value=String(trade?.brokerData?.accountCurrency||'').trim().toUpperCase();
+  return /^[A-Z0-9._-]{1,20}$/.test(value)?value:null;
+}
+function tradePnlCurrency(trade){
+  return cTraderAccountCurrency(trade)||normalizeFxCurrency(acctCur(trade?.accountId))||null;
+}
+function tradeMoneyPrefix(trade){
+  const providerCurrency=cTraderAccountCurrency(trade);
+  return providerCurrency?calculatedGrossCurrencyPrefix(providerCurrency):acctCur(trade?.accountId);
+}
+function tradePnlToUSD(trade,amount=trade?.pnl){
+  const currency=tradePnlCurrency(trade);
+  return currency?FxRates.toUSD(amount,currency):Number.NaN;
+}
+function tradePnlInAccountCurrency(trade,amount=trade?.pnl){
+  const value=Number(amount);if(!Number.isFinite(value))return null;
+  const providerCurrency=cTraderAccountCurrency(trade);
+  if(!providerCurrency)return value;
+  const mappedCurrency=normalizeFxCurrency(acctCur(trade?.accountId));
+  return mappedCurrency===providerCurrency?value:null;
+}
 const CTRADER_CALCULATED_GROSS_METHOD='fill_price_base_units_identity_conversion_v1';
 function cTraderCalculatedGross(trade){
   if(!isCTraderTrade(trade)||tradeHasPnl(trade))return null;
@@ -7013,6 +7086,33 @@ function calculatedGrossText(gross){
   const sign=gross.sign>0?'+':gross.sign<0?'−':'';
   return `${sign}${calculatedGrossCurrencyPrefix(gross.currency)}${amount}`;
 }
+function cTraderExactPnlBreakdown(trade){
+  if(!isCTraderTrade(trade)||!tradeHasPnl(trade))return null;
+  const data=trade?.brokerData||{},coverage=data.pnlComponentsCoverage||{};
+  if(data.pnlMethod!=='provider_close_detail_money_digits'||coverage.version!==1||coverage.source!=='ProtoOAClosePositionDetail'||coverage.tradeLevelExact!==true)return null;
+  if(coverage.grossProfit!==true||coverage.brokerCommission!==true||coverage.swap!==true||coverage.pnlConversionFee!==true)return null;
+  if(coverage.otherAccountCashFlowsIncluded!==false||coverage.otherAccountCashFlowsAttribution!=='not_provided_by_position')return null;
+  const currency=String(data.accountCurrency||'').toUpperCase();
+  if(!/^[A-Z0-9._-]{1,20}$/.test(currency))return null;
+  const decimal=value=>{
+    const text=String(value??'');
+    return text.length<=128&&/^-?(?:0|[1-9]\d*)(?:\.\d{1,18})?$/.test(text)?text:null;
+  };
+  const values={net:decimal(trade?.exact?.pnl??trade.pnl),gross:decimal(data.grossProfit),commission:decimal(data.commission),swap:decimal(data.swap),conversionFee:decimal(data.pnlConversionFee)};
+  if(Object.values(values).some(value=>value===null))return null;
+  const precision=Math.max(...Object.values(values).map(value=>(value.split('.')[1]||'').length));
+  const scaled=value=>{const negative=value.startsWith('-'),[whole,fraction='']=value.replace(/^-/,'').split('.');const amount=BigInt(`${whole}${fraction.padEnd(precision,'0')}`);return negative?-amount:amount;};
+  if(scaled(values.net)!==scaled(values.gross)+scaled(values.swap)+scaled(values.commission)-scaled(values.conversionFee))return null;
+  return {...values,currency};
+}
+function cTraderProviderMoney(value,currency,forceSign=true){
+  const text=String(value),negative=text.startsWith('-'),absolute=negative?text.slice(1):text;
+  return `${negative?'−':forceSign?'+':''}${calculatedGrossCurrencyPrefix(currency)}${absolute}`;
+}
+function cTraderExactPnlBreakdownText(breakdown){
+  if(!breakdown)return '';
+  return `Broker trade net ${cTraderProviderMoney(breakdown.net,breakdown.currency)} ${breakdown.currency} = gross ${cTraderProviderMoney(breakdown.gross,breakdown.currency)} + swap ${cTraderProviderMoney(breakdown.swap,breakdown.currency)} + commission ${cTraderProviderMoney(breakdown.commission,breakdown.currency)} − conversion fee ${cTraderProviderMoney(breakdown.conversionFee,breakdown.currency,false)}. These closing-deal components are provider-exact. Separate account-level cash flows or charges are not attributed to this position by cTrader and are not assumed to be zero.`;
+}
 function cTraderProviderTradeDate(trade){
   const providerDate=String(trade?.brokerData?.providerTradeDate||'');
   if(isRealIsoDate(providerDate))return providerDate;
@@ -7036,6 +7136,8 @@ function setTradeBrokerOwnedMode(trade){
   const locked=isCTraderTrade(trade);
   CTRADER_OWNED_FORM_IDS.forEach(id=>{const element=document.getElementById(id);if(element)element.disabled=locked;});
   document.getElementById('broker-owned-note')?.classList.toggle('visible',locked);
+  const exactElement=document.getElementById('broker-pnl-breakdown'),exact=locked?cTraderExactPnlBreakdown(trade):null;
+  if(exactElement){exactElement.classList.toggle('visible',!!exact);exactElement.textContent=cTraderExactPnlBreakdownText(exact);}
   const grossElement=document.getElementById('broker-calculated-gross'),gross=locked?cTraderCalculatedGross(trade):null;
   if(grossElement){
     grossElement.classList.toggle('visible',!!gross);
@@ -7052,6 +7154,16 @@ function setTradeBrokerOwnedMode(trade){
     dateHelp.textContent=locked
       ? `${providerDate?`cTrader-derived date${providerTimeZone?` (${providerTimeZone})`:''}: ${providerDate}. `:''}${entryAt?`Exact open timestamp: ${entryAt}. `:''}You can adjust the journal date; broker sync will not overwrite it.`
       : '';
+  }
+  const sizeLabelElement=document.querySelector('label[for-size]');
+  const quantity=locked?readCTraderQuantityProjection(trade):null;
+  if(sizeLabelElement&&quantity?.unit==='base_units'){
+    const assetLabel=quantity.baseAssetName?`${quantity.baseAssetName} `:'';
+    sizeLabelElement.innerHTML=`Size <span style="color:var(--text3);font-weight:400;font-size:10px">(${assetLabel}base units from cTrader; lot conversion unavailable)</span> <span style="color:var(--red)">*</span>`;
+  }else if(sizeLabelElement&&quantity?.unit==='lots'){
+    sizeLabelElement.innerHTML='Lots <span style="color:var(--text3);font-weight:400;font-size:10px">(converted using verified cTrader contract metadata)</span> <span style="color:var(--red)">*</span>';
+  }else if(!locked){
+    updateSizeLabel();
   }
 }
 
@@ -7093,7 +7205,7 @@ function openTradeModal(id=null){
     document.getElementById('t-account').value=t.accountId||'';
     document.getElementById('t-entry').value=t.entry;
     document.getElementById('t-exit').value=t.exit??'';
-    document.getElementById('t-size').value=t.size;
+    document.getElementById('t-size').value=getTradeSizeValue(t);
     document.getElementById('t-sl').value=t.sl??'';
     document.getElementById('t-tp').value=t.tp??'';
     document.getElementById('t-date').value=t.date||todayIST();
@@ -7421,7 +7533,14 @@ function sizeLabel(asset, symbol, instrument) {
 
 /** Returns P&L breakdown string shown in trade row tooltip */
 function pnlBreakdown(t) {
+  const exact=cTraderExactPnlBreakdown(t);
+  if(exact)return cTraderExactPnlBreakdownText(exact);
   if (t.pnl === null || t.exit === null) return '';
+  const cTraderQuantity=readCTraderQuantityProjection(t);
+  if(cTraderQuantity?.unit==='base_units'){
+    const label=cTraderQuantity.baseAssetName?`${cTraderQuantity.baseAssetName} base units`:'base units';
+    return `Provider-reported net P&L · ${cTraderQuantity.value} ${label}`;
+  }
   const sym = (t.symbol || '').toUpperCase();
   // For INR options: diff direction comes from optionType, not direction field
   const instrumentKind=String(t.instrument||'').toLowerCase();
@@ -7509,8 +7628,12 @@ async function saveTrade(){
   if(errors.length){ showToast(errors[0], 'error'); return; }
 
   const asset=document.getElementById('t-asset').value;
-  const pnl = calculatePnL(asset,sym,dir,entry,exit,size,position,instrument);
   const existingTrade=editId?trades.find(item=>String(item.id)===String(editId)):null;
+  // A cTrader edit only changes journal-owned fields. Never reinterpret its
+  // provider quantity (which may be base units) through the manual lot engine.
+  const pnl=isCTraderTrade(existingTrade)
+    ? existingTrade.pnl
+    : calculatePnL(asset,sym,dir,entry,exit,size,position,instrument);
   const cfVals={...(existingTrade?.custom||{})};
   S.customFields.forEach(cf=>{ const el=document.getElementById('cf-v-'+safeDomId(cf.id)); if(el) cfVals[cf.id]=cf.type==='checkbox'?el.checked:el.value; });
   const playbookSnapshot=readTradePlaybook(existingTrade);cfVals.playbook=playbookSnapshot;
@@ -7854,9 +7977,8 @@ function updateMetrics(){
   // All-accounts → convert to USD; single-account → raw value
   const pnlInDisplay = t => {
     if (!Number.isFinite(Number(t.pnl))) return null;
-    if (!isAll) return Number(t.pnl);
-    const ac = acctCur(t.accountId);
-    const v = FxRates.toUSD(t.pnl, ac);
+    if (!isAll) return tradePnlInAccountCurrency(t);
+    const v = tradePnlToUSD(t);
     return Number.isFinite(v)?v:null;
   };
 
@@ -7911,8 +8033,11 @@ function cTraderReviewBadge(t){
 // are shown in "lot/lots". Forex is "lot/lots". Equities are "share/shares".
 // Crypto is "units". Everything else is "unit/units".
 function getSizeLabel(trade){
-  const size = trade.size ?? 0;
+  const size = getTradeSizeValue(trade) ?? 0;
   const sym  = (trade.symbol || '').toUpperCase();
+  const cTraderQuantity=readCTraderQuantityProjection(trade);
+  if(cTraderQuantity?.unit==='base_units')return cTraderQuantity.baseAssetName?`${cTraderQuantity.baseAssetName} base units`:'base units';
+  if(cTraderQuantity?.unit==='lots')return Number(size)===1?'lot':'lots';
 
   // F&O instruments → always "lot/lots".
   // Also infer from symbol suffix for legacy docs where instrument field is null
@@ -7946,6 +8071,7 @@ function getSizeLabel(trade){
 
 function tradeRow(t){
   const c      = escapeHtml(acctCur(t.accountId));
+  const pnlC   = escapeHtml(tradeMoneyPrefix(t));
   const pnl    = (t.pnl !== undefined && t.pnl !== null) ? t.pnl : null;
   const calculatedGross=cTraderCalculatedGross(t);
   const rawSym = String(t.symbol || '—').toUpperCase();
@@ -7954,7 +8080,8 @@ function tradeRow(t){
   const dir    = t.direction==='Short' ? 'Short' : 'Long';
   const entry  = t.entry    != null ? Number(t.entry)  : null;
   const exit   = t.exit     != null ? Number(t.exit)   : null;
-  const size   = t.size     != null ? t.size : '—';
+  const sizeValue=getTradeSizeValue(t);
+  const size   = sizeValue!=null ? sizeValue : '—';
   const date   = t.date     || '—';
 
   const bd       = pnlBreakdown(t);
@@ -7966,12 +8093,12 @@ function tradeRow(t){
   const pnlStr = isOpen&&pnl===null
     ? '<span class="badge-open"><span class="badge-open-dot"></span><span style="color:#ffe066;position:relative;z-index:1;text-shadow:0 0 8px rgba(255,224,102,0.7)">Open</span></span>'
     : isOpen
-      ? `<span class="${pnl>=0?'pnl-pos':'pnl-neg'}" title="Open position · realized P&L" style="cursor:help">Open · realized ${pnl>=0?'+':'-'}${c}${Math.abs(pnl).toFixed(2)}</span>`
+      ? `<span class="${pnl>=0?'pnl-pos':'pnl-neg'}" title="Open position · realized P&L" style="cursor:help">Open · realized ${pnl>=0?'+':'-'}${pnlC}${Math.abs(pnl).toFixed(2)}</span>`
       : pnl===null
         ? '<span style="color:var(--text3)">No P&L</span>'
       : pnl >= 0
-      ? `<span class="pnl-pos" title="${escapeHtml(bd)}" style="cursor:help">+${c}${pnl.toFixed(2)}</span>`
-      : `<span class="pnl-neg" title="${escapeHtml(bd)}" style="cursor:help">-${c}${Math.abs(pnl).toFixed(2)}</span>`;
+      ? `<span class="pnl-pos" title="${escapeHtml(bd)}" style="cursor:help">+${pnlC}${pnl.toFixed(2)}</span>`
+      : `<span class="pnl-neg" title="${escapeHtml(bd)}" style="cursor:help">-${pnlC}${Math.abs(pnl).toFixed(2)}</span>`;
   const calculatedGrossTitle='Calculated gross price movement only; commissions, swap and other fees are excluded. This value is not included in Net P&L or analytics.';
   const displayedPnlStr=pnl===null&&calculatedGross
     ? `<span class="pnl-gross-estimate" title="${calculatedGrossTitle}"><i class="fa-solid fa-calculator"></i>${isOpen?'Open · ':''}Calc. gross ${escapeHtml(calculatedGrossText(calculatedGross))}</span>`
@@ -8226,8 +8353,8 @@ function buildCoachingMetrics(){
   const pnlValue=trade=>{
     const raw=Number(trade.pnl);
     if(!Number.isFinite(raw))return null;
-    if(!allAccounts)return raw;
-    const converted=FxRates.toUSD(raw,acctCur(trade.accountId));
+    if(!allAccounts)return tradePnlInAccountCurrency(trade,raw);
+    const converted=tradePnlToUSD(trade,raw);
     return Number.isFinite(converted)?converted:null;
   };
   const closed=source.filter(tradeIsClosedWithPnl).map(trade=>({...trade,_coachingPnl:pnlValue(trade)})).filter(trade=>Number.isFinite(trade._coachingPnl)).sort(compareTradeChronology);
@@ -8523,12 +8650,12 @@ function csvEncodeRow(cells,textColumns=new Set()){
   return cells.map((value,index)=>csvEncodeCell(value,{text:textColumns.has(index)})).join(',');
 }
 function tradeJournalCsv(source){
-  const header=['Date','Symbol','Asset','Dir','Entry','Exit','Size','SL','TP','PnL','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
-  const textColumns=new Set([1,2,3,10,11,12,13,14,15,16,17,18,19,20]);
+  const header=['Date','Symbol','Asset','Dir','Entry','Exit','Size','Size Unit','SL','TP','PnL','PnL Currency','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
+  const textColumns=new Set([1,2,3,7,11,12,13,14,15,16,17,18,19,20,21,22]);
   const body=source.map(t=>{const pb=t.custom?.playbook||{};return csvEncodeRow([
-    t.date,t.symbol,ASSET_LABELS[t.asset]||t.asset||'',t.direction,t.entry,t.exit??'',t.size,t.sl??'',t.tp??'',
+    t.date,t.symbol,ASSET_LABELS[t.asset]||t.asset||'',t.direction,t.entry,t.exit??'',getTradeSizeValue(t),getSizeLabel(t),t.sl??'',t.tp??'',
     tradeIsOpen(t)?(tradeHasPnl(t)?`Open · realized ${Number(t.pnl).toFixed(2)}`:'Open'):(tradeHasPnl(t)?Number(t.pnl).toFixed(2):''),
-    t.strategy||'',pb.setup||'',pb.grade||'',pb.probability||'',pb.horizon||'',pb.overnight||'',pb.condition||'',pb.execution||'',t.emotion||'',acctName(t.accountId||''),t.notes||'',
+    tradePnlCurrency(t)||'',t.strategy||'',pb.setup||'',pb.grade||'',pb.probability||'',pb.horizon||'',pb.overnight||'',pb.condition||'',pb.execution||'',t.emotion||'',acctName(t.accountId||''),t.notes||'',
   ],textColumns)});
   return [csvEncodeRow(header),...body].join('\r\n');
 }
@@ -8563,14 +8690,20 @@ function renderExposure(){
   const open=trades.filter(tradeIsOpen);
   const el=document.getElementById('exposure-wrap');
   if(!open.length){el.innerHTML='<div class="empty-state"><i class="fa-solid fa-shield-halved"></i><p>No open trades.</p></div>';return;}
+  const excluded=open.filter(t=>readCTraderQuantityProjection(t)?.unit==='base_units');
+  const measurable=open.filter(t=>readCTraderQuantityProjection(t)?.unit!=='base_units');
   const acc=parseFloat(document.getElementById('r-acc')?.value)||10000, c=cur();
-  el.innerHTML=['eq','cx','fx','cm'].map(k=>{
-    const trs=open.filter(t=>t.asset===k); if(!trs.length) return '';
+  const meters=['eq','cx','fx','cm'].map(k=>{
+    const trs=measurable.filter(t=>t.asset===k); if(!trs.length) return '';
     const val=trs.reduce((a,t)=>a+t.entry*t.size,0);
     const pct=Math.min(val/acc*100,100);
     const col=pct>80?'#ff5e6a':pct>50?'#f5a623':'#22c987';
     return `<div class="risk-meter"><div class="risk-label"><span>${ASSET_LABELS[k]} (${trs.length})</span><span style="color:var(--text3);font-family:var(--font-mono);font-size:12px">${c}${val.toFixed(0)} · ${pct.toFixed(1)}%</span></div><div class="risk-bar-track"><div class="risk-bar-fill" style="width:${pct}%;background:${col}"></div></div></div>`;
   }).join('');
+  const exclusionNote=excluded.length
+    ? `<div class="empty-state" style="padding:14px"><i class="fa-solid fa-circle-info"></i><p>${excluded.length} cTrader position${excluded.length===1?' is':'s are'} excluded from exposure: size is available in base units, but a verified lot conversion is not yet available.</p></div>`
+    : '';
+  el.innerHTML=meters+exclusionNote;
 }
 function calcPos(){
   const e=parseFloat(document.getElementById('ps-e').value),sl=parseFloat(document.getElementById('ps-sl').value);
@@ -8847,7 +8980,7 @@ function insightLegendHtml(rows){
 function renderDashboardInsights(src,closed,displayC,isAll,palette){
   ['asset','symbol','outcome','direction','day'].forEach(key=>{if(CH[key]){CH[key].destroy();CH[key]=null;}});
   const ledger=realizedLedgerForTrades(src).map(event=>{
-    const value=isAll?FxRates.toUSD(event.ledgerPnl,acctCur(event.accountId)):Number(event.ledgerPnl);
+    const value=isAll?tradePnlToUSD(event,event.ledgerPnl):tradePnlInAccountCurrency(event,event.ledgerPnl);
     return {...event,displayPnl:Number(value)};
   }).filter(event=>Number.isFinite(event.displayPnl));
 
@@ -8865,7 +8998,7 @@ function renderDashboardInsights(src,closed,displayC,isAll,palette){
   }
 
   // Completed-trade outcomes; a doughnut is appropriate because these are counts.
-  const outcomes=closed.map(trade=>Number(isAll?FxRates.toUSD(trade.pnl,acctCur(trade.accountId)):trade.pnl)).filter(Number.isFinite);
+  const outcomes=closed.map(trade=>Number(isAll?tradePnlToUSD(trade):tradePnlInAccountCurrency(trade))).filter(Number.isFinite);
   const outcomeCounts=[outcomes.filter(value=>value>0).length,outcomes.filter(value=>value<0).length,outcomes.filter(value=>value===0).length];
   const outcomeTotal=outcomeCounts.reduce((sum,value)=>sum+value,0),winRate=outcomeTotal?Math.round(outcomeCounts[0]/outcomeTotal*100):null;
   setDashboardInsightEmpty('outcome',!outcomeTotal);
@@ -8883,7 +9016,7 @@ function renderDashboardInsights(src,closed,displayC,isAll,palette){
   const directionNames=['Long','Short'];
   const directionStats=Object.fromEntries(directionNames.map(name=>[name,{pnl:0,count:0,wins:0}]));
   ledger.forEach(event=>{const name=event.direction==='Short'?'Short':'Long';directionStats[name].pnl+=event.displayPnl;});
-  closed.forEach(trade=>{const name=trade.direction==='Short'?'Short':'Long',value=Number(isAll?FxRates.toUSD(trade.pnl,acctCur(trade.accountId)):trade.pnl);if(!Number.isFinite(value))return;directionStats[name].count++;if(value>0)directionStats[name].wins++;});
+  closed.forEach(trade=>{const name=trade.direction==='Short'?'Short':'Long',value=Number(isAll?tradePnlToUSD(trade):tradePnlInAccountCurrency(trade));if(!Number.isFinite(value))return;directionStats[name].count++;if(value>0)directionStats[name].wins++;});
   const hasDirection=ledger.length>0;
   setDashboardInsightEmpty('direction',!hasDirection);
   document.getElementById('direction-summary').textContent=hasDirection?directionNames.map(name=>`${name} ${directionStats[name].count?Math.round(directionStats[name].wins/directionStats[name].count*100):0}% WR`).join(' · '):'';
@@ -8919,7 +9052,7 @@ function renderCharts(){
   const palette=dashboardChartPalette();
 
   // Convert P&L to display currency (USD for all-accounts, raw for single account)
-  const toPnlDisplay = t => isAll ? FxRates.toUSD(t.pnl, acctCur(t.accountId)) : t.pnl;
+  const toPnlDisplay = t => isAll ? tradePnlToUSD(t) : tradePnlInAccountCurrency(t);
 
   const closed=[...src].filter(tradeIsClosedWithPnl).filter(t=>Number.isFinite(toPnlDisplay(t))).sort(compareTradeChronology);
   let run=0;
@@ -9007,7 +9140,7 @@ function renderCharts(){
 function renderAnalyticsCharts(){
   const pageAccount=activePageAcct['analytics']||'all',src=tradesForContext('analytics');
   const isAll=pageAccount==='all';
-  const toPnl=t=>isAll?FxRates.toUSD(t.pnl,acctCur(t.accountId)):t.pnl;
+  const toPnl=t=>isAll?tradePnlToUSD(t):tradePnlInAccountCurrency(t);
   const dispC=isAll?'$':acctCur(pageAccount);
   const closed=src.filter(tradeIsClosedWithPnl).filter(t=>Number.isFinite(toPnl(t))).sort(compareTradeChronology);
   const n=closed.length;
@@ -9815,7 +9948,7 @@ function calPnlForDay(dateStr){
   const isAll = calIsAllAccounts();
   return realizedLedgerForTrades(calTradesFiltered())
     .filter(t=>t.ledgerDate===dateStr)
-    .map(t=>isAll?FxRates.toUSD(t.ledgerPnl,acctCur(t.accountId)):Number(t.ledgerPnl))
+    .map(t=>isAll?tradePnlToUSD(t,t.ledgerPnl):tradePnlInAccountCurrency(t,t.ledgerPnl))
     .filter(Number.isFinite)
     .reduce((sum,value)=>sum+value,0);
 }
@@ -9931,8 +10064,8 @@ function calSelectDay(d,month=calMonth,year=calYear){
     </div>
     ${ts.map(t=>{
       const pnlStr=tradeIsOpen(t)
-        ? (t._calendarRealized?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};">Open · realized ${escapeHtml(signedMoney(t.pnl,acctCur(t.accountId)))}</span>`:'<span style="color:var(--text3)">Open</span>')
-        : (tradeHasPnl(t)?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};">${escapeHtml(signedMoney(t.pnl,acctCur(t.accountId)))}</span>`:'<span style="color:var(--text3)">No P&L</span>');
+        ? (t._calendarRealized?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};">Open · realized ${escapeHtml(signedMoney(t.pnl,tradeMoneyPrefix(t)))}</span>`:'<span style="color:var(--text3)">Open</span>')
+        : (tradeHasPnl(t)?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};">${escapeHtml(signedMoney(t.pnl,tradeMoneyPrefix(t)))}</span>`:'<span style="color:var(--text3)">No P&L</span>');
       const thumb=(()=>{const src=getThumbSrc(t);return src?`<span class="ss-cell-thumb" onclick="openLightbox(${inlineStringArg(t.id)},0)" style="margin-right:6px"><img src="${escapeHtml(src)}" alt="chart"></span>`:''})();
       return `<div class="cal-trade-row">
         <span>${thumb}<span style="font-weight:500">${escapeHtml(t.symbol)}</span><span style="font-size:10px;color:var(--text3);margin-left:6px">${escapeHtml(t.instrument||ASSET_LABELS[t.asset]||t.asset)} · ${escapeHtml(t.optionType||t.direction)}</span></span>
@@ -9946,7 +10079,7 @@ function calSelectDay(d,month=calMonth,year=calYear){
 
 function renderCalStats(){
   const isAll = calIsAllAccounts();
-  const toPnl = t => isAll ? FxRates.toUSD(t.ledgerPnl, acctCur(t.accountId)) : Number(t.ledgerPnl);
+  const toPnl = t => isAll ? tradePnlToUSD(t,t.ledgerPnl) : tradePnlInAccountCurrency(t,t.ledgerPnl);
   const cs = calCurrencySymbol();
   const allTrades=calTradesFiltered();
   const monthStr=`${calYear}-${String(calMonth+1).padStart(2,'0')}`;
@@ -10042,7 +10175,7 @@ function hmHeatClass(pnl, maxAbs){
 }
 
 function hmPnlDisplay(t){
-  const ac = acctCur(t.accountId);
+  const ac = tradeMoneyPrefix(t);
   if(tradeIsOpen(t)&&!tradeHasPnl(t)) return {str:'Open', color:'var(--text2)'};
   if(!tradeHasPnl(t)) return {str:'No P&L', color:'var(--text2)'};
   const amount=(Number(t.pnl)>=0?'+':'-')+ac+Math.abs(Number(t.pnl)).toFixed(0);
@@ -10102,7 +10235,7 @@ function renderHeatmap(){
   const cs     = isAll ? '$' : acctCur(document.getElementById('hm-acct').value);
   const displayPnl=t=>{
     const raw=Number(t.pnl);if(!Number.isFinite(raw))return null;
-    const value=isAll?FxRates.toUSD(raw,acctCur(t.accountId)):raw;
+    const value=isAll?tradePnlToUSD(t,raw):tradePnlInAccountCurrency(t,raw);
     return Number.isFinite(value)?value:null;
   };
   const completedValues=completed.map(displayPnl).filter(Number.isFinite);
@@ -10226,6 +10359,8 @@ function renderHmInsert(t, container){
   const domToken=safeDomId(t.id);
   const entry=Number(t.entry);
   const exit=t.exit==null?null:Number(t.exit);
+  const sizeValue=getTradeSizeValue(t);
+  const sizeUnit=getSizeLabel(t);
 
   const ssGrid = ssCount
     ? screenshotSources.map((src,i)=>`
@@ -10257,7 +10392,7 @@ function renderHmInsert(t, container){
       <div class="hm-ins-fields">
         <div><div class="hm-idf-label">Entry</div><div class="hm-idf-val">${Number.isFinite(entry)?ac+entry.toFixed(t.asset==='fx'?4:2):'—'}</div></div>
         <div><div class="hm-idf-label">Exit</div><div class="hm-idf-val">${Number.isFinite(exit)?ac+exit.toFixed(t.asset==='fx'?4:2):'Open'}</div></div>
-        <div><div class="hm-idf-label">Size</div><div class="hm-idf-val">${escapeHtml(t.size??'—')}</div></div>
+        <div><div class="hm-idf-label">Size (${escapeHtml(sizeUnit)})</div><div class="hm-idf-val">${escapeHtml(sizeValue??'—')}</div></div>
         <div><div class="hm-idf-label">R:R</div><div class="hm-idf-val">${escapeHtml(rr)}</div></div>
         <div><div class="hm-idf-label">Stop loss</div><div class="hm-idf-val">${t.sl?ac+escapeHtml(t.sl):'—'}</div></div>
         <div><div class="hm-idf-label">Emotion</div><div class="hm-idf-val">${escapeHtml(t.emotion||'—')}</div></div>
@@ -10783,6 +10918,9 @@ function csvMatchesExisting(existing,incoming,accountId,source,broker){
   // field comparison against a different identity. Identical fills can be
   // legitimate separate trades.
   if(existing.externalTradeKey)return existing.externalTradeKey===naturalKey;
+  // CSV/manual sizes use their broker-native lot/share unit. An exact cTrader
+  // base-unit quantity is not comparable until verified contract metadata exists.
+  if(readCTraderQuantityProjection(existing)?.unit==='base_units'||readCTraderQuantityProjection(incoming)?.unit==='base_units')return false;
   return String(existing.accountId||'')===String(accountId||'')&&
     String(existing.source||'').toLowerCase()===source&&
     String(existing.broker||broker||'').toLowerCase()===String(broker||'').toLowerCase()&&
@@ -11235,7 +11373,7 @@ function ddFilteredTrades(){
 function ddPnl(t){
   const acctId = document.getElementById('dd-acct')?.value||'all';
   const raw=Number(t.pnl);if(!Number.isFinite(raw))return null;
-  const value=acctId==='all'?FxRates.toUSD(raw,acctCur(t.accountId)):raw;
+  const value=acctId==='all'?tradePnlToUSD(t,raw):tradePnlInAccountCurrency(t,raw);
   return Number.isFinite(value)?value:null;
 }
 
@@ -11614,7 +11752,7 @@ function djDayStats(date){
   const dayTrades = realizedLedgerForTrades(trades)
     .filter(t=>t.ledgerDate===date)
     .map(t=>({...t,pnl:t.ledgerPnl,date:t.ledgerDate}));
-  const toUSD = t => FxRates.toUSD(t.pnl, acctCur(t.accountId));
+  const toUSD = t => tradePnlToUSD(t);
   const valued=dayTrades.map(trade=>({trade,value:toUSD(trade)})).filter(item=>Number.isFinite(item.value));
   const net=valued.reduce((sum,item)=>sum+item.value,0);
   const wins=valued.filter(item=>item.value>0);
@@ -11640,7 +11778,7 @@ function renderDjEntry(){
   const c = cur();
 
   const pnlColor = stats.net>0?'var(--green)':stats.net<0?'var(--red)':'var(--text2)';
-  const bestAc = stats.best ? acctCur(stats.best.accountId) : '$';
+  const bestAc = stats.best ? tradeMoneyPrefix(stats.best) : '$';
 
   document.getElementById('dj-entry-wrap').innerHTML = `
     <!-- topbar -->

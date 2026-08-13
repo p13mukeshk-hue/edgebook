@@ -14,6 +14,7 @@ import {
   parseDeals,
   type CTraderAsset,
   type CTraderAssetClass,
+  type CTraderCashFlow,
   type CTraderDeal,
   type CTraderEnvironment,
   type CTraderLightSymbol,
@@ -21,6 +22,37 @@ import {
   type CTraderSymbolSpec,
   type CTraderTraderMetadata,
 } from "./protocol.js";
+
+type StoredOfficialExecutionRow = QueryResultRow & {
+  external_execution_id: string;
+  raw_payload: unknown;
+};
+
+type StoredMcpMoney = {
+  rank: 0 | 1 | 2;
+  net: { value: bigint; digits: number } | null;
+  components: {
+    grossProfit: bigint;
+    commission: bigint;
+    swap: bigint;
+    pnlConversionFee: bigint;
+    digits: number;
+  } | null;
+};
+
+type StoredCashFlowRow = QueryResultRow & {
+  external_cash_flow_id: string;
+  operation_type: number | null;
+  operation_name: string;
+  raw_delta: string;
+  raw_balance: string;
+  raw_equity: string | null;
+  currency_code: string;
+  money_digits: number | null;
+  money_digits_source: CashFlowMoneyDigitsSource;
+  balance_version: string | null;
+  occurred_at: Date | string;
+};
 
 type SyncConnectionRow = QueryResultRow & {
   id: string;
@@ -47,6 +79,9 @@ type StoredExecutionRow = QueryResultRow & {
 type ExistingTradeRow = QueryResultRow & {
   id: string;
   deleted_at: Date | string | null;
+  pnl: string | null;
+  broker_data: unknown;
+  reconciled_manual_trade: boolean;
 };
 
 export type CTraderSyncCounters = {
@@ -62,6 +97,9 @@ export type CTraderSyncCounters = {
   tombstonesPreserved: number;
   positionsProjected: number;
   positionsAwaitingReview: number;
+  fetchedAccountCashFlows?: number;
+  insertedAccountCashFlows?: number;
+  updatedAccountCashFlows?: number;
 };
 
 export type CTraderSyncResult = {
@@ -82,6 +120,119 @@ export class CTraderSyncError extends Error {
     super(message);
     this.name = "CTraderSyncError";
   }
+}
+
+/**
+ * Locks the exact tenant-owned Edgebook account represented by a connection
+ * snapshot and proves that its display/analytics currency agrees with the
+ * broker's authoritative deposit currency. Call this before locking the
+ * broker connection, then verify that the connection mapping is unchanged;
+ * this follows the account -> connection lock order used by settings writes.
+ */
+export async function lockAndValidateMappedAccountCurrency(
+  client: PoolClient,
+  input: {
+    userId: string;
+    mappedAccountId: string | null;
+    legacyMappedAccountId: string | null;
+    providerCurrency: string | null;
+  },
+): Promise<void> {
+  if (input.mappedAccountId === null && input.legacyMappedAccountId === null) return;
+  const mapped = await client.query<{
+    id: string;
+    legacy_account_id: string | null;
+    currency_code: string;
+  }>(
+    `SELECT id, legacy_account_id, currency_code FROM accounts
+     WHERE user_id=$1 AND archived_at IS NULL
+       AND (
+         ($2::uuid IS NOT NULL AND id=$2::uuid)
+         OR ($2::uuid IS NULL AND $3::text IS NOT NULL AND legacy_account_id=$3::text)
+       )
+     LIMIT 1
+     FOR SHARE`,
+    [input.userId, input.mappedAccountId, input.legacyMappedAccountId],
+  );
+  const account = mapped.rows[0];
+  if (!account
+    || (input.mappedAccountId !== null && account.id !== input.mappedAccountId)
+    || (input.mappedAccountId === null && input.legacyMappedAccountId !== null
+      && account.legacy_account_id !== input.legacyMappedAccountId)) {
+    throw new CTraderSyncError(
+      "CTRADER_ACCOUNT_MAPPING_CHANGED",
+      "The mapped Edgebook account changed before cTrader data could be persisted",
+      true,
+    );
+  }
+  if (input.providerCurrency === null) {
+    throw new CTraderSyncError(
+      "CTRADER_ACCOUNT_CURRENCY_UNAVAILABLE",
+      "cTrader did not expose the deposit currency required to validate the mapped Edgebook account",
+      false,
+    );
+  }
+  const mappedCurrency = account.currency_code.trim().toUpperCase();
+  if (mappedCurrency !== input.providerCurrency.trim().toUpperCase()) {
+    throw new CTraderSyncError(
+      "CTRADER_ACCOUNT_CURRENCY_MISMATCH",
+      `The mapped Edgebook account currency ${mappedCurrency} does not match cTrader deposit currency ${input.providerCurrency}`,
+      false,
+    );
+  }
+}
+
+function sameConnectionMapping(
+  left: { mappedAccountId: string | null; legacyMappedAccountId: string | null },
+  right: { mappedAccountId: string | null; legacyMappedAccountId: string | null },
+): boolean {
+  return left.mappedAccountId === right.mappedAccountId
+    && left.legacyMappedAccountId === right.legacyMappedAccountId;
+}
+
+export function mergeOfficialProjectionAuthority(input: {
+  existing: {
+    pnl: string | null;
+    brokerData: unknown;
+    reconciledManualTrade: boolean;
+  } | null;
+  providerPnl: string | null;
+  providerBrokerData: Record<string, unknown>;
+}): { pnl: string | null; brokerData: Record<string, unknown> } {
+  const existingBrokerData = objectValue(input.existing?.brokerData);
+  const existingPnlMethod = typeof existingBrokerData.pnlMethod === "string"
+    ? existingBrokerData.pnlMethod
+    : null;
+  const existingPnlAuthority = typeof existingBrokerData.pnlAuthority === "string"
+    ? existingBrokerData.pnlAuthority
+    : null;
+  const exactProviderMethods = new Set([
+    "provider_close_detail_money_digits",
+    "provider_explicit_net_cents",
+    "provider_mixed_exact_money",
+  ]);
+  // A link proves that this row began as a manual journal, but it does not
+  // prove that its current P&L is still manual. Once exact provider net has
+  // superseded that value, a later incomplete projection must not relabel and
+  // retain a stale provider subtotal as manual P&L. Older linked rows predate
+  // pnlAuthority, so their exact pnlMethod is the backwards-compatible signal.
+  const currentPnlIsManual = existingPnlAuthority === "preserved_reconciled_manual"
+    || (existingPnlAuthority === null && !exactProviderMethods.has(existingPnlMethod ?? ""));
+  const preservesManualPnl = input.existing?.reconciledManualTrade === true
+    && input.providerPnl === null
+    && input.existing.pnl !== null
+    && currentPnlIsManual;
+  return {
+    pnl: preservesManualPnl ? input.existing?.pnl ?? null : input.providerPnl,
+    brokerData: {
+      ...(input.existing?.reconciledManualTrade === true ? existingBrokerData : {}),
+      ...input.providerBrokerData,
+      pnlAuthority: input.providerPnl !== null
+        ? "provider"
+        : preservesManualPnl ? "preserved_reconciled_manual" : "provider_unavailable",
+      reconciledManualPnlPreserved: preservesManualPnl,
+    },
+  };
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -138,6 +289,316 @@ function timestampCompare(left: CTraderDeal, right: CTraderDeal): number {
   return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
 }
 
+function optionalDealIdentity<T>(
+  dealId: string,
+  label: string,
+  existing: T | null,
+  incoming: T | null,
+): T | null {
+  if (existing !== null && incoming !== null && String(existing) !== String(incoming)) {
+    throw new CTraderSyncError(
+      "CTRADER_OFFICIAL_DEAL_CONFLICT",
+      `cTrader changed ${label} for immutable deal ${dealId}`,
+      false,
+    );
+  }
+  return incoming ?? existing;
+}
+
+function officialMoneyDigits(deal: CTraderDeal, accountMoneyDigits: number | null): number | null {
+  return deal.closePositionDetail?.moneyDigits ?? deal.moneyDigits ?? accountMoneyDigits;
+}
+
+function sameScaledMoney(
+  left: { value: bigint; digits: number },
+  right: { value: bigint; digits: number },
+): boolean {
+  const digits = Math.max(left.digits, right.digits);
+  return left.value * (10n ** BigInt(digits - left.digits))
+    === right.value * (10n ** BigInt(digits - right.digits));
+}
+
+function storedExecutionInvalid(executionId: string, detail: string): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_STORED_EXECUTION_INVALID",
+    `Stored cTrader execution ${executionId} ${detail}`,
+    false,
+  );
+}
+
+function canonicalText(
+  canonical: Record<string, unknown>,
+  field: string,
+  executionId: string,
+  required = true,
+): string | null {
+  const value = canonical[field];
+  if (value === null || value === undefined || value === "") {
+    if (!required) return null;
+    throw storedExecutionInvalid(executionId, `has no canonical ${field}`);
+  }
+  if (typeof value !== "string" && typeof value !== "number") {
+    throw storedExecutionInvalid(executionId, `has an invalid canonical ${field}`);
+  }
+  return String(value);
+}
+
+function canonicalInteger(value: unknown, executionId: string, field: string): bigint {
+  if ((typeof value !== "string" && typeof value !== "number")
+    || !/^-?\d+$/.test(String(value))) {
+    throw storedExecutionInvalid(executionId, `has an invalid canonical ${field}`);
+  }
+  try {
+    return BigInt(String(value));
+  } catch {
+    throw storedExecutionInvalid(executionId, `has an invalid canonical ${field}`);
+  }
+}
+
+function canonicalSafeNumber(value: unknown, executionId: string, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw storedExecutionInvalid(executionId, `has an invalid canonical ${field}`);
+  }
+  return parsed;
+}
+
+function storedMcpMoney(canonical: Record<string, unknown>, executionId: string): StoredMcpMoney {
+  const detailValue = canonical.closePositionDetail;
+  if (detailValue !== null && detailValue !== undefined) {
+    const detail = objectValue(detailValue);
+    if (Object.keys(detail).length === 0) {
+      throw storedExecutionInvalid(executionId, "has an invalid canonical closePositionDetail");
+    }
+    const digits = canonicalSafeNumber(detail.moneyDigits, executionId, "moneyDigits");
+    if (!Number.isSafeInteger(digits) || digits < 0 || digits > 18) {
+      throw storedExecutionInvalid(executionId, "has an invalid canonical moneyDigits");
+    }
+    const components = {
+      grossProfit: canonicalInteger(detail.grossProfit, executionId, "grossProfit"),
+      commission: canonicalInteger(detail.commission, executionId, "commission"),
+      swap: canonicalInteger(detail.swap, executionId, "swap"),
+      pnlConversionFee: canonicalInteger(detail.pnlConversionFee, executionId, "pnlConversionFee"),
+      digits,
+    };
+    return {
+      rank: 2,
+      net: {
+        value: components.grossProfit + components.swap + components.commission - components.pnlConversionFee,
+        digits,
+      },
+      components,
+    };
+  }
+  if (canonical.netPnlCents !== null && canonical.netPnlCents !== undefined) {
+    const net = canonicalInteger(canonical.netPnlCents, executionId, "netPnlCents");
+    if (net < BigInt(Number.MIN_SAFE_INTEGER) || net > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw storedExecutionInvalid(executionId, "has an out-of-range canonical netPnlCents");
+    }
+    return { rank: 1, net: { value: net, digits: 2 }, components: null };
+  }
+  return { rank: 0, net: null, components: null };
+}
+
+/**
+ * Safely upgrades an execution stored by the Remote MCP reader to the official
+ * Open API representation. The MCP envelope is accepted only after its
+ * immutable execution identity is validated. Exact MCP money can be replaced
+ * only by agreeing official close money; a weaker official replay fails closed.
+ */
+export function mergeStoredExecutionWithOfficial(
+  storedExecutionId: string,
+  storedRaw: unknown,
+  incoming: CTraderDeal,
+  expectedAccountId?: string,
+  accountMoneyDigits: number | null = null,
+): CTraderDeal {
+  if (storedExecutionId !== incoming.dealId) {
+    throw storedExecutionInvalid(storedExecutionId, "does not match the fetched official deal identity");
+  }
+  const envelope = objectValue(storedRaw);
+  if (!Object.prototype.hasOwnProperty.call(envelope, "edgebookMcpDeal")) {
+    try {
+      const parsed = parseDeals({ deal: [storedRaw], hasMore: false }).deals[0];
+      if (!parsed || parsed.dealId !== storedExecutionId) {
+        throw storedExecutionInvalid(storedExecutionId, "cannot be parsed safely");
+      }
+      return mergeOfficialDealFacts(parsed, incoming, accountMoneyDigits);
+    } catch (error) {
+      if (error instanceof CTraderSyncError) throw error;
+      throw storedExecutionInvalid(storedExecutionId, "cannot be parsed safely");
+    }
+  }
+
+  const canonical = objectValue(envelope.edgebookMcpDeal);
+  if (Object.keys(canonical).length === 0 || canonical.version !== 1) {
+    throw storedExecutionInvalid(storedExecutionId, "has an invalid canonical MCP envelope");
+  }
+  const validVolumeProvenance = new Set([
+    "filledVolumeCents:unit_cents",
+    "filledVolume:unit_cents",
+    "filled_volume:unknown",
+    "volume:unknown",
+    "quantity:unknown",
+    "null:unknown",
+  ]);
+  if (!validVolumeProvenance.has(`${String(canonical.filledVolumeSourceKey)}:${String(canonical.filledVolumeScale)}`)) {
+    throw storedExecutionInvalid(storedExecutionId, "has invalid canonical filled-volume provenance");
+  }
+  if (!["OPEN", "CLOSE", null].includes(canonical.role as "OPEN" | "CLOSE" | null)) {
+    throw storedExecutionInvalid(storedExecutionId, "has an invalid canonical execution role");
+  }
+  const identity: Array<[string, unknown]> = [
+    ["dealId", incoming.dealId],
+    ["positionId", incoming.positionId],
+    ["symbolId", incoming.symbolId],
+    ["side", incoming.tradeSide],
+    ["filledVolumeCents", incoming.filledVolumeCents],
+    ["executionTimestamp", incoming.executionTimestamp],
+  ];
+  for (const [field, officialValue] of identity) {
+    if (canonicalText(canonical, field, storedExecutionId) !== String(officialValue)) {
+      throw storedExecutionInvalid(storedExecutionId, `conflicts with official ${field}`);
+    }
+  }
+  const canonicalPrice = canonicalSafeNumber(canonical.executionPrice, storedExecutionId, "executionPrice");
+  if (canonicalPrice !== incoming.executionPrice) {
+    throw storedExecutionInvalid(storedExecutionId, "conflicts with official executionPrice");
+  }
+  const canonicalOrderId = canonicalText(canonical, "orderId", storedExecutionId, false);
+  if (canonicalOrderId !== null && incoming.orderId !== null && canonicalOrderId !== incoming.orderId) {
+    throw storedExecutionInvalid(storedExecutionId, "conflicts with official orderId");
+  }
+  const canonicalAccountId = canonicalText(canonical, "accountId", storedExecutionId, false);
+  if (canonicalAccountId !== null && expectedAccountId !== undefined && canonicalAccountId !== expectedAccountId) {
+    throw storedExecutionInvalid(storedExecutionId, "belongs to a different cTrader account");
+  }
+
+  const storedMoney = storedMcpMoney(canonical, storedExecutionId);
+  if (storedMoney.rank === 0) return incoming;
+  const digits = officialMoneyDigits(incoming, accountMoneyDigits);
+  const close = incoming.closePositionDetail;
+  if (close === null || digits === null) {
+    throw new CTraderSyncError(
+      "CTRADER_OFFICIAL_DEAL_DOWNGRADE",
+      `Official cTrader history omitted exact close money already stored for deal ${incoming.dealId}`,
+      false,
+    );
+  }
+  const officialNet = {
+    value: close.grossProfit + close.swap + close.commission - close.pnlConversionFee,
+    digits,
+  };
+  if (storedMoney.net === null || !sameScaledMoney(storedMoney.net, officialNet)) {
+    throw new CTraderSyncError(
+      "CTRADER_OFFICIAL_DEAL_CONFLICT",
+      `Official cTrader history conflicts with stored MCP realized P&L for deal ${incoming.dealId}`,
+      false,
+    );
+  }
+  if (storedMoney.components) {
+    for (const field of ["grossProfit", "commission", "swap", "pnlConversionFee"] as const) {
+      if (!sameScaledMoney(
+        { value: storedMoney.components[field], digits: storedMoney.components.digits },
+        { value: close[field], digits },
+      )) {
+        throw new CTraderSyncError(
+          "CTRADER_OFFICIAL_DEAL_CONFLICT",
+          `Official cTrader history conflicts with stored MCP ${field} for deal ${incoming.dealId}`,
+          false,
+        );
+      }
+    }
+  }
+  return incoming;
+}
+
+/**
+ * Joins two observations of one immutable official deal. A later response that
+ * omits closePositionDetail cannot erase exact realized money; overlapping
+ * exact observations must agree after scaling or the sync fails closed.
+ */
+export function mergeOfficialDealFacts(
+  existing: CTraderDeal,
+  incoming: CTraderDeal,
+  accountMoneyDigits: number | null = null,
+): CTraderDeal {
+  if (existing.dealId !== incoming.dealId) {
+    throw new CTraderSyncError("CTRADER_OFFICIAL_DEAL_CONFLICT", "cTrader mixed official execution identities", false);
+  }
+  const stable = ["positionId", "symbolId", "filledVolumeCents", "executionTimestamp", "executionPrice", "tradeSide"] as const;
+  if (stable.some((key) => String(existing[key]) !== String(incoming[key]))) {
+    throw new CTraderSyncError(
+      "CTRADER_OFFICIAL_DEAL_CONFLICT",
+      `cTrader changed stable execution data for immutable deal ${incoming.dealId}`,
+      false,
+    );
+  }
+  if (existing.closePositionDetail && incoming.closePositionDetail) {
+    const existingDigits = officialMoneyDigits(existing, accountMoneyDigits);
+    const incomingDigits = officialMoneyDigits(incoming, accountMoneyDigits);
+    if (existingDigits === null || incomingDigits === null) {
+      throw new CTraderSyncError(
+        "CTRADER_OFFICIAL_DEAL_CONFLICT",
+        `cTrader returned conflicting exact-money precision for immutable deal ${incoming.dealId}`,
+        false,
+      );
+    }
+    for (const field of ["grossProfit", "swap", "commission", "balance", "pnlConversionFee"] as const) {
+      if (!sameScaledMoney(
+        { value: existing.closePositionDetail[field], digits: existingDigits },
+        { value: incoming.closePositionDetail[field], digits: incomingDigits },
+      )) {
+        throw new CTraderSyncError(
+          "CTRADER_OFFICIAL_DEAL_CONFLICT",
+          `cTrader changed ${field} for immutable deal ${incoming.dealId}`,
+          false,
+        );
+      }
+    }
+    if (existing.closePositionDetail.entryPrice !== incoming.closePositionDetail.entryPrice
+      || String(existing.closePositionDetail.closedVolumeCents)
+        !== String(incoming.closePositionDetail.closedVolumeCents)) {
+      throw new CTraderSyncError(
+        "CTRADER_OFFICIAL_DEAL_CONFLICT",
+        `cTrader changed closing execution data for immutable deal ${incoming.dealId}`,
+        false,
+      );
+    }
+  }
+  const close = incoming.closePositionDetail ?? existing.closePositionDetail;
+  const moneyDigits = close !== null && incoming.closePositionDetail === null
+    ? existing.moneyDigits
+    : optionalDealIdentity(incoming.dealId, "moneyDigits", existing.moneyDigits, incoming.moneyDigits);
+  return {
+    ...existing,
+    ...incoming,
+    orderId: optionalDealIdentity(incoming.dealId, "order identity", existing.orderId, incoming.orderId),
+    providerUpdatedTimestamp: existing.providerUpdatedTimestamp === null
+      ? incoming.providerUpdatedTimestamp
+      : incoming.providerUpdatedTimestamp === null
+        ? existing.providerUpdatedTimestamp
+        : Math.max(existing.providerUpdatedTimestamp, incoming.providerUpdatedTimestamp),
+    moneyDigits,
+    commission: close !== null && incoming.closePositionDetail === null
+      ? existing.commission
+      : optionalDealIdentity(incoming.dealId, "commission", existing.commission, incoming.commission),
+    closePositionDetail: close,
+    // Persist a canonical provider envelope containing retained exact fields so
+    // every subsequent projection re-parses the same authoritative facts.
+    raw: {
+      ...existing.raw,
+      ...incoming.raw,
+      orderId: optionalDealIdentity(incoming.dealId, "order identity", existing.orderId, incoming.orderId) ?? undefined,
+      moneyDigits: moneyDigits ?? undefined,
+      commission: (close !== null && incoming.closePositionDetail === null
+        ? existing.commission
+        : optionalDealIdentity(incoming.dealId, "commission", existing.commission, incoming.commission))?.toString(),
+      closePositionDetail: close?.raw,
+    },
+  };
+}
+
 /**
  * Spotware exposes a hasMore flag but no lossless cursor. Splitting saturated
  * time windows is safer than advancing to the last returned timestamp, which
@@ -150,6 +611,7 @@ export async function fetchCompleteDealHistory(
   toTimestamp: number,
   maxRows: number,
   heartbeat: () => Promise<void> = async () => undefined,
+  accountMoneyDigits: number | null = null,
 ): Promise<CTraderDeal[]> {
   if (!Number.isSafeInteger(fromTimestamp) || !Number.isSafeInteger(toTimestamp) || fromTimestamp < 0 || toTimestamp < fromTimestamp) {
     throw new CTraderSyncError("HISTORY_RANGE_INVALID", "The cTrader history range is invalid", false);
@@ -183,11 +645,17 @@ export async function fetchCompleteDealHistory(
       }
       const previous = deals.get(deal.dealId);
       if (previous && json(previous.raw) !== json(deal.raw)) {
-        // The most recent payload wins, while persistence still records the
-        // provider update timestamp and keeps the operation idempotent.
+        // The most recent payload supplies optional metadata, but immutable
+        // exact-money observations are joined at their authoritative scale.
+        // Per-deal moneyDigits ranks above the trader/account fallback.
         const previousUpdate = previous.providerUpdatedTimestamp ?? previous.executionTimestamp;
         const nextUpdate = deal.providerUpdatedTimestamp ?? deal.executionTimestamp;
-        if (nextUpdate >= previousUpdate) deals.set(deal.dealId, deal);
+        deals.set(
+          deal.dealId,
+          nextUpdate >= previousUpdate
+            ? mergeOfficialDealFacts(previous, deal, accountMoneyDigits)
+            : mergeOfficialDealFacts(deal, previous, accountMoneyDigits),
+        );
       } else if (!previous) {
         deals.set(deal.dealId, deal);
       }
@@ -206,6 +674,166 @@ export async function fetchCompleteDealHistory(
     windows.push({ from: window.from, to: midpoint });
   }
   return [...deals.values()].sort(timestampCompare);
+}
+
+function cashFlowTimestampCompare(left: CTraderCashFlow, right: CTraderCashFlow): number {
+  if (left.changeBalanceTimestamp !== right.changeBalanceTimestamp) {
+    return left.changeBalanceTimestamp - right.changeBalanceTimestamp;
+  }
+  const leftId = BigInt(left.balanceHistoryId);
+  const rightId = BigInt(right.balanceHistoryId);
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
+function sameCashFlow(left: CTraderCashFlow, right: CTraderCashFlow): boolean {
+  return left.balanceHistoryId === right.balanceHistoryId
+    && left.operationType === right.operationType
+    && left.operationName === right.operationName
+    && left.balance === right.balance
+    && left.delta === right.delta
+    && left.changeBalanceTimestamp === right.changeBalanceTimestamp
+    && left.balanceVersion === right.balanceVersion
+    && left.equity === right.equity
+    && left.moneyDigits === right.moneyDigits;
+}
+
+/** Joins immutable cash-flow observations and preserves optional enrichment. */
+export function mergeStoredCashFlowFacts(
+  stored: Pick<StoredCashFlowRow,
+    "external_cash_flow_id" | "operation_type" | "operation_name" | "raw_delta" | "raw_balance"
+    | "raw_equity" | "balance_version" | "occurred_at">,
+  incoming: CTraderCashFlow,
+): CTraderCashFlow {
+  const conflict = (field: string): never => {
+    throw new CTraderSyncError(
+      "CASH_FLOW_ID_CONFLICT",
+      `cTrader changed ${field} for immutable cash-flow ${incoming.balanceHistoryId}`,
+      false,
+    );
+  };
+  let storedDelta: bigint;
+  let storedBalance: bigint;
+  let storedEquity: bigint | null;
+  let storedBalanceVersion: bigint | null;
+  try {
+    storedDelta = BigInt(stored.raw_delta);
+    storedBalance = BigInt(stored.raw_balance);
+    storedEquity = stored.raw_equity === null ? null : BigInt(stored.raw_equity);
+    storedBalanceVersion = stored.balance_version === null ? null : BigInt(stored.balance_version);
+  } catch {
+    return conflict("stored monetary facts");
+  }
+  const occurredAt = new Date(stored.occurred_at).getTime();
+  if (stored.external_cash_flow_id !== incoming.balanceHistoryId) conflict("identity");
+  if (stored.operation_name !== incoming.operationName) conflict("operation name");
+  if (stored.operation_type !== null && incoming.operationType !== null
+    && stored.operation_type !== incoming.operationType) conflict("operation type");
+  if (storedDelta !== incoming.delta) conflict("raw delta");
+  if (storedBalance !== incoming.balance) conflict("raw balance");
+  if (!Number.isFinite(occurredAt) || occurredAt !== incoming.changeBalanceTimestamp) conflict("timestamp");
+  if (storedEquity !== null && incoming.equity !== null && storedEquity !== incoming.equity) conflict("equity");
+  if (storedBalanceVersion !== null && incoming.balanceVersion !== null
+    && storedBalanceVersion !== incoming.balanceVersion) conflict("balance version");
+  return {
+    ...incoming,
+    operationType: incoming.operationType ?? stored.operation_type,
+    equity: incoming.equity ?? storedEquity,
+    balanceVersion: incoming.balanceVersion ?? storedBalanceVersion,
+  };
+}
+
+type CashFlowMoneyDigitsSource = "cash_flow" | "account" | "unavailable";
+
+export function resolveCashFlowMoneyScale(input: {
+  cashFlowMoneyDigits: number | null;
+  accountMoneyDigits: number | null;
+  stored?: { moneyDigits: number | null; source: CashFlowMoneyDigitsSource } | null;
+}): { moneyDigits: number | null; source: CashFlowMoneyDigitsSource } {
+  if (input.cashFlowMoneyDigits !== null) {
+    if (input.stored?.source === "cash_flow"
+      && input.stored.moneyDigits !== input.cashFlowMoneyDigits) {
+      throw new CTraderSyncError(
+        "CASH_FLOW_MONEY_DIGITS_CONFLICT",
+        "cTrader changed moneyDigits for an immutable account cash-flow identity",
+        false,
+      );
+    }
+    return { moneyDigits: input.cashFlowMoneyDigits, source: "cash_flow" };
+  }
+  // A row-specific exponent is stronger than the account fallback. Preserve it
+  // if an overlapping response later omits the optional row field.
+  if (input.stored?.source === "cash_flow" && input.stored.moneyDigits !== null) {
+    return { moneyDigits: input.stored.moneyDigits, source: "cash_flow" };
+  }
+  if (input.stored?.source === "account" && input.stored.moneyDigits !== null) {
+    if (input.accountMoneyDigits !== null
+      && input.accountMoneyDigits !== input.stored.moneyDigits) {
+      throw new CTraderSyncError(
+        "CASH_FLOW_ACCOUNT_MONEY_DIGITS_CONFLICT",
+        "cTrader changed the account moneyDigits used to scale an immutable account cash flow",
+        false,
+      );
+    }
+    return { moneyDigits: input.stored.moneyDigits, source: "account" };
+  }
+  if (input.accountMoneyDigits !== null) {
+    return { moneyDigits: input.accountMoneyDigits, source: "account" };
+  }
+  return { moneyDigits: null, source: "unavailable" };
+}
+
+/**
+ * Spotware limits ProtoOACashFlowHistoryListReq to a seven-day boundary and
+ * exposes no pagination flag. Fetch every non-overlapping window and retain
+ * the immutable balanceHistoryId as the account-ledger identity.
+ */
+export async function fetchCompleteCashFlowHistory(
+  session: Pick<CTraderAccountSession, "listCashFlows">,
+  fromTimestamp: number,
+  toTimestamp: number,
+  heartbeat: () => Promise<void> = async () => undefined,
+): Promise<CTraderCashFlow[]> {
+  if (!Number.isSafeInteger(fromTimestamp) || !Number.isSafeInteger(toTimestamp) || fromTimestamp < 0 || toTimestamp < fromTimestamp) {
+    throw new CTraderSyncError("CASH_FLOW_RANGE_INVALID", "The cTrader cash-flow history range is invalid", false);
+  }
+  const maximumWindowMs = 7 * 24 * 60 * 60 * 1_000;
+  const cashFlows = new Map<string, CTraderCashFlow>();
+  let requests = 0;
+  for (let from = fromTimestamp; from <= toTimestamp;) {
+    // Use an inclusive range whose cardinality is at most seven days. This is
+    // one millisecond stricter than merely satisfying `to - from <= 7d` and
+    // avoids gateways interpreting both endpoints as a 7d + 1ms window.
+    const to = Math.min(toTimestamp, from + maximumWindowMs - 1);
+    requests += 1;
+    if (requests > 100_000) {
+      throw new CTraderSyncError("CASH_FLOW_PAGINATION_LIMIT", "cTrader cash-flow history required too many windows", false);
+    }
+    await heartbeat();
+    const page = await session.listCashFlows(from, to);
+    for (const cashFlow of page) {
+      if (cashFlow.changeBalanceTimestamp < from || cashFlow.changeBalanceTimestamp > to) {
+        throw new CTraderSyncError(
+          "CASH_FLOW_OUT_OF_RANGE",
+          "cTrader returned an account cash-flow outside the requested history window",
+          false,
+        );
+      }
+      const prior = cashFlows.get(cashFlow.balanceHistoryId);
+      if (prior && !sameCashFlow(prior, cashFlow)) {
+        throw new CTraderSyncError(
+          "CASH_FLOW_ID_CONFLICT",
+          "cTrader returned conflicting values for an immutable account cash-flow identity",
+          false,
+        );
+      }
+      cashFlows.set(cashFlow.balanceHistoryId, cashFlow);
+    }
+    if (to === toTimestamp) break;
+    // Boundaries are inclusive, so the next window begins one millisecond
+    // later. The immutable ID still protects against provider overlap.
+    from = to + 1;
+  }
+  return [...cashFlows.values()].sort(cashFlowTimestampCompare);
 }
 
 function isAuthFailure(error: unknown): boolean {
@@ -411,6 +1039,23 @@ export class CTraderSyncEngine {
         toTimestamp,
         this.config.cTrader.maxDealsPerRequest,
         heartbeat,
+        trader.moneyDigits,
+      );
+      const cashFlowHistoryComplete = cursorBefore.cashFlowHistoryComplete === true;
+      const cashFlowSyncedThrough = safeTimestamp(cursorBefore.cashFlowSyncedThroughTimestamp);
+      // Spotware explicitly defines registrationTimestamp as the minimum
+      // boundary for historical requests. The optional deal override may ask
+      // for older executions, but it must not make cash-flow boundaries
+      // invalid.
+      const cashFlowAuthoritativeStart = trader.registrationTimestamp;
+      const cashFlowFromTimestamp = cashFlowHistoryComplete && cashFlowSyncedThrough !== null
+        ? Math.max(cashFlowAuthoritativeStart, cashFlowSyncedThrough - this.config.cTrader.syncOverlapSeconds * 1_000)
+        : cashFlowAuthoritativeStart;
+      const fetchedCashFlows = await fetchCompleteCashFlowHistory(
+        session,
+        cashFlowFromTimestamp,
+        toTimestamp,
+        heartbeat,
       );
 
       const symbolIds = [...new Set(fetchedDeals.map((deal) => deal.symbolId))];
@@ -439,6 +1084,7 @@ export class CTraderSyncEngine {
         lightSymbols,
         symbolSpecs,
         fetchedDeals,
+        fetchedCashFlows,
         cursorBefore,
         registrationTimestamp: trader.registrationTimestamp,
         syncedThroughTimestamp: toTimestamp,
@@ -457,20 +1103,49 @@ export class CTraderSyncEngine {
     lightSymbols: CTraderLightSymbol[];
     symbolSpecs: CTraderSymbolSpec[];
     fetchedDeals: CTraderDeal[];
+    fetchedCashFlows: CTraderCashFlow[];
     cursorBefore: Record<string, unknown>;
     registrationTimestamp: number;
     syncedThroughTimestamp: number;
   }): Promise<CTraderSyncResult> {
+    const accountCurrency = this.accountCurrency(input.trader, input.assets);
     const result = await withTransaction(this.database, async (client) => {
-      const locked = await client.query<{ connected: boolean }>(
-        `SELECT connected FROM broker_connections
-         WHERE id=$1 AND provider='ctrader' AND connection_mode='official'
+      await lockAndValidateMappedAccountCurrency(client, {
+        userId: input.connection.user_id,
+        mappedAccountId: input.connection.mapped_account_id,
+        legacyMappedAccountId: input.connection.legacy_mapped_account_id,
+        providerCurrency: accountCurrency,
+      });
+      const locked = await client.query<{
+        connected: boolean;
+        mapped_account_id: string | null;
+        legacy_mapped_account_id: string | null;
+      }>(
+        `SELECT connected, mapped_account_id, legacy_mapped_account_id
+         FROM broker_connections
+         WHERE id=$1 AND user_id=$2 AND provider='ctrader' AND connection_mode='official'
            AND oauth_scope='accounts'
            AND provider_environment IS NOT NULL FOR UPDATE`,
-        [input.connection.id],
+        [input.connection.id, input.connection.user_id],
       );
       if (!locked.rows[0]?.connected) {
         throw new CTraderSyncError("CTRADER_DISCONNECTED", "The cTrader connection was disconnected during sync", false);
+      }
+      if (!sameConnectionMapping(
+        {
+          mappedAccountId: input.connection.mapped_account_id,
+          legacyMappedAccountId: input.connection.legacy_mapped_account_id,
+        },
+        {
+          mappedAccountId: locked.rows[0].mapped_account_id,
+          legacyMappedAccountId: locked.rows[0].legacy_mapped_account_id,
+        },
+      )) {
+        throw new CTraderSyncError(
+          "CTRADER_ACCOUNT_MAPPING_CHANGED",
+          "The mapped Edgebook account changed during cTrader sync; retry with the current mapping",
+          true,
+        );
       }
       const counters: CTraderSyncCounters = {
         inserted: 0,
@@ -485,17 +1160,30 @@ export class CTraderSyncEngine {
         tombstonesPreserved: 0,
         positionsProjected: 0,
         positionsAwaitingReview: 0,
+        fetchedAccountCashFlows: input.fetchedCashFlows.length,
+        insertedAccountCashFlows: 0,
+        updatedAccountCashFlows: 0,
       };
       const dealIds = input.fetchedDeals.map((deal) => deal.dealId);
       const existingExecutions = dealIds.length === 0
-        ? new Set<string>()
-        : new Set((await client.query<{ external_execution_id: string }>(
-            `SELECT external_execution_id FROM trade_executions
-             WHERE broker_connection_id=$1 AND external_execution_id=ANY($2::text[])`,
-            [input.connection.id, dealIds],
-          )).rows.map((row) => row.external_execution_id));
+        ? new Map<string, StoredOfficialExecutionRow>()
+        : new Map((await client.query<StoredOfficialExecutionRow>(
+             `SELECT external_execution_id, raw_payload FROM trade_executions
+              WHERE broker_connection_id=$1 AND external_execution_id=ANY($2::text[])`,
+             [input.connection.id, dealIds],
+          )).rows.map((row) => [row.external_execution_id, row]));
 
-      for (const deal of input.fetchedDeals) {
+      for (const fetchedDeal of input.fetchedDeals) {
+        const storedExecution = existingExecutions.get(fetchedDeal.dealId);
+        const deal = storedExecution
+          ? mergeStoredExecutionWithOfficial(
+              storedExecution.external_execution_id,
+              storedExecution.raw_payload,
+              fetchedDeal,
+              input.connection.external_account_id,
+              input.trader.moneyDigits,
+            )
+          : fetchedDeal;
         const money = executionMoney(deal, input.trader.moneyDigits);
         const closeVolume = deal.closePositionDetail?.closedVolumeCents ?? null;
         await client.query(
@@ -556,8 +1244,115 @@ export class CTraderSyncEngine {
             deal.providerUpdatedTimestamp === null ? null : new Date(deal.providerUpdatedTimestamp),
           ],
         );
-        if (existingExecutions.has(deal.dealId)) counters.updatedExecutions += 1;
+        if (storedExecution) counters.updatedExecutions += 1;
         else counters.insertedExecutions += 1;
+      }
+
+      const existingCashFlows = input.fetchedCashFlows.length === 0
+        ? new Map<string, StoredCashFlowRow>()
+        : new Map((await client.query<StoredCashFlowRow>(
+            `SELECT external_cash_flow_id, operation_type, operation_name,
+                    raw_delta, raw_balance, raw_equity, currency_code,
+                    money_digits, money_digits_source, balance_version, occurred_at
+             FROM ctrader_account_cash_flows
+             WHERE broker_connection_id=$1 AND external_cash_flow_id=ANY($2::text[])`,
+            [input.connection.id, input.fetchedCashFlows.map((cashFlow) => cashFlow.balanceHistoryId)],
+          )).rows.map((row) => [row.external_cash_flow_id, row]));
+      for (const fetchedCashFlow of input.fetchedCashFlows) {
+        const stored = existingCashFlows.get(fetchedCashFlow.balanceHistoryId) ?? null;
+        if (stored && stored.currency_code.trim().toUpperCase() !== accountCurrency) {
+          throw new CTraderSyncError(
+            "CASH_FLOW_ID_CONFLICT",
+            `cTrader changed currency for immutable cash-flow ${fetchedCashFlow.balanceHistoryId}`,
+            false,
+          );
+        }
+        const cashFlow = stored ? mergeStoredCashFlowFacts(stored, fetchedCashFlow) : fetchedCashFlow;
+        const scale = resolveCashFlowMoneyScale({
+          cashFlowMoneyDigits: cashFlow.moneyDigits,
+          accountMoneyDigits: input.trader.moneyDigits,
+          stored: stored === null ? null : {
+            moneyDigits: stored.money_digits,
+            source: stored.money_digits_source,
+          },
+        });
+        const moneyDigits = scale.moneyDigits;
+        const moneyDigitsSource = scale.source;
+        const changed = await client.query<{ id: string }>(
+          `INSERT INTO ctrader_account_cash_flows (
+             id, user_id, broker_connection_id, external_cash_flow_id,
+             operation_type, operation_name, amount, balance, equity,
+             raw_delta, raw_balance, raw_equity, currency_code, money_digits,
+             money_digits_source, balance_version, occurred_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+           ON CONFLICT (broker_connection_id, external_cash_flow_id) DO UPDATE SET
+             operation_type=EXCLUDED.operation_type,
+             operation_name=EXCLUDED.operation_name,
+             amount=EXCLUDED.amount,
+             balance=EXCLUDED.balance,
+             equity=EXCLUDED.equity,
+             raw_delta=EXCLUDED.raw_delta,
+             raw_balance=EXCLUDED.raw_balance,
+             raw_equity=EXCLUDED.raw_equity,
+             currency_code=EXCLUDED.currency_code,
+             money_digits=EXCLUDED.money_digits,
+             money_digits_source=EXCLUDED.money_digits_source,
+             balance_version=EXCLUDED.balance_version,
+             occurred_at=EXCLUDED.occurred_at,
+             synced_at=now()
+           WHERE (
+             ctrader_account_cash_flows.operation_type,
+             ctrader_account_cash_flows.operation_name,
+             ctrader_account_cash_flows.amount,
+             ctrader_account_cash_flows.balance,
+             ctrader_account_cash_flows.equity,
+             ctrader_account_cash_flows.raw_delta,
+             ctrader_account_cash_flows.raw_balance,
+             ctrader_account_cash_flows.raw_equity,
+             ctrader_account_cash_flows.currency_code,
+             ctrader_account_cash_flows.money_digits,
+             ctrader_account_cash_flows.money_digits_source,
+             ctrader_account_cash_flows.balance_version,
+             ctrader_account_cash_flows.occurred_at
+           ) IS DISTINCT FROM (
+             EXCLUDED.operation_type,
+             EXCLUDED.operation_name,
+             EXCLUDED.amount,
+             EXCLUDED.balance,
+             EXCLUDED.equity,
+             EXCLUDED.raw_delta,
+             EXCLUDED.raw_balance,
+             EXCLUDED.raw_equity,
+             EXCLUDED.currency_code,
+             EXCLUDED.money_digits,
+             EXCLUDED.money_digits_source,
+             EXCLUDED.balance_version,
+             EXCLUDED.occurred_at
+           )
+           RETURNING id`,
+          [
+            randomUUID(),
+            input.connection.user_id,
+            input.connection.id,
+            cashFlow.balanceHistoryId,
+            cashFlow.operationType,
+            cashFlow.operationName,
+            moneyDigits === null ? null : decimalFromScaledInteger(cashFlow.delta, moneyDigits),
+            moneyDigits === null ? null : decimalFromScaledInteger(cashFlow.balance, moneyDigits),
+            cashFlow.equity === null || moneyDigits === null ? null : decimalFromScaledInteger(cashFlow.equity, moneyDigits),
+            cashFlow.delta.toString(),
+            cashFlow.balance.toString(),
+            cashFlow.equity?.toString() ?? null,
+            accountCurrency,
+            moneyDigits,
+            moneyDigitsSource,
+            cashFlow.balanceVersion?.toString() ?? null,
+            new Date(cashFlow.changeBalanceTimestamp),
+          ],
+        );
+        if (!changed.rows[0]) continue;
+        if (existingCashFlows.has(cashFlow.balanceHistoryId)) counters.updatedAccountCashFlows! += 1;
+        else counters.insertedAccountCashFlows! += 1;
       }
 
       await this.upsertSymbolSpecs(client, input);
@@ -613,6 +1408,12 @@ export class CTraderSyncEngine {
         fullHistoryComplete: true,
         registrationTimestamp: input.registrationTimestamp,
         syncedThroughTimestamp: input.syncedThroughTimestamp,
+        cashFlowHistoryComplete: true,
+        cashFlowSyncedThroughTimestamp: input.syncedThroughTimestamp,
+        lastCashFlowTimestamp: input.fetchedCashFlows.at(-1)?.changeBalanceTimestamp
+          ?? safeTimestamp(input.cursorBefore.lastCashFlowTimestamp),
+        lastCashFlowId: input.fetchedCashFlows.at(-1)?.balanceHistoryId
+          ?? (typeof input.cursorBefore.lastCashFlowId === "string" ? input.cursorBefore.lastCashFlowId : null),
         lastDealTimestamp: input.fetchedDeals.at(-1)?.executionTimestamp
           ?? safeTimestamp(input.cursorBefore.lastDealTimestamp),
         lastDealId: input.fetchedDeals.at(-1)?.dealId
@@ -621,8 +1422,10 @@ export class CTraderSyncEngine {
       const metadata = {
         registrationTimestamp: input.registrationTimestamp,
         depositAssetId: input.trader.depositAssetId,
-        accountCurrency: this.accountCurrency(input.trader, input.assets),
+        accountCurrency,
         accountMoneyDigits: input.trader.moneyDigits,
+        accountCashFlowHistoryComplete: true,
+        accountCashFlowPositionAttribution: "not_provided_by_ctrader",
         lastErrorCode: null,
         lastErrorMessage: null,
         reauthRequired: false,
@@ -722,18 +1525,27 @@ export class CTraderSyncEngine {
       return;
     }
     const existing = await client.query<ExistingTradeRow>(
-      `SELECT id, deleted_at FROM trades
-       WHERE broker_connection_id=$1 AND external_trade_key=$2
+      `SELECT trade.id, trade.deleted_at, trade.pnl::text, trade.broker_data,
+              EXISTS (
+                SELECT 1 FROM ctrader_trade_links link
+                WHERE link.user_id=trade.user_id
+                  AND link.broker_connection_id=trade.broker_connection_id
+                  AND link.external_trade_key=trade.external_trade_key
+                  AND link.trade_id=trade.id
+              ) AS reconciled_manual_trade
+       FROM trades trade
+       WHERE trade.user_id=$1 AND trade.broker_connection_id=$2 AND trade.external_trade_key=$3
        LIMIT 1`,
-      [input.connection.id, externalKey],
+      [input.connection.user_id, input.connection.id, externalKey],
     );
     const previous = existing.rows[0] ?? null;
     if (previous?.deleted_at) {
       counters.archivedTradesPreserved += 1;
       return;
     }
-    const brokerData = {
+    const providerBrokerData = {
       provider: "ctrader",
+      connectionMode: "official",
       readOnly: true,
       environment: input.connection.provider_environment,
       ctidTraderAccountId: input.connection.external_account_id,
@@ -749,9 +1561,35 @@ export class CTraderSyncEngine {
       swap: projection.swap,
       pnlConversionFee: projection.pnlConversionFee,
       realizedEvents: projection.realizedEvents,
+      pnlMethod: projection.realizedPnlComplete
+        ? "provider_close_detail_money_digits"
+        : projection.realizedEvents.length > 0 ? "partial_provider_close_detail_unavailable" : "not_realized",
+      pnlComponentsCoverage: {
+        version: 1,
+        source: "ProtoOAClosePositionDetail",
+        scope: "realized_closing_deals",
+        tradeLevelExact: projection.realizedPnlComplete,
+        grossProfit: projection.realizedPnlComplete,
+        brokerCommission: projection.realizedPnlComplete,
+        swap: projection.realizedPnlComplete,
+        pnlConversionFee: projection.realizedPnlComplete,
+        formula: "grossProfit + swap + commission - pnlConversionFee",
+        otherAccountCashFlowsIncluded: false,
+        otherAccountCashFlowsAttribution: "not_provided_by_position",
+      },
       accountCurrency: this.accountCurrency(input.trader, input.assets),
+      accountMoneyDigits: input.trader.moneyDigits,
       classification: projection.classification,
     };
+    const authority = mergeOfficialProjectionAuthority({
+      existing: previous === null ? null : {
+        pnl: previous.pnl,
+        brokerData: previous.broker_data,
+        reconciledManualTrade: previous.reconciled_manual_trade,
+      },
+      providerPnl: projection.pnl,
+      providerBrokerData,
+    });
     const changed = await client.query<{ id: string }>(
       `INSERT INTO trades (
          id, user_id, account_id, legacy_account_id, broker_connection_id,
@@ -816,14 +1654,14 @@ export class CTraderSyncEngine {
         projection.entryPrice,
         projection.exitPrice,
         projection.quantityLots,
-        projection.pnl,
+        authority.pnl,
         projection.isOpen,
         projection.tradeDate,
         projection.entryAt,
         projection.exitAt,
         projection.entryTime,
         projection.exitTime,
-        json(brokerData),
+        json(authority.brokerData),
       ],
     );
     const tradeId = changed.rows[0]?.id ?? previous?.id ?? null;

@@ -20,6 +20,8 @@ published application port is `127.0.0.1:3210`; PostgreSQL has no host port.
 - `Dockerfile.api` — Node.js 22 API image; runs `server/dist/main.js`.
 - `Dockerfile.migration` — profile-gated Node.js 22 data-migration image.
 - `scripts/build-public.sh` — creates an allowlisted, VPS-only static `public/` directory.
+- `scripts/migrate-release.sh` — runs an explicitly tagged schema migrator only after the API and worker are quiesced.
+- `scripts/verify-rollback-candidate.sh` — rejects public artifacts that cannot safely display canonical cTrader base-unit quantities.
 - `nginx/edgebook.conf` — host Nginx TLS virtual host and reverse proxy.
 - `systemd/edgebook-stack.service` — owns the Compose stack.
 - `systemd/edgebook-backup.{service,timer}` — bounded nightly backup job.
@@ -125,17 +127,35 @@ server code, migration utilities, and deployment material.
    with an explicit migration instead. Do not start the API until application
    migrations pass, because its `/readyz` healthcheck intentionally rejects an
    incomplete schema.
-10. Run application schema migrations through the explicit tools profile using
-   `MIGRATION_DATABASE_URL`, which must authenticate `edgebook_owner` at the
-   private hostname `postgres:5432`:
+10. Run application schema migrations through the guarded release helper. On an
+   upgrade, first quiesce both Edge Book writer processes; PostgreSQL stays up
+   and must remain healthy. The helper does not stop or restart services. It
+   takes the shared maintenance lock, rejects a running `api`, `worker`, or
+   second migrator, pins an explicit release and immutable API image tag, and
+   invokes only `migrate` with `--no-deps --pull never`:
 
    ```sh
-   docker compose \
+   sudo docker compose \
      --project-directory /opt/edgebook/current \
      --env-file /etc/edgebook/edgebook.env \
      -f /opt/edgebook/current/deploy/vps/docker-compose.yml \
-     --profile tools run --rm migrate
+     --profile writer stop --timeout 30 worker api
+
+   sudo /opt/edgebook/releases/<release-id>/deploy/vps/scripts/migrate-release.sh \
+     --release-dir /opt/edgebook/releases/<release-id> \
+     --env-file /etc/edgebook/edgebook.env \
+     --image-tag <immutable-image-tag>
    ```
+
+   Confirm the stop completed before invoking the helper, and do not start or
+   reload `edgebook-stack.service` concurrently with the maintenance window.
+   Do not bypass the helper's container-label or health checks. Migration 008
+   takes PostgreSQL table locks for numeric precision changes, so its
+   transaction-local `lock_timeout=30s` and `statement_timeout=15min` are
+   intentional. A timeout rolls that migration back. Investigate the competing
+   session or table size; never increase or disable either bound during the
+   release window without a new review. Keep the API and worker stopped until
+   the migration, static compatibility check, and release switch have passed.
 
    The API `DATABASE_URL` must authenticate `edgebook_app` at `postgres:5432`.
    Neither URL may resolve the host PostgreSQL service.
@@ -163,6 +183,47 @@ server code, migration utilities, and deployment material.
 Steps 4–11 are future operator instructions, not actions performed by this
 repository change. Production routing remains unchanged until a separate
 cutover approval.
+
+## cTrader base-unit compatibility and rollback
+
+This release introduces a data compatibility boundary. When verified cTrader
+contract metadata is unavailable, the writer may store the exact provider size
+as `brokerData.quantityProjection.unit=base_units`. A compatible public build
+labels that unit explicitly, includes it as `Size Unit` in CSV exports, avoids
+lot-based duplicate comparisons, and excludes it from lot-based exposure until
+a verified conversion exists. `build-public.sh` checks those source contracts
+before writing
+`tradeQuantityCompatibility=ctrader-quantity-projection-base-units-v1` to
+`edgebook-build.json`.
+
+Before pointing `/opt/edgebook/current` at any rollback release, run the
+verifier from this release:
+
+```sh
+sudo /opt/edgebook/releases/<this-release>/deploy/vps/scripts/verify-rollback-candidate.sh \
+  --candidate /opt/edgebook/releases/<rollback-release>
+```
+
+The check is deliberately conservative even if no base-unit row is visible at
+the time. Release `5039ae4` and other pre-marker artifacts are rejected because
+their UI can present a base-unit value as lots and include it in exposure.
+
+After a base-unit-capable worker may have run, rollback is fix-forward:
+
+1. Stop `worker` and `api`, clear the writer profile/scheduler gate, and leave
+   PostgreSQL running. Do not start an older worker against the live database.
+2. Keep the current base-unit-compatible `public/` artifact. Never switch Nginx
+   to a candidate rejected by `verify-rollback-candidate.sh`.
+3. Restore service only with a reviewed release that passes the verifier and is
+   write-compatible with `quantityProjection`. If none is available, remain in
+   maintenance mode and ship a forward fix; do not reinterpret or rewrite the
+   stored quantities.
+4. A full database restore is a separate, explicitly approved data-loss action.
+   It is only a pre-write rollback when the backup predates every new-writer
+   production write and its upload/database pair has passed `verify-backup.sh`.
+
+The numeric widening and account cash-flow table are expand-only database
+changes, but that does not make an old UI or worker data-semantics compatible.
 
 ## Single-writer rule
 

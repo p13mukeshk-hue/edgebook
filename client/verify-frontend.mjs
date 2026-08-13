@@ -280,6 +280,8 @@ const closeModalSource = sourceBetween('function closeModal', 'function showConf
 const duplicateResolutionSource = sourceBetween('async function resolveDup', 'function showManualDupModal');
 const jsonImportSource = sourceBetween('function importTradesJSON', 'function csvFormulaSafeText');
 const csvImportCommitSource = sourceBetween('async function csvImportTrades', 'let ddRange');
+const quantityProjectionSource = sourceBetween('function isCTraderTrade', 'const CTRADER_CALCULATED_GROSS_METHOD');
+const sizeLabelSource = sourceBetween('function getSizeLabel', 'function tradeRow');
 requireMatch(migrationExportSource, /const bundle=\{users:\{\[legacyUid\]:\{[\s\S]*?settings:[\s\S]*?moods:[\s\S]*?dailyJournal:/, 'complete per-UID migration export shape');
 requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]vps['"][\s\S]*?return this\._syncVpsTrades\(t\);[\s\S]*?return false;/, 'trade save returns false without a selected provider');
 requireMatch(dataStoreSource, /async _syncVpsTrades\(items\)[\s\S]*?const results=await Promise\.allSettled\(pending\);[\s\S]*?return failed\.length===0;/, 'trade save awaits every VPS mutation');
@@ -661,7 +663,7 @@ if (equityProjectionContext.axisDomain?.min !== -3348 || equityProjectionContext
 
 try {
   const { exports: duplicateFixture } = evaluateSecurityFixture(
-    duplicateResolutionSource,
+    `${quantityProjectionSource}\n${duplicateResolutionSource}`,
     {},
     '{findLocalDuplicate}',
   );
@@ -683,6 +685,16 @@ try {
   }
   if (duplicateFixture.findLocalDuplicate(existing, [existing]) !== null) {
     failures.push('Idempotent retry of the same browser trade ID was flagged as a new duplicate');
+  }
+  const cTraderBaseUnits = {
+    ...existing,
+    id: 'ctrader-base-units',
+    source: 'ctrader',
+    size: 0.1,
+    brokerData: { quantityProjection: { version: 1, value: '0.1', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
+  };
+  if (duplicateFixture.findLocalDuplicate(nearCopy, [cTraderBaseUnits]) !== null) {
+    failures.push('A manual lot quantity was falsely matched to a cTrader base-unit quantity');
   }
 } catch (error) {
   failures.push(`Manual duplicate fixture failed: ${error.message}`);
@@ -717,6 +729,8 @@ try {
       DASH_TC: 'dashboard-text',
       FxRates: { toUSD: value => Number(value) },
       acctCur: () => '$',
+      tradePnlInAccountCurrency: (trade, value = trade?.pnl) => Number(value),
+      tradePnlToUSD: (trade, value = trade?.pnl) => Number(value),
       realizedLedgerForTrades: source => source,
       isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
       safeAccountColor: value => value,
@@ -1020,6 +1034,7 @@ requireMatch(app, /const CTRADER_OWNED_FORM_IDS=\[[^\]]*['"]t-time['"][^\]]*\]/,
 rejectMatch(app.match(/const CTRADER_OWNED_FORM_IDS=\[[^\]]*\]/)?.[0] || '', /['"]t-date['"]/, 'cTrader journal-date form lock');
 requireMatch(app, /id="t-date-label"[\s\S]*?id="t-date"[\s\S]*?id="t-date-help"/, 'editable cTrader journal-date explanation');
 requireMatch(app, /cTraderReviewBadge\(t\)/, 'cTrader needs-review table badge');
+requireMatch(app, /function renderHmInsert[\s\S]*?getTradeSizeValue\(t\)[\s\S]*?getSizeLabel\(t\)[\s\S]*?Size \(\$\{escapeHtml\(sizeUnit\)\}\)/, 'heatmap cTrader quantity unit label');
 requireMatch(app, /id="sn-brokers"[^>]*showBrokerConnections/, 'dedicated broker sync settings navigation');
 requireMatch(app, /cTrader automatic sync[\s\S]*?Setup required[\s\S]*?never paste a broker password, API secret, or access token/, 'visible fail-closed cTrader setup card');
 requireMatch(app, /escapeCtraderText\(JSON\.stringify\(id\)\)/, 'safe VPS cTrader inline identifier');
@@ -1073,7 +1088,8 @@ requireMatch(ctraderHistoryUiSource, /action===['"]leave_pending['"]\?showToast[
 requireMatch(ctraderHistoryUiSource, /reject:['"]Exclude from this import['"][\s\S]*?allowed\.includes\(action\)/, 'server-authorized historical exclusion control');
 requireMatch(ctraderHistoryUiSource, /reject:['"]No journal trade will be created, linked, deleted, or edited\.[\s\S]*?Only this staged candidate is excluded from this historical import/, 'non-destructive historical exclusion confirmation');
 requireMatch(ctraderHistoryUiSource, /manual\.hasNotes[\s\S]*?manual\.hasPsychology[\s\S]*?customFieldCount[\s\S]*?screenshotCount/, 'privacy-preserving manual journal summary shown in historical review');
-requireMatch(ctraderHistoryUiSource, /entryPrice\?\?broker\?\.entry[\s\S]*?exitPrice\?\?broker\?\.exit[\s\S]*?quantityLots\?\?broker\?\.quantity/, 'canonical broker projection fields shown in historical review');
+requireMatch(ctraderHistoryUiSource, /quantityUnit===['"]base_units['"][\s\S]*?quantityBaseUnits\?\?broker\?\.quantity[\s\S]*?quantityLots\?\?broker\?\.quantity/, 'canonical broker quantity projection fields shown in historical review');
+requireMatch(ctraderHistoryUiSource, /entryPrice\?\?broker\?\.entry[\s\S]*?exitPrice\?\?broker\?\.exit/, 'canonical broker price projection fields shown in historical review');
 requireMatch(ctraderHistoryUiSource, /function ctraderDifferenceSummaries[\s\S]*?Object\.entries\(value\)[\s\S]*?manual[\s\S]*?broker/, 'object-shaped reconciliation differences shown safely');
 
 try {
@@ -1154,6 +1170,7 @@ try {
     vpsCtraderState: { mcpEnabled: true, oauthEnabled: false },
     escapeCtraderText: value => String(value ?? ''),
     formatCtraderWhen: () => 'now',
+    ctraderAccountCashFlowLedger: () => '',
   };
   const rendered = vm.runInNewContext(`
     ${ctraderCardSource}
@@ -1268,6 +1285,16 @@ try {
     manualTrade: null,
     allowedActions: ['reject'],
   });
+  const baseUnitCard = candidateFixture.renderCtraderCandidate({
+    ...baseCandidate,
+    classification: 'unmatched',
+    manualTrade: null,
+    brokerTrade: {
+      ...baseCandidate.brokerTrade,
+      quantity: '2', quantityUnit: 'base_units', quantityLots: null, quantityBaseUnits: '2',
+    },
+    allowedActions: ['publish_separate', 'reject'],
+  });
   const collect = (element, predicate, output = []) => {
     if (predicate(element)) output.push(element);
     for (const child of element?.children || []) collect(child, predicate, output);
@@ -1280,6 +1307,7 @@ try {
   const executionOnlyButtons = buttonLabels(executionOnlyCard);
   const unmatchedButtons = buttonLabels(unmatchedCard);
   const excludedButtons = buttonLabels(excludedCard);
+  const baseUnitText=collect(baseUnitCard,element=>typeof element?.textContent==='string').map(element=>element.textContent).join('\n');
   if (deletedButtons.join('|') !== 'Suppress because manually deleted|Leave pending') {
     failures.push('Deleted-manual historical candidate exposed an unsafe action');
   }
@@ -1297,6 +1325,9 @@ try {
   }
   if (excludedButtons.length !== 0 || !collect(excludedCard, element => /Excluded from this import\. No journal trade was changed\./.test(element?.textContent || '')).length) {
     failures.push('Completed historical exclusion still exposed actions or omitted its non-destructive saved state');
+  }
+  if (!baseUnitText.includes('Size (base units)') || !baseUnitText.includes('2') || baseUnitText.includes('Size (lots)')) {
+    failures.push('Historical cTrader review mislabeled a base-unit quantity');
   }
   for (const card of [executionOnlyCard, unmatchedCard]) {
     const excludeButton = collect(card, element => element?.tagName === 'BUTTON').find(button => button.textContent === 'Exclude from this import');
@@ -1365,9 +1396,20 @@ try {
   const unversionedCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, version: null, classification: 'high_confidence', manualTrade: liveCandidateBase.manualChoices[0], allowedActions: ['link_manual'] });
   const deletedCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, classification: 'deleted_manual', manualTrade: { ...liveCandidateBase.manualChoices[0], deleted: true }, allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted', 'reject'] });
   const pairedCard = liveReview.renderLiveCtraderCandidate('connection-1', { ...liveCandidateBase, classification: 'existing_pair', manualTrade: liveCandidateBase.manualChoices[0], allowedActions: ['link_manual', 'publish_separate', 'suppress_deleted', 'reject'] });
+  const baseUnitCard = liveReview.renderLiveCtraderCandidate('connection-1', {
+    ...liveCandidateBase,
+    classification: 'ambiguous',
+    allowedActions: ['publish_separate', 'reject'],
+    brokerTrade: {
+      ...liveCandidateBase.brokerTrade,
+      quantity: '2', quantityUnit: 'base_units', quantityLots: null, quantityBaseUnits: '2',
+    },
+  });
   if (liveButtons(unknownCard).length || liveButtons(unversionedCard).length) failures.push('Unknown or unversioned live cTrader candidate exposed a mutation control');
   if (liveButtons(deletedCard).join('|') !== 'Suppress broker copy|Dismiss match') failures.push('Deleted-manual live match exposed an unsafe action');
   if (liveButtons(pairedCard).join('|') !== 'Merge + preserve manual journal|Dismiss match') failures.push('Broker-first existing pair exposed keep-both or suppression after broker publication');
+  const baseUnitText=collectLive(baseUnitCard,element=>typeof element?.textContent==='string').map(element=>element.textContent).join('\n');
+  if (!baseUnitText.includes('Size (base units)') || !baseUnitText.includes('2') || baseUnitText.includes('Size (lots)')) failures.push('Live cTrader review mislabeled a base-unit quantity');
   if (liveDocument.created.some(element => element._innerHtmlWrites > 0) || context.__edgebookXss) failures.push('Live cTrader review rendered untrusted values through executable HTML');
   const liveText = liveDocument.created.map(element => element.textContent).join('\n');
   for (const expected of [maliciousMarkup, 'Verified cTrader facts', 'Manual journal details preserved', 'Saved and preserved', '2 preserved']) {
@@ -1388,7 +1430,9 @@ try {
     ['t-date-label', { textContent: '' }],
     ['t-date-help', { textContent: '' }],
     ['broker-owned-note', { classList: { toggle() {} } }],
+    ['broker-pnl-breakdown', { textContent: '', classList: { toggle() {} } }],
     ['broker-calculated-gross', { textContent: '', classList: { toggle() {} } }],
+    ['t-size-label', { innerHTML: '' }],
     ...['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-date','t-time']
       .map(id => [id, { disabled: false }]),
   ]);
@@ -1399,9 +1443,12 @@ try {
       tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
       tradeHasPnl: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
       isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
-      document: { getElementById: id => reviewElements.get(id) || null },
+      document: {
+        getElementById: id => reviewElements.get(id) || null,
+        querySelector: selector => selector === 'label[for-size]' ? reviewElements.get('t-size-label') : null,
+      },
     },
-    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,cTraderCalculatedGross,calculatedGrossText,setTradeBrokerOwnedMode}',
+    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,cTraderCalculatedGross,calculatedGrossText,cTraderExactPnlBreakdown,cTraderExactPnlBreakdownText,setTradeBrokerOwnedMode}',
   );
   const imported = { source: 'ctrader', isOpen: true, date: '2026-08-11', entryAt: '2026-08-11T01:00:00.000Z', brokerData: { providerTradeDate: '2026-08-11', realizedEvents: [] }, custom: {} };
   if (!review.cTraderTradeNeedsReview(imported)) failures.push('A newly imported cTrader trade was not marked for review');
@@ -1413,6 +1460,15 @@ try {
   if (reviewElements.get('t-date').disabled) failures.push('cTrader journal date was locked with provider-owned execution facts');
   if (!reviewElements.get('t-time').disabled || !reviewElements.get('t-entry').disabled || !reviewElements.get('t-sym').disabled) failures.push('cTrader provider execution facts were left editable');
   if (reviewElements.get('t-date-label').textContent !== 'Journal date' || !/sync will not overwrite/i.test(reviewElements.get('t-date-help').textContent)) failures.push('cTrader journal date ownership was not explained');
+  const baseUnitTrade = {
+    ...imported,
+    brokerData: {
+      ...imported.brokerData,
+      quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' },
+    },
+  };
+  review.setTradeBrokerOwnedMode(baseUnitTrade);
+  if (!/XAU base units from cTrader; lot conversion unavailable/.test(reviewElements.get('t-size-label').innerHTML)) failures.push('Unknown-contract cTrader quantity was not identified as base units in the edit form');
   if (review.cTraderProviderTradeDate({ date: '2026-08-12', brokerData: { providerTradeDate: '2026-08-11' } }) !== '2026-08-11') failures.push('cTrader provider date did not remain distinct from edited journal date');
   const calculated = { source: 'ctrader', pnl: null, brokerData: {
     calculatedGrossPnl: '20.66', calculatedGrossCurrency: 'USD',
@@ -1435,8 +1491,44 @@ try {
   if (review.cTraderCalculatedGross({ ...calculated, pnl: 19.5 }) !== null) failures.push('Provider exact net P&L did not supersede calculated gross in the UI');
   review.setTradeBrokerOwnedMode(calculated);
   if (!/Calculated gross: \+\$20\.66 USD[\s\S]*outside Net P&L and analytics/.test(reviewElements.get('broker-calculated-gross').textContent)) failures.push('cTrader calculated-gross detail did not disclose fee and analytics exclusions');
+  const exact = { source: 'ctrader', pnl: '114.5', brokerData: {
+    pnlMethod: 'provider_close_detail_money_digits', accountCurrency: 'USDT',
+    grossProfit: '120', swap: '-1', commission: '-4', pnlConversionFee: '0.5',
+    pnlComponentsCoverage: {
+      version: 1, source: 'ProtoOAClosePositionDetail', tradeLevelExact: true,
+      grossProfit: true, brokerCommission: true, swap: true, pnlConversionFee: true,
+      otherAccountCashFlowsIncluded: false, otherAccountCashFlowsAttribution: 'not_provided_by_position',
+    },
+  } };
+  const exactBreakdown = review.cTraderExactPnlBreakdown(exact);
+  if (!exactBreakdown || exactBreakdown.currency !== 'USDT') failures.push('Provider-exact trade P&L breakdown rejected an official account asset currency');
+  if (!/Broker trade net[\s\S]*gross[\s\S]*swap[\s\S]*commission[\s\S]*conversion fee[\s\S]*not assumed to be zero/.test(review.cTraderExactPnlBreakdownText(exactBreakdown))) failures.push('Provider-exact trade P&L breakdown omitted components or the account-charge boundary');
+  if (review.cTraderExactPnlBreakdown({ ...exact, pnl: '114.6' }) !== null) failures.push('Inconsistent provider component arithmetic was presented as an exact P&L breakdown');
+  review.setTradeBrokerOwnedMode(exact);
+  if (!/Broker trade net[\s\S]*Separate account-level cash flows/.test(reviewElements.get('broker-pnl-breakdown').textContent)) failures.push('Trade modal did not expose exact broker P&L components separately from account cash flows');
 } catch (error) {
   failures.push(`cTrader review lifecycle fixture failed: ${error.message}`);
+}
+
+try {
+  const ledgerSource = sourceBetween('function ctraderCashFlowLabel', 'function ctraderConnectionCard');
+  const { context, exports: ledger } = evaluateSecurityFixture(
+    ledgerSource,
+    {
+      escapeCtraderText: value => String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'),
+      formatCtraderWhen: value => String(value),
+    },
+    '{ctraderAccountCashFlowLedger}',
+  );
+  const ledgerHtml = ledger.ctraderAccountCashFlowLedger({ accountCashFlows: [{
+    operationName: maliciousMarkup,
+    amount: '-1.25', currency: maliciousMarkup,
+    occurredAt: '2026-08-13T10:00:00.000Z', balanceHistoryId: maliciousIdentifier,
+  }] }, false);
+  if (/<(?:img|svg|script)\b/i.test(ledgerHtml) || context.__edgebookXss) failures.push('Account cash-flow ledger rendered untrusted provider fields as executable HTML');
+  if (!/does not assign them to a trade[\s\S]*not assume an absent charge is zero/.test(ledgerHtml)) failures.push('Account cash-flow ledger omitted its non-attribution and unknown-charge boundary');
+} catch (error) {
+  failures.push(`cTrader account cash-flow ledger fixture failed: ${error.message}`);
 }
 
 // Coaching reports are deterministic and private. Browser code must never
@@ -1560,7 +1652,7 @@ try {
     return JSON.stringify(value);
   };
   const { exports: identity } = evaluateSecurityFixture(
-    `${csvIdentitySource}\n${csvDocumentIdSource}`,
+    `${quantityProjectionSource}\n${csvIdentitySource}\n${csvDocumentIdSource}`,
     { stableJson: stableJsonFixture, crypto: globalThis.crypto, TextEncoder, tradeIsOpen: trade => trade?.isOpen === true },
     '{csvImportNaturalKey,csvMatchesExisting,csvImportDocumentId}',
   );
@@ -1578,6 +1670,14 @@ try {
       identity.csvMatchesExisting({ ...formerOpen, accountId: 'acct-b', source: 'csv', broker: 'generic', size: 2, isOpen: true }, { ...formerOpen, size: 2 }, 'acct-a', 'csv', 'generic')) {
     failures.push('CSV existing-open matching scope regressed');
   }
+  const legacyBaseUnitTrade = {
+    ...formerOpen,
+    accountId: 'acct-a', source: 'ctrader', broker: 'ctrader', size: 2, isOpen: true,
+    brokerData: { quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
+  };
+  if (identity.csvMatchesExisting(legacyBaseUnitTrade, { ...formerOpen, size: 2 }, 'acct-a', 'ctrader', 'ctrader')) {
+    failures.push('CSV field matching compared broker-native size with cTrader base units');
+  }
 } catch (error) {
   failures.push(`CSV identity fixture failed: ${error.message}`);
 }
@@ -1585,12 +1685,14 @@ try {
 try {
   const { exports: parser } = evaluateSecurityFixture(csvParserSource, {}, '{parseCSV}');
   const { exports: csvExport } = evaluateSecurityFixture(
-    csvExportSource,
+    `${quantityProjectionSource}\n${sizeLabelSource}\n${csvExportSource}`,
     {
       ASSET_LABELS: { eq: 'Equities' },
       tradeIsOpen: trade => trade?.isOpen === true,
       tradeHasPnl: trade => Number.isFinite(Number(trade?.pnl)),
       acctName: () => '@Desk',
+      acctCur: () => '$',
+      normalizeFxCurrency: value => value === '$' ? 'USD' : /^[A-Z]{3}$/.test(String(value)) ? String(value) : null,
     },
     '{tradeJournalCsv}',
   );
@@ -1602,11 +1704,18 @@ try {
   const journalCsv = csvExport.tradeJournalCsv([{
     date: '2026-01-01', symbol: '=CMD()', asset: 'eq', direction: 'Long', entry: 10, exit: 8, size: 1,
     pnl: -2, strategy: '+SUM(1,1)', custom: { playbook: { setup: '=HYPERLINK("bad")', grade: 'A' } }, emotion: 'Calm', accountId: 'acct-a', notes: 'line 1, "quoted"\nline 2', isOpen: false,
+  }, {
+    date: '2026-01-02', symbol: 'XAUUSD', asset: 'cm', direction: 'Long', entry: 2000, exit: 2001, size: 0.02,
+    pnl: 2, strategy: 'System', custom: { playbook: {} }, emotion: 'Calm', accountId: 'acct-a', notes: '', isOpen: false, source: 'ctrader',
+    brokerData: { accountCurrency: 'EUR', quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
   }]);
   const journalRows = JSON.parse(JSON.stringify(parser.parseCSV(journalCsv)));
-  if (!journalCsv.includes('\r\n') || journalRows.length !== 2 || journalRows[1].length !== 21 || journalRows[1][1] !== "'=CMD()" ||
-      journalRows[1][9] !== '-2.00' || journalRows[1][10] !== "'+SUM(1,1)" || journalRows[1][11] !== "'=HYPERLINK(\"bad\")" || journalRows[1][19] !== "'@Desk" || journalRows[1][20] !== 'line 1, "quoted"\nline 2') {
+  if (!journalCsv.includes('\r\n') || journalRows.length !== 3 || journalRows[1].length !== 23 || journalRows[1][1] !== "'=CMD()" ||
+      journalRows[1][10] !== '-2.00' || journalRows[1][11] !== 'USD' || journalRows[1][12] !== "'+SUM(1,1)" || journalRows[1][13] !== "'=HYPERLINK(\"bad\")" || journalRows[1][21] !== "'@Desk" || journalRows[1][22] !== 'line 1, "quoted"\nline 2') {
     failures.push('RFC 4180 journal export or spreadsheet-injection protection regressed');
+  }
+  if (journalRows[0][7] !== 'Size Unit' || journalRows[0][11] !== 'PnL Currency' || journalRows[2][6] !== '2' || journalRows[2][7] !== 'XAU base units' || journalRows[2][11] !== 'EUR') {
+    failures.push('Journal CSV export mislabeled a cTrader base-unit quantity as lots');
   }
 } catch (error) {
   failures.push(`CSV parser/export fixture failed: ${error.message}`);
@@ -1789,7 +1898,7 @@ try {
 try {
   const duplicateSource = sourceBetween('function _dupFld', 'async function resolveDup');
   const { exports: duplicate } = evaluateSecurityFixture(
-    `${securityHelperSource}\n${duplicateSource}`,
+    `${securityHelperSource}\n${quantityProjectionSource}\n${sizeLabelSource}\n${duplicateSource}`,
     { window: securityWindow, formatDate: value => value },
     '{dupTradeCard}',
   );
@@ -1806,6 +1915,11 @@ try {
     source: maliciousMarkup,
   }, null);
   assertNoExecutablePayload(html, 'Duplicate trade renderer');
+  const baseUnitHtml = duplicate.dupTradeCard({
+    symbol: 'XAUUSD', direction: 'Long', date: '2026-08-13', entry: 2000, exit: 2001, size: 0.02, pnl: 2,
+    source: 'ctrader', brokerData: { quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
+  }, null);
+  if (!/Size \(XAU base units\)/.test(baseUnitHtml) || !/>2</.test(baseUnitHtml)) failures.push('Duplicate review card mislabeled a cTrader base-unit quantity');
 } catch (error) {
   failures.push(`Duplicate-trade XSS fixture failed: ${error.message}`);
 }
@@ -1880,11 +1994,13 @@ try {
   const account = { id: maliciousIdentifier, name: maliciousMarkup, color: '#6c63ff', currency: maliciousMarkup };
   const tradeSource = sourceBetween('function acctTagCell', 'function getBaseFilteredTrades');
   const { exports: tradeRenderer } = evaluateSecurityFixture(
-    `${securityHelperSource}\n${positionSemanticsSource}\n${screenshotLookupSource}\n${tradeSource}`,
+    `${securityHelperSource}\n${positionSemanticsSource}\n${screenshotLookupSource}\n${quantityProjectionSource}\n${tradeSource}`,
     {
       window: securityWindow,
       getAccount: id => id === account.id ? account : null,
       acctCur: () => maliciousMarkup,
+      normalizeFxCurrency: () => null,
+      calculatedGrossCurrencyPrefix: currency => currency === 'EUR' ? '€' : `${currency} `,
       pnlBreakdown: () => maliciousMarkup,
       cTraderCalculatedGross: () => null,
       calculatedGrossText: () => '',
@@ -1925,6 +2041,18 @@ try {
   assertInlineArgument(html, 'openLightbox', maliciousIdentifier, 'Trade screenshot action');
   const unsafeScreenshotHtml = tradeRenderer.tradeRow({ ...persistedTrade, screenshots: [{ src: 'javascript:alert(1)' }] });
   if (/javascript:/i.test(unsafeScreenshotHtml)) failures.push('Trade row retained an unsafe persisted screenshot URL');
+  const baseUnitHtml = tradeRenderer.tradeRow({
+    ...persistedTrade,
+    id: 'ctrader-base-units', source: 'ctrader', symbol: 'XAUUSD', asset: 'cm', size: 0.02,
+    brokerData: { quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
+  });
+  if (!/>2 <[\s\S]*?>XAU base units</.test(baseUnitHtml) || />2 <[\s\S]*?>lots</.test(baseUnitHtml)) failures.push('Trade row mislabeled an unknown-contract cTrader quantity');
+  const providerMoneyHtml = tradeRenderer.tradeRow({
+    ...persistedTrade,
+    id: 'ctrader-provider-currency', source: 'ctrader', pnl: 1,
+    brokerData: { accountCurrency: 'EUR' },
+  });
+  if (!providerMoneyHtml.includes('+€1.00')) failures.push('Trade row did not use authoritative cTrader account currency for provider P&L');
 } catch (error) {
   failures.push(`Trade-row XSS fixture failed: ${error.message}`);
 }
@@ -1979,6 +2107,32 @@ try {
   assertNoExecutablePayload(document.getElementById('mood-history-list').innerHTML, 'Mood-history renderer');
 } catch (error) {
   failures.push(`Mood-history XSS fixture failed: ${error.message}`);
+}
+
+try {
+  const document = makeFakeDocument();
+  const exposureSource = sourceBetween('function renderExposure', 'function calcPos');
+  const { exports: exposure } = evaluateSecurityFixture(
+    `${quantityProjectionSource}\n${exposureSource}`,
+    {
+      document,
+      trades: [
+        { source: 'manual', asset: 'eq', entry: 100, size: 2, isOpen: true },
+        { source: 'ctrader', asset: 'cm', entry: 2000, size: 0.02, isOpen: true, brokerData: { quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } } },
+      ],
+      tradeIsOpen: trade => trade?.isOpen === true,
+      ASSET_LABELS: { eq: 'Equities', cx: 'Crypto', fx: 'Forex', cm: 'Commodity' },
+      cur: () => '$',
+    },
+    '{renderExposure}',
+  );
+  exposure.renderExposure();
+  const html = document.getElementById('exposure-wrap').innerHTML;
+  if (!html.includes('Equities (1)') || !html.includes('1 cTrader position is excluded') || html.includes('Commodity (1)')) {
+    failures.push('Exposure analytics treated a cTrader base-unit quantity as a broker lot quantity');
+  }
+} catch (error) {
+  failures.push(`cTrader base-unit exposure fixture failed: ${error.message}`);
 }
 
 try {
@@ -2194,6 +2348,7 @@ try {
       hmSize: 'equal',
       hmSelected: null,
       acctCur: () => '$',
+      tradeMoneyPrefix: () => '$',
       formatDate: value => value,
       hmSelectTrade() {},
     },
@@ -2241,6 +2396,8 @@ try {
       hmFilteredTrades: () => [maliciousHeatmapTrade],
       buildHmGridWithInsert() {},
       acctCur: () => '$',
+      tradeMoneyPrefix: () => '$',
+      tradePnlToUSD: (trade, value = trade?.pnl) => Number(value),
       FxRates: { toUSD: value => value },
       ASSET_LABELS: {},
       signedMoney: (value, symbol) => `${Number(value) < 0 ? '-' : Number(value) > 0 ? '+' : ''}${symbol}${Math.abs(Number(value)).toFixed(0)}`,
@@ -2411,6 +2568,8 @@ if (!coachingFunctions) {
     activePageAcct: { analytics: 'all' },
     FxRates: { toUSD: amount => amount },
     acctCur: () => '$',
+    tradePnlInAccountCurrency: (trade, value = trade?.pnl) => Number(value),
+    tradePnlToUSD: (trade, value = trade?.pnl) => Number(value),
     getAccount: () => null,
     compareTradeChronology: (left, right) => `${left?.date || ''}T${left?.entryTime || ''}`.localeCompare(`${right?.date || ''}T${right?.entryTime || ''}`),
     tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),

@@ -10,6 +10,7 @@ const requiredMigrations = [
   "005_ctrader_historical_reconciliation.sql",
   "006_screenshot_upload_idempotency.sql",
   "007_ctrader_live_reconciliation.sql",
+  "008_ctrader_account_cash_flows.sql",
   "900_legacy_firebase_archive.sql",
 ] as const;
 

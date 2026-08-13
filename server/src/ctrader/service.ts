@@ -64,6 +64,23 @@ type ConnectionRow = QueryResultRow & {
   latest_sync_finished_at: Date | string | null;
 };
 
+type AccountCashFlowRow = QueryResultRow & {
+  external_cash_flow_id: string;
+  operation_type: number | null;
+  operation_name: string;
+  amount: string | null;
+  balance: string | null;
+  equity: string | null;
+  raw_delta: string;
+  raw_balance: string;
+  raw_equity: string | null;
+  currency_code: string;
+  money_digits: number | null;
+  money_digits_source: "cash_flow" | "account" | "unavailable";
+  balance_version: string | null;
+  occurred_at: Date | string;
+};
+
 export type CTraderPublicConnection = {
   id: string;
   connected: boolean;
@@ -95,6 +112,25 @@ export type CTraderPublicSyncRun = {
   errorMessage: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+};
+
+export type CTraderPublicAccountCashFlow = {
+  balanceHistoryId: string;
+  operationType: number | null;
+  operationName: string;
+  amount: string | null;
+  balance: string | null;
+  equity: string | null;
+  rawAmountUnits: string;
+  rawBalanceUnits: string;
+  rawEquityUnits: string | null;
+  currency: string;
+  moneyDigits: number | null;
+  moneyDigitsSource: "cash_flow" | "account" | "unavailable";
+  balanceVersion: string | null;
+  occurredAt: string;
+  positionAttribution: "not_available_from_ctrader";
+  scalingStatus: "exact" | "money_digits_unavailable";
 };
 
 export type CTraderHistoricalImport = {
@@ -208,6 +244,7 @@ export interface CTraderBrokerService {
     connection: CTraderPublicConnection;
     latestSyncRun: CTraderPublicSyncRun | null;
     historicalImport: CTraderHistoricalImport | null;
+    accountCashFlows: CTraderPublicAccountCashFlow[];
   }>;
   queueManualSync(userId: string, connectionId: string): Promise<{ syncRunId: string; status: "queued" }>;
   startHistoricalImport(input: {
@@ -518,6 +555,36 @@ function mapLatestSync(row: ConnectionRow): CTraderPublicSyncRun | null {
   };
 }
 
+function canonicalDatabaseDecimal(value: string | null): string | null {
+  if (value === null) return null;
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!match) throw new Error("Stored cTrader account cash-flow amount is malformed");
+  const fraction = (match[3] ?? "").replace(/0+$/, "");
+  const unsigned = `${match[2]}${fraction.length > 0 ? `.${fraction}` : ""}`;
+  return /^0(?:\.0*)?$/.test(unsigned) ? "0" : `${match[1]}${unsigned}`;
+}
+
+function mapAccountCashFlow(row: AccountCashFlowRow): CTraderPublicAccountCashFlow {
+  return {
+    balanceHistoryId: row.external_cash_flow_id,
+    operationType: row.operation_type,
+    operationName: row.operation_name,
+    amount: canonicalDatabaseDecimal(row.amount),
+    balance: canonicalDatabaseDecimal(row.balance),
+    equity: canonicalDatabaseDecimal(row.equity),
+    rawAmountUnits: row.raw_delta,
+    rawBalanceUnits: row.raw_balance,
+    rawEquityUnits: row.raw_equity,
+    currency: row.currency_code,
+    moneyDigits: row.money_digits,
+    moneyDigitsSource: row.money_digits_source,
+    balanceVersion: row.balance_version,
+    occurredAt: new Date(row.occurred_at).toISOString(),
+    positionAttribution: "not_available_from_ctrader",
+    scalingStatus: row.money_digits === null ? "money_digits_unavailable" : "exact",
+  };
+}
+
 type HistoricalImportRow = QueryResultRow & {
   id: string;
   broker_connection_id: string;
@@ -591,7 +658,11 @@ function candidateAllowedActions(row: ReconciliationCandidateRow): CTraderReconc
   if (row.status !== "pending") return [];
   const projection = objectValue(row.projected_trade);
   const canPublish = row.projected_trade !== null
-    && !(projection.isOpen === false && (projection.pnl === null || projection.pnl === undefined));
+    && !(
+      projection.isOpen === false
+      && (projection.pnl === null || projection.pnl === undefined)
+      && !projectionHasCalculatedGross(projection)
+    );
   if (row.classification === "high_confidence") {
     return canPublish ? ["link_manual", "publish_separate", "reject"] : ["link_manual", "reject"];
   }
@@ -605,7 +676,8 @@ function candidateAllowedActions(row: ReconciliationCandidateRow): CTraderReconc
 function mapReconciliationCandidate(row: ReconciliationCandidateRow): CTraderReconciliationCandidate {
   const broker = objectValue(row.projected_trade);
   const brokerSummary = Object.fromEntries([
-    "positionId", "symbol", "direction", "entryPrice", "exitPrice", "quantityLots",
+    "positionId", "symbol", "direction", "entryPrice", "exitPrice",
+    "quantity", "quantityUnit", "quantityLots", "quantityBaseUnits",
     "pnl", "isOpen", "tradeDate", "entryAt", "exitAt",
   ].filter((key) => Object.prototype.hasOwnProperty.call(broker, key)).map((key) => [key, broker[key]]));
   return {
@@ -644,7 +716,10 @@ type ReviewedProjection = {
   direction: "Long" | "Short";
   entryPrice: string;
   exitPrice: string | null;
-  quantityLots: string;
+  quantity: string;
+  quantityUnit: "lots" | "base_units";
+  quantityLots: string | null;
+  quantityBaseUnits: string | null;
   pnl: string | null;
   isOpen: boolean;
   tradeDate: string;
@@ -655,6 +730,20 @@ type ReviewedProjection = {
   brokerData: Record<string, unknown>;
 };
 
+function projectionHasCalculatedGross(value: unknown): boolean {
+  const projection = objectValue(value);
+  const brokerData = objectValue(projection.brokerData);
+  const provenance = objectValue(brokerData.calculatedGrossProvenance);
+  return brokerData.calculatedGrossMethod === "fill_price_base_units_identity_conversion_v1"
+    && typeof brokerData.calculatedGrossPnl === "string"
+    && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(brokerData.calculatedGrossPnl)
+    && typeof brokerData.calculatedGrossCurrency === "string"
+    && /^[A-Z]{3}$/.test(brokerData.calculatedGrossCurrency)
+    && provenance.version === 1
+    && provenance.feesIncluded === false
+    && provenance.analyticsTreatment === "excluded_from_net_pnl";
+}
+
 function reviewedProjection(value: unknown): ReviewedProjection | null {
   const row = objectValue(value);
   const requiredText = (key: string): string | null =>
@@ -663,12 +752,24 @@ function reviewedProjection(value: unknown): ReviewedProjection | null {
   const symbol = requiredText("symbol");
   const direction = row.direction === "Long" || row.direction === "Short" ? row.direction : null;
   const entryPrice = requiredText("entryPrice");
-  const quantityLots = requiredText("quantityLots") ?? requiredText("quantity");
+  const explicitQuantityUnit = row.quantityUnit;
+  const quantityUnit = explicitQuantityUnit === "base_units" || explicitQuantityUnit === "lots"
+    ? explicitQuantityUnit
+    : "lots";
+  const quantity = requiredText("quantity") ?? requiredText("quantityLots");
+  const quantityLots = quantityUnit === "lots"
+    ? requiredText("quantityLots") ?? quantity
+    : null;
+  const quantityBaseUnits = quantityUnit === "base_units"
+    ? requiredText("quantityBaseUnits") ?? quantity
+    : requiredText("quantityBaseUnits");
   const tradeDate = requiredText("tradeDate");
   const entryAt = requiredText("entryAt");
   const entryTime = requiredText("entryTime");
-  if (!positionId || !symbol || !direction || !entryPrice || !quantityLots || !tradeDate || !entryAt || !entryTime) return null;
-  if (![entryPrice, quantityLots].every((number) => Number.isFinite(Number(number))) || Number(quantityLots) <= 0) return null;
+  if (!positionId || !symbol || !direction || !entryPrice || !quantity || !tradeDate || !entryAt || !entryTime) return null;
+  if (![entryPrice, quantity].every((number) => Number.isFinite(Number(number))) || Number(quantity) <= 0) return null;
+  if (quantityLots !== null && (!Number.isFinite(Number(quantityLots)) || Number(quantityLots) <= 0)) return null;
+  if (quantityBaseUnits !== null && (!Number.isFinite(Number(quantityBaseUnits)) || Number(quantityBaseUnits) <= 0)) return null;
   const nullableText = (key: string): string | null => row[key] === null || row[key] === undefined
     ? null
     : typeof row[key] === "string" ? row[key] : null;
@@ -679,6 +780,19 @@ function reviewedProjection(value: unknown): ReviewedProjection | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate) || !Number.isFinite(Date.parse(entryAt))) return null;
   const exitAt = nullableText("exitAt");
   if (exitAt !== null && !Number.isFinite(Date.parse(exitAt))) return null;
+  const brokerData = objectValue(row.brokerData);
+  if (explicitQuantityUnit === "base_units" || explicitQuantityUnit === "lots") {
+    const declared = objectValue(brokerData.quantityProjection);
+    if (
+      declared.version !== 1
+      || declared.value !== quantity
+      || declared.unit !== quantityUnit
+      || declared.volumeScale !== "unit_cents"
+      || declared.source !== "provider_filled_volume"
+      || (quantityLots === null ? declared.lots !== null : declared.lots !== quantityLots)
+      || (quantityBaseUnits === null ? declared.baseUnits !== null : declared.baseUnits !== quantityBaseUnits)
+    ) return null;
+  }
   return {
     positionId,
     symbol,
@@ -686,7 +800,10 @@ function reviewedProjection(value: unknown): ReviewedProjection | null {
     direction,
     entryPrice,
     exitPrice,
+    quantity,
+    quantityUnit,
     quantityLots,
+    quantityBaseUnits,
     pnl,
     isOpen: row.isOpen === true,
     tradeDate,
@@ -694,7 +811,7 @@ function reviewedProjection(value: unknown): ReviewedProjection | null {
     exitAt,
     entryTime,
     exitTime: nullableText("exitTime"),
-    brokerData: objectValue(row.brokerData),
+    brokerData,
   };
 }
 
@@ -801,7 +918,8 @@ function liveAllowedActions(row: LiveReconciliationCandidateRow): CTraderLiveRec
 function mapLiveReconciliationCandidate(row: LiveReconciliationCandidateRow): CTraderLiveReconciliationCandidate {
   const projection = objectValue(row.projected_trade);
   const brokerTrade = Object.fromEntries(["positionId", "symbol", "direction", "entryPrice", "exitPrice",
-    "quantityLots", "pnl", "isOpen", "tradeDate", "entryAt", "exitAt"].filter((key) =>
+    "quantity", "quantityUnit", "quantityLots", "quantityBaseUnits",
+    "pnl", "isOpen", "tradeDate", "entryAt", "exitAt"].filter((key) =>
     Object.prototype.hasOwnProperty.call(projection, key)).map((key) => [key, projection[key]]));
   if (row.broker_trade_id !== null) brokerTrade.id = row.broker_trade_id;
   const manualTrade = row.manual_trade_id === null ? null : {
@@ -870,13 +988,14 @@ async function resolveConnectionIdentity(
   environment: CTraderEnvironment,
   accountId: string,
   requestedMode: "official" | "mcp_read",
+  options: { allowActiveMcpToOfficialUpgrade?: boolean; lockRows?: boolean } = {},
 ): Promise<{ row: ConnectionIdentityRow | null; adoptsLegacyEnvironment: boolean }> {
   const candidates = await client.query<ConnectionIdentityRow>(
     `SELECT id, connected, connection_mode, provider_environment, provider_metadata
      FROM broker_connections
      WHERE user_id=$1 AND provider='ctrader' AND external_account_id=$2
        AND (provider_environment=$3 OR provider_environment IS NULL)
-     FOR UPDATE`,
+     ${options.lockRows === false ? "" : "FOR UPDATE"}`,
     [userId, accountId, environment],
   );
   const exact = candidates.rows.filter((row) => row.provider_environment === environment);
@@ -896,7 +1015,10 @@ async function resolveConnectionIdentity(
       "Disconnect the legacy cTrader connection before adopting it into the current integration",
     );
   }
-  if (row?.connected && row.connection_mode !== requestedMode) {
+  const activeMcpToOfficialUpgrade = options.allowActiveMcpToOfficialUpgrade === true
+    && requestedMode === "official"
+    && row?.connection_mode === "mcp_read";
+  if (row?.connected && row.connection_mode !== requestedMode && !activeMcpToOfficialUpgrade) {
     throw new AppError(
       409,
       "CTRADER_CONNECTION_MODE_CONFLICT",
@@ -1129,6 +1251,16 @@ export class PostgresCTraderService implements CTraderBrokerService {
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [`${input.auth.user.id}:ctrader:${accountId}`],
       );
+      const discoveredIdentity = await resolveConnectionIdentity(
+        client,
+        input.auth.user.id,
+        environment,
+        accountId,
+        "mcp_read",
+        { lockRows: false },
+      );
+      const id = discoveredIdentity.row?.id ?? randomUUID();
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [id]);
       const identity = await resolveConnectionIdentity(
         client,
         input.auth.user.id,
@@ -1136,8 +1268,9 @@ export class PostgresCTraderService implements CTraderBrokerService {
         accountId,
         "mcp_read",
       );
-      const id = identity.row?.id ?? randomUUID();
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [id]);
+      if (identity.row?.id !== discoveredIdentity.row?.id) {
+        throw new AppError(409, "CTRADER_CONNECTION_CHANGED", "The cTrader connection changed while reconnecting");
+      }
       if (identity.adoptsLegacyEnvironment) {
         const adopted = await client.query<{ id: string }>(
           `UPDATE broker_connections SET provider_environment=$1
@@ -1346,15 +1479,28 @@ export class PostgresCTraderService implements CTraderBrokerService {
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
         [`${input.auth.user.id}:ctrader:${selected.ctidTraderAccountId}`],
       );
+      const discoveredIdentity = await resolveConnectionIdentity(
+        client,
+        input.auth.user.id,
+        selected.environment,
+        selected.ctidTraderAccountId,
+        "official",
+        { allowActiveMcpToOfficialUpgrade: true, lockRows: false },
+      );
+      const id = discoveredIdentity.row?.id ?? randomUUID();
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [id]);
       const identity = await resolveConnectionIdentity(
         client,
         input.auth.user.id,
         selected.environment,
         selected.ctidTraderAccountId,
         "official",
+        { allowActiveMcpToOfficialUpgrade: true },
       );
-      const id = identity.row?.id ?? randomUUID();
-      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [id]);
+      if (identity.row?.id !== discoveredIdentity.row?.id) {
+        throw new AppError(409, "CTRADER_CONNECTION_CHANGED", "The cTrader connection changed while upgrading authorization");
+      }
+      const upgradesMcpConnection = identity.row?.connection_mode === "mcp_read";
       if (identity.adoptsLegacyEnvironment) {
         const adopted = await client.query<{ id: string }>(
           `UPDATE broker_connections SET provider_environment=$1
@@ -1371,6 +1517,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
       const refreshToken = this.cipher.decrypt(grant.refresh_token_ciphertext, grantTokenAad(grant.id, "refresh"));
       const previousMetadata = objectValue(identity.row?.provider_metadata);
       const metadata = {
+        integrationMode: "official",
         brokerTitleShort: selected.brokerTitleShort,
         traderLogin: selected.traderLogin,
         lastClosingDealTimestamp: selected.lastClosingDealTimestamp,
@@ -1380,6 +1527,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
           || previousMetadata.legacyEnvironmentWasUnbound === true,
         readOnly: true,
         reauthRequired: false,
+        upgradedFromRemoteMcpAt: upgradesMcpConnection ? new Date().toISOString() : null,
       };
       await client.query(
         `INSERT INTO broker_connections (
@@ -1435,6 +1583,36 @@ export class PostgresCTraderService implements CTraderBrokerService {
           JSON.stringify(metadata),
         ],
       );
+      if (upgradesMcpConnection) {
+        // The connection advisory lock guarantees that no MCP run is still
+        // executing. A crashed worker can nevertheless leave a stale
+        // `running` row after its session lock disappears, so cancel both
+        // queued and orphaned-running MCP work before inserting the official
+        // initial run. This also clears the one-active-run unique index.
+        await client.query(
+          `UPDATE sync_runs SET status='cancelled', finished_at=now(),
+             error_code='CONNECTION_MODE_UPGRADED',
+             error_message='Superseded by official cTrader OAuth history backfill'
+           WHERE broker_connection_id=$1 AND status IN ('queued','running')`,
+          [id],
+        );
+        await client.query(
+          `UPDATE ctrader_historical_imports import SET
+             status='cancelled', error_code='CONNECTION_MODE_UPGRADED',
+             error_message='Superseded by official cTrader OAuth history backfill',
+             finished_at=now(), row_version=import.row_version+1
+           WHERE import.broker_connection_id=$1 AND import.user_id=$2
+             AND import.status IN ('queued','running','review')`,
+          [id, input.auth.user.id],
+        );
+        // Pending live suggestions are mode-specific work, not durable audit.
+        // Terminal candidates and resolution rows remain intact for replay.
+        await client.query(
+          `DELETE FROM ctrader_live_reconciliation_candidates
+           WHERE broker_connection_id=$1 AND user_id=$2 AND status='pending'`,
+          [id, input.auth.user.id],
+        );
+      }
       await client.query(
         `UPDATE ctrader_oauth_grants
          SET consumed_at=now(), access_token_ciphertext='', refresh_token_ciphertext=''
@@ -1461,18 +1639,33 @@ export class PostgresCTraderService implements CTraderBrokerService {
     connection: CTraderPublicConnection;
     latestSyncRun: CTraderPublicSyncRun | null;
     historicalImport: CTraderHistoricalImport | null;
+    accountCashFlows: CTraderPublicAccountCashFlow[];
   }> {
     const row = await this.findConnectionRow(userId, connectionId);
-    const historical = await this.database.query<HistoricalImportRow>(
-      `${historicalImportSelect}
-       WHERE user_id=$1 AND broker_connection_id=$2
-       ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [userId, connectionId],
-    );
+    const [historical, accountCashFlows] = await Promise.all([
+      this.database.query<HistoricalImportRow>(
+        `${historicalImportSelect}
+         WHERE user_id=$1 AND broker_connection_id=$2
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [userId, connectionId],
+      ),
+      this.database.query<AccountCashFlowRow>(
+        `SELECT external_cash_flow_id, operation_type, operation_name,
+                amount::text, balance::text, equity::text,
+                raw_delta::text, raw_balance::text, raw_equity::text, currency_code,
+                money_digits, money_digits_source, balance_version::text, occurred_at
+         FROM ctrader_account_cash_flows
+         WHERE user_id=$1 AND broker_connection_id=$2
+         ORDER BY occurred_at DESC, external_cash_flow_id DESC
+         LIMIT 50`,
+        [userId, connectionId],
+      ),
+    ]);
     return {
       connection: mapConnection(row),
       latestSyncRun: mapLatestSync(row),
       historicalImport: historical.rows[0] ? mapHistoricalImport(historical.rows[0]) : null,
+      accountCashFlows: accountCashFlows.rows.map(mapAccountCashFlow),
     };
   }
 
@@ -1732,11 +1925,13 @@ export class PostgresCTraderService implements CTraderBrokerService {
   async listLiveReconciliationCandidates(userId: string, connectionId: string): Promise<{
     candidates: CTraderLiveReconciliationCandidate[];
   }> {
-    await this.findConnectionRow(userId, connectionId);
     const rows = await this.database.query<LiveReconciliationCandidateRow>(
       `${liveReconciliationCandidateSelect}
        WHERE candidate.user_id=$1 AND candidate.broker_connection_id=$2
-         AND candidate.status='pending'
+          AND candidate.status='pending'
+          AND connection.connected=true
+          AND connection.connection_mode='mcp_read'
+          AND connection.oauth_scope='mcp_read'
        ORDER BY candidate.created_at ASC, candidate.id ASC
        LIMIT 501`,
       [userId, connectionId],
@@ -1752,11 +1947,13 @@ export class PostgresCTraderService implements CTraderBrokerService {
     connectionId: string,
     candidateId: string,
   ): Promise<{ candidate: CTraderLiveReconciliationCandidate }> {
-    await this.findConnectionRow(userId, connectionId);
     const rows = await this.database.query<LiveReconciliationCandidateRow>(
       `${liveReconciliationCandidateSelect}
        WHERE candidate.id=$1 AND candidate.user_id=$2
-         AND candidate.broker_connection_id=$3`,
+          AND candidate.broker_connection_id=$3
+          AND connection.connected=true
+          AND connection.connection_mode='mcp_read'
+          AND connection.oauth_scope='mcp_read'`,
       [candidateId, userId, connectionId],
     );
     if (!rows.rows[0]) throw notFound("cTrader live reconciliation candidate");
@@ -1814,8 +2011,11 @@ export class PostgresCTraderService implements CTraderBrokerService {
          JOIN broker_connections connection
            ON connection.user_id=candidate.user_id
           AND connection.id=candidate.broker_connection_id
-         WHERE candidate.id=$1 AND candidate.user_id=$2
-           AND candidate.broker_connection_id=$3
+          WHERE candidate.id=$1 AND candidate.user_id=$2
+            AND candidate.broker_connection_id=$3
+            AND connection.connected=true
+            AND connection.connection_mode='mcp_read'
+            AND connection.oauth_scope='mcp_read'
          FOR UPDATE OF candidate, connection`,
         [input.candidateId, input.auth.user.id, input.connectionId],
       );
@@ -1973,7 +2173,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
           [
             input.connectionId, candidate.external_trade_key, projection.positionId,
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
-            projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
+            projection.exitPrice, projection.quantity, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
             projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), selectedManualId,
             input.auth.user.id, expectedManualVersion,
@@ -2019,7 +2219,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
                WHERE connection.id=$19 AND connection.user_id=$2`,
             [resolvedTradeId, input.auth.user.id, candidate.external_trade_key, projection.positionId,
               projection.symbol, projection.asset, projection.direction, projection.entryPrice,
-              projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
+              projection.exitPrice, projection.quantity, projection.pnl, projection.isOpen,
               projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
               projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), input.connectionId],
           );
@@ -2191,10 +2391,16 @@ export class PostgresCTraderService implements CTraderBrokerService {
          FROM ctrader_reconciliation_candidates rc
          JOIN ctrader_historical_imports hi
            ON hi.id=rc.import_id AND hi.user_id=rc.user_id
-             AND hi.broker_connection_id=rc.broker_connection_id
+              AND hi.broker_connection_id=rc.broker_connection_id
+         JOIN broker_connections connection
+           ON connection.id=rc.broker_connection_id AND connection.user_id=rc.user_id
          WHERE rc.id=$1 AND rc.import_id=$2 AND rc.user_id=$3
-           AND rc.broker_connection_id=$4
-         FOR UPDATE OF rc`,
+            AND rc.broker_connection_id=$4
+            AND hi.status='review'
+            AND connection.connected=true
+            AND connection.connection_mode='mcp_read'
+            AND connection.oauth_scope='mcp_read'
+         FOR UPDATE OF rc, hi, connection`,
         [input.candidateId, input.importId, input.auth.user.id, input.connectionId],
       );
       const candidate = candidateResult.rows[0];
@@ -2221,7 +2427,13 @@ export class PostgresCTraderService implements CTraderBrokerService {
       if ((input.action === "link_manual" || input.action === "publish_separate") && !projection) {
         throw new AppError(409, "RECONCILIATION_PROJECTION_INCOMPLETE", "Authoritative broker fields are incomplete");
       }
-      if (input.action === "publish_separate" && projection && !projection.isOpen && projection.pnl === null) {
+      if (
+        input.action === "publish_separate"
+        && projection
+        && !projection.isOpen
+        && projection.pnl === null
+        && !projectionHasCalculatedGross(candidate.projected_trade)
+      ) {
         throw new AppError(
           409,
           "RECONCILIATION_PNL_UNAVAILABLE",
@@ -2312,7 +2524,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
           [
             input.connectionId, candidate.external_trade_key, projection.positionId,
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
-            projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
+            projection.exitPrice, projection.quantity, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
             projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), candidate.manual_trade_id,
             input.auth.user.id, candidate.manual_row_version,
@@ -2341,7 +2553,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
           [
             resolvedTradeId, input.auth.user.id, candidate.external_trade_key, projection.positionId,
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
-            projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
+            projection.exitPrice, projection.quantity, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
             projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), input.connectionId,
           ],
@@ -2552,4 +2764,5 @@ export class PostgresCTraderService implements CTraderBrokerService {
     if (!row) throw notFound("cTrader connection");
     return row;
   }
+
 }

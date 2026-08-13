@@ -33,6 +33,24 @@ for source in index.html app.html landing.html 404.html \
   [[ -f "$repo_root/$source" ]] || { printf 'Missing public source: %s\n' "$source" >&2; exit 1; }
 done
 
+# A cTrader writer from this release may persist canonical quantities in base
+# units when verified contract metadata is unavailable. Do not stamp a release
+# as compatible until the reviewed UI both understands quantityProjection and
+# keeps those values out of lot-based exposure calculations.
+base_unit_contracts=(
+  "const value=trade?.brokerData?.quantityProjection;"
+  "base units from cTrader; lot conversion unavailable"
+  "const excluded=open.filter(t=>readCTraderQuantityProjection(t)?.unit==='base_units');"
+  "const measurable=open.filter(t=>readCTraderQuantityProjection(t)?.unit!=='base_units');"
+  "excluded from exposure: size is available in base units"
+)
+for contract in "${base_unit_contracts[@]}"; do
+  grep -Fq -- "$contract" "$repo_root/app.html" || {
+    printf 'Refusing public artifact without cTrader base-unit UI contract: %s\n' "$contract" >&2
+    exit 1
+  }
+done
+
 if [[ -e "$destination" ]] && [[ -n "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
   printf 'Refusing non-empty public destination: %s\n' "$destination" >&2
   exit 1
@@ -73,7 +91,7 @@ done
   exit 1
 }
 
-printf '{"artifactMode":"%s","dataBackend":"vps-postgres","firebaseDependency":false}\n' "$mode" \
+printf '{"artifactMode":"%s","dataBackend":"vps-postgres","firebaseDependency":false,"tradeQuantityCompatibility":"ctrader-quantity-projection-base-units-v1"}\n' "$mode" \
   >"$destination/edgebook-build.json"
 chmod 0644 -- "$destination/edgebook-build.json"
 

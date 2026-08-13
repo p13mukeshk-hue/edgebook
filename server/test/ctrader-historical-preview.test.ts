@@ -161,6 +161,7 @@ function harness(options: {
   providerMetadataOverrides?: Record<string, unknown>;
   lockedProviderMetadata?: Record<string, unknown>;
   positionDetailsResponse?: unknown;
+  mappedAccountCurrency?: string;
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
@@ -196,6 +197,13 @@ function harness(options: {
   const transactionClient = {
     query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
       queries.push({ sql, values });
+      if (sql.includes("FROM accounts") && sql.includes("FOR SHARE")) {
+        return result([{
+          id: mappedAccountId,
+          legacy_account_id: "legacy-collision",
+          currency_code: options.mappedAccountCurrency ?? "USD",
+        }]);
+      }
       if (sql.includes("SELECT import.status, import.counters")) {
         return result([{
           status,
@@ -208,6 +216,8 @@ function harness(options: {
           external_account_id: "5050060",
           provider_environment: "live",
           provider_metadata: options.lockedProviderMetadata ?? providerMetadata,
+          mapped_account_id: mappedAccountId,
+          legacy_mapped_account_id: "legacy-collision",
         }]);
       }
       if (sql.includes("SELECT external_execution_id") && sql.includes("FROM trade_executions")) {
@@ -302,7 +312,10 @@ function harness(options: {
       ?? { accountId: "5050060", currency: "USD" }),
     getAssets: vi.fn(async () => options.assetsResponse ?? [{ assetId: "15", name: "USD" }]),
     getSymbols: vi.fn(async () => options.symbols ?? [
-      { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" },
+      {
+        id: "41", name: "XAU/USD", lotSize: 100,
+        lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      },
     ]),
     getAccountInfo: vi.fn(async () => options.accountInfoResponse ?? {}),
     getDeals: vi.fn(async (request: { fromTimestamp: string; toTimestamp: string }) => {
@@ -909,7 +922,7 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     expect(database.connect).not.toHaveBeenCalled();
   });
 
-  it("stages missing authoritative lot size as execution-only without guessed trade values", async () => {
+  it("stages an unknown-contract trade with exact base-unit quantity and no false manual match", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, candidateRows } = harness({
@@ -920,9 +933,22 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     await engine.previewHistoricalImport(importId, connectionId);
 
     const values = candidateRows[0]?.values;
-    expect(values?.[8]).toBe("execution_only");
-    expect(JSON.parse(String(values?.[10]))).toContain("CTRADER_MCP_LOT_SIZE_UNAVAILABLE");
-    expect(values?.[13]).toBeNull();
+    expect(values?.[8]).toBe("unmatched");
+    expect(values?.[6]).toBeNull();
+    expect(values?.[7]).toBeNull();
+    const projected = JSON.parse(String(values?.[13])) as Record<string, unknown>;
+    expect(projected).toMatchObject({
+      quantity: "10",
+      quantityUnit: "base_units",
+      quantityLots: null,
+      quantityBaseUnits: "10",
+      brokerData: {
+        quantityProjection: {
+          value: "10", unit: "base_units", lots: null, baseUnits: "10",
+          volumeScale: "unit_cents", source: "provider_filled_volume",
+        },
+      },
+    });
   });
 
   it("uses an exact account-bound operator symbol override in historical preview", async () => {

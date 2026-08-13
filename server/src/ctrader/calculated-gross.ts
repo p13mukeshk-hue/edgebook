@@ -91,13 +91,16 @@ export type CalculatedGrossResult = {
     conversionRateSource: "identical_provider_asset_id";
     volumeScale: "unit_cents";
     volumeSourceKeys: string[];
+    volumeInterpretation: "provider_filled_volume_cents_to_base_units";
+    contractSizeRequiredForCalculation: false;
     symbolSpec: {
       symbolId: string;
       symbolName: string;
-      baseUnitsPerLot: number;
+      baseUnitsPerLot: number | null;
       lotSizeSource: string;
       providerLotSizeScale: string | null;
       measurementUnit: string | null;
+      quantityLotsConversionAvailable: boolean;
     };
   };
 };
@@ -200,7 +203,7 @@ function compareDealIds(left: string, right: string): number {
   return left.localeCompare(right);
 }
 
-function verifiedSymbolSpecification(symbol: CalculatedGrossSymbol): {
+function quantityLotSpecification(symbol: CalculatedGrossSymbol): {
   baseUnitsPerLot: number;
   measurementUnit: string | null;
 } | null {
@@ -234,13 +237,16 @@ export function calculateCTraderGrossFallback(input: {
   symbol: CalculatedGrossSymbol;
   currency: CalculatedGrossCurrencyContext;
 }): CalculatedGrossResult | null {
-  const specification = verifiedSymbolSpecification(input.symbol);
+  // `filledVolume` is already expressed by cTrader in cents of a base unit.
+  // Contract size is only needed to present that quantity in lots; it is not
+  // an operand in (close - entry) * base units. Keep any safe lot conversion
+  // as display provenance, but do not make calculated gross depend on it.
+  const quantityLotSpec = quantityLotSpecification(input.symbol);
   const baseAssetId = input.symbol.baseAssetId;
   const quoteAssetId = input.symbol.quoteAssetId;
   const depositAssetId = input.currency.depositAssetId;
   if (
-    specification === null
-    || baseAssetId === null
+    baseAssetId === null
     || quoteAssetId === null
     || depositAssetId === null
   ) return null;
@@ -394,9 +400,6 @@ export function calculateCTraderGrossFallback(input: {
     accountMoneyDigits: moneyDigits,
     roundingRule: MONEY_ROUNDING_RULE,
     eventResidualAllocationRule: EVENT_RESIDUAL_ALLOCATION_RULE,
-    baseUnitsPerLot: specification.baseUnitsPerLot,
-    lotSizeSource: input.symbol.lotSizeSource,
-    providerLotSizeScale: input.symbol.providerLotSizeScale,
     deals: ordered.map((deal) => ({
       dealId: deal.dealId,
       side: deal.side,
@@ -436,13 +439,16 @@ export function calculateCTraderGrossFallback(input: {
       conversionRateSource: "identical_provider_asset_id",
       volumeScale: "unit_cents",
       volumeSourceKeys,
+      volumeInterpretation: "provider_filled_volume_cents_to_base_units",
+      contractSizeRequiredForCalculation: false,
       symbolSpec: {
         symbolId: input.symbol.id,
         symbolName: input.symbol.name,
-        baseUnitsPerLot: specification.baseUnitsPerLot,
+        baseUnitsPerLot: quantityLotSpec?.baseUnitsPerLot ?? null,
         lotSizeSource: input.symbol.lotSizeSource,
         providerLotSizeScale: input.symbol.providerLotSizeScale,
-        measurementUnit: specification.measurementUnit,
+        measurementUnit: quantityLotSpec?.measurementUnit ?? null,
+        quantityLotsConversionAvailable: quantityLotSpec !== null,
       },
     },
   };

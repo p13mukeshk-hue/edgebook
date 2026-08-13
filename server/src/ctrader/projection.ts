@@ -133,6 +133,8 @@ export type CTraderTradeProjection = {
   commission: string | null;
   swap: string | null;
   pnlConversionFee: string | null;
+  /** True only when every realized closing execution has exact provider money. */
+  realizedPnlComplete: boolean;
   /**
    * Immutable, execution-level realized-P&L ledger. A position is one journal
    * trade, but each partial close remains independently dated so calendar and
@@ -189,18 +191,20 @@ export function projectPosition(input: {
     throw new CTraderProjectionError("SYMBOL_MISMATCH", `Position ${positionId} contains inconsistent symbols`);
   }
 
-  const openingDeals = deals.filter((deal) => deal.closePositionDetail === null);
-  const closingDeals = deals.filter((deal) => deal.closePositionDetail !== null);
-  const firstOpening = openingDeals[0];
+  const firstOpening = deals.find((deal) => deal.closePositionDetail === null);
   if (!firstOpening) {
     throw new CTraderProjectionError(
       "OPENING_DEAL_MISSING",
       `Position ${positionId} starts before the imported history bound; extend the authoritative full-history bound`,
     );
   }
-  if (openingDeals.some((deal) => deal.tradeSide !== firstOpening.tradeSide)) {
-    throw new CTraderProjectionError("OPEN_SIDE_MISMATCH", `Position ${positionId} contains opening deals on both sides`);
-  }
+  // An overlapping official replay can omit closePositionDetail. The immutable
+  // opposite-side execution is still a realized close for volume/completeness;
+  // it must not be reclassified as a new opening execution.
+  const openingDeals = deals.filter((deal) =>
+    deal.closePositionDetail === null && deal.tradeSide === firstOpening.tradeSide);
+  const closingDeals = deals.filter((deal) =>
+    deal.closePositionDetail !== null || deal.tradeSide !== firstOpening.tradeSide);
   if (closingDeals.some((deal) => deal.tradeSide === firstOpening.tradeSide)) {
     throw new CTraderProjectionError("CLOSE_SIDE_MISMATCH", `Position ${positionId} has a closing deal on the opening side`);
   }
@@ -228,9 +232,13 @@ export function projectPosition(input: {
   const conversionFees: MoneyValue[] = [];
   const net: MoneyValue[] = [];
   const realizedEvents: CTraderTradeProjection["realizedEvents"] = [];
+  let realizedPnlComplete = closingDeals.length > 0;
   for (const deal of closingDeals) {
     const close = deal.closePositionDetail;
-    if (!close) continue;
+    if (!close) {
+      realizedPnlComplete = false;
+      continue;
+    }
     const digits = close.moneyDigits ?? deal.moneyDigits ?? input.accountMoneyDigits;
     if (digits === null) {
       throw new CTraderProjectionError("MONEY_DIGITS_MISSING", `Closing deal ${deal.dealId} has no authoritative moneyDigits`);
@@ -283,11 +291,12 @@ export function projectPosition(input: {
     openedVolumeCents: openedVolume.toString(),
     closedVolumeCents: closedVolume.toString(),
     openVolumeCents: openVolume.toString(),
-    pnl: net.length === 0 ? null : sumMoney(net),
-    grossProfit: gross.length === 0 ? null : sumMoney(gross),
-    commission: commissions.length === 0 ? null : sumMoney(commissions),
-    swap: swaps.length === 0 ? null : sumMoney(swaps),
-    pnlConversionFee: conversionFees.length === 0 ? null : sumMoney(conversionFees),
+    pnl: realizedPnlComplete ? sumMoney(net) : null,
+    grossProfit: realizedPnlComplete ? sumMoney(gross) : null,
+    commission: realizedPnlComplete ? sumMoney(commissions) : null,
+    swap: realizedPnlComplete ? sumMoney(swaps) : null,
+    pnlConversionFee: realizedPnlComplete ? sumMoney(conversionFees) : null,
+    realizedPnlComplete,
     realizedEvents,
     isOpen: openVolume > 0n,
     tradeDate: entryLocal.date,

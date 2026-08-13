@@ -33,6 +33,7 @@ function harness(prior: {
   connected: boolean;
   connection_mode: "official" | "mcp_read";
   provider_metadata?: Record<string, unknown>;
+  identityIds?: string[];
 }) {
   const config = loadConfig({
     NODE_ENV: "test",
@@ -50,6 +51,7 @@ function harness(prior: {
   });
   const cipher = AesGcmTokenCipher.fromConfig(config.cTrader);
   const clientQueries: Array<{ sql: string; values: readonly unknown[] }> = [];
+  let identityRead = 0;
   const client = {
     query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
       clientQueries.push({ sql, values });
@@ -75,7 +77,8 @@ function harness(prior: {
         }]);
       }
       if (sql.includes("FROM broker_connections") && sql.includes("connection_mode")) {
-        return result([{ id: connectionId, provider_environment: "live", ...prior }]);
+        const id = prior.identityIds?.[identityRead++] ?? connectionId;
+        return result([{ id, provider_environment: "live", ...prior }]);
       }
       return result([]);
     }),
@@ -119,19 +122,55 @@ function harness(prior: {
 }
 
 describe("cTrader cross-mode identity", () => {
-  it("rejects official OAuth over an active MCP connection", async () => {
+  it("atomically upgrades an active MCP connection to official OAuth in place", async () => {
     const { service, clientQueries } = harness({ connected: true, connection_mode: "mcp_read" });
+    await service.createConnection({
+      auth,
+      grantId,
+      ctidTraderAccountId: "5032134",
+      mappedLegacyAccountId: null,
+      label: null,
+    });
+    const insert = clientQueries.find((query) => query.sql.includes("INSERT INTO broker_connections"));
+    expect(insert?.values[0]).toBe(connectionId);
+    expect(insert?.sql).toContain("connection_mode=EXCLUDED.connection_mode");
+    expect(insert?.sql).toContain("sync_cursor=CASE");
+    const cancelRunIndex = clientQueries.findIndex((query) => query.sql.includes("UPDATE sync_runs") && query.sql.includes("CONNECTION_MODE_UPGRADED"));
+    const cancelImportIndex = clientQueries.findIndex((query) => query.sql.includes("UPDATE ctrader_historical_imports") && query.sql.includes("CONNECTION_MODE_UPGRADED"));
+    const retirePendingLiveIndex = clientQueries.findIndex((query) => query.sql.includes("DELETE FROM ctrader_live_reconciliation_candidates"));
+    const officialRunIndex = clientQueries.findIndex((query) => query.sql.includes("INSERT INTO sync_runs") && query.values.includes(`oauth:${grantId}`));
+    expect(cancelRunIndex).toBeGreaterThan(-1);
+    expect(cancelImportIndex).toBeGreaterThan(cancelRunIndex);
+    expect(retirePendingLiveIndex).toBeGreaterThan(cancelImportIndex);
+    expect(officialRunIndex).toBeGreaterThan(retirePendingLiveIndex);
+    expect(clientQueries[cancelRunIndex]?.sql).toContain("status IN ('queued','running')");
+    expect(clientQueries[cancelImportIndex]?.sql).toContain("import.broker_connection_id=$1 AND import.user_id=$2");
+    expect(clientQueries[cancelImportIndex]?.sql).toContain("status IN ('queued','running','review')");
+    expect(clientQueries[retirePendingLiveIndex]?.sql).toContain("status='pending'");
+    expect(clientQueries.some((query) => query.sql.includes("connected=false"))).toBe(false);
+    expect(clientQueries.filter((query) => query.sql.includes("resolve") || query.sql.includes("FROM broker_connections")))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ sql: expect.not.stringContaining("FOR UPDATE") }),
+        expect.objectContaining({ sql: expect.stringContaining("FOR UPDATE") }),
+      ]));
+  });
+
+  it("fails closed if connection identity changes between discovery and the locked upgrade", async () => {
+    const changedId = "00000000-0000-4000-8000-000000000091";
+    const { service, clientQueries } = harness({
+      connected: true,
+      connection_mode: "mcp_read",
+      identityIds: [connectionId, changedId],
+    });
     await expect(service.createConnection({
       auth,
       grantId,
       ctidTraderAccountId: "5032134",
       mappedLegacyAccountId: null,
       label: null,
-    })).rejects.toMatchObject({
-      statusCode: 409,
-      code: "CTRADER_CONNECTION_MODE_CONFLICT",
-    });
+    })).rejects.toMatchObject({ statusCode: 409, code: "CTRADER_CONNECTION_CHANGED" });
     expect(clientQueries.some((query) => query.sql.includes("INSERT INTO broker_connections"))).toBe(false);
+    expect(clientQueries.some((query) => query.sql.includes("SET consumed_at=now()"))).toBe(false);
   });
 
   it("switches a disconnected MCP connection to official in place", async () => {

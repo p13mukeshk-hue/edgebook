@@ -116,6 +116,7 @@ function harness(dealsResponse: unknown, options: {
   mappedLegacyAccountId?: string | null;
   lockedMappedAccountId?: string | null;
   lockedMappedLegacyAccountId?: string | null;
+  mappedAccountCurrency?: string;
 } = {}) {
   const appConfig = config();
   const cipher = AesGcmTokenCipher.fromConfig(appConfig.cTrader);
@@ -128,6 +129,13 @@ function harness(dealsResponse: unknown, options: {
   const transactionClient = {
     query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
       clientQueries.push({ sql, values });
+      if (sql.includes("FROM accounts") && sql.includes("FOR SHARE")) {
+        return result(options.mappedAccountId ? [{
+          id: options.mappedAccountId,
+          legacy_account_id: options.mappedLegacyAccountId ?? null,
+          currency_code: options.mappedAccountCurrency ?? "USD",
+        }] : []);
+      }
       if (sql.includes("SELECT connected, token_generation")) {
         return result([{
           connected: true,
@@ -221,7 +229,10 @@ function harness(dealsResponse: unknown, options: {
       ?? { accountId: "5032134", currency: "USD" }),
     getAssets: vi.fn(async () => options.assetsResponse ?? [{ assetId: "15", name: "USD" }]),
     getSymbols: vi.fn(async () => options.symbolsResponse
-      ?? [{ id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" }]),
+      ?? [{
+        id: "41", name: "XAU/USD", lotSize: 100,
+        lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      }]),
     getAccountInfo: vi.fn(async () => options.accountInfoResponse ?? {}),
     getDeals: vi.fn(async () => dealsResponse),
     getPositionDetails: vi.fn(async () => options.positionDetailsResponse ?? { deals: [] }),
@@ -786,7 +797,7 @@ describe("CTraderMcpSyncEngine", () => {
     expect(database.connect).not.toHaveBeenCalled();
   });
 
-  it("persists executions and advances the cursor without guessing a missing lot size", async () => {
+  it("publishes exact base-unit quantity and advances the cursor without guessing a missing lot size", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, clientQueries } = harness([deal()], {
@@ -797,30 +808,41 @@ describe("CTraderMcpSyncEngine", () => {
     expect(synced.counters).toMatchObject({
       insertedExecutions: 1,
       insertedTrades: 0,
-      positionsAwaitingReview: 1,
+      updatedTrades: 1,
+      positionsAwaitingReview: 0,
     });
-    expect(clientQueries.some((query) => query.sql.includes("INSERT INTO trades"))).toBe(false);
-    const quarantine = clientQueries.find((query) => query.sql.includes("projectionQuarantined',true"));
-    expect(quarantine?.values).toEqual([
-      userId,
-      connectionId,
-      "position:9001",
-      "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
-      true,
-    ]);
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[12]).toBe("10");
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      quantityProjection: {
+        version: 1,
+        value: "10",
+        unit: "base_units",
+        lots: null,
+        baseUnits: "10",
+        volumeScale: "unit_cents",
+        source: "provider_filled_volume",
+        contractSizeUsed: null,
+      },
+      classification: {
+        quantityUnit: "base_units",
+        quantityLotsConversionAvailable: false,
+      },
+    });
     const connectionUpdate = clientQueries.find((query) => query.sql.includes("UPDATE broker_connections SET"));
     expect(JSON.parse(String(connectionUpdate?.values[0]))).toMatchObject({
       syncedThroughTimestamp: now.getTime(),
-      positionsAwaitingReviewIds: ["9001"],
+      positionsAwaitingReviewIds: [],
+      positionsAwaitingLotConversionIds: ["9001"],
     });
     expect(JSON.parse(String(connectionUpdate?.values[1]))).toMatchObject({
-      positionsAwaitingReview: 1,
-      positionReviewReasons: { CTRADER_MCP_LOT_SIZE_UNAVAILABLE: 1 },
-      lastWarningCode: "CTRADER_MCP_POSITIONS_AWAITING_REVIEW",
+      positionsAwaitingReview: 0,
+      positionReviewReasons: {},
+      lastWarningCode: null,
     });
   });
 
-  it("reprocesses a previously withheld position with no new deals after an exact operator symbol override", async () => {
+  it("safely converts the same position from base-unit quantity to lots after an exact operator symbol override", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const providerMetadata: Record<string, unknown> = {
@@ -849,10 +871,17 @@ describe("CTraderMcpSyncEngine", () => {
     const first = await engine.syncConnection(connectionId);
     expect(first.counters).toMatchObject({
       insertedExecutions: 2,
-      insertedTrades: 0,
-      positionsAwaitingReview: 1,
+      insertedTrades: 1,
+      positionsAwaitingReview: 0,
     });
     expect(storedExecutions).toHaveLength(2);
+    expect(first.cursorAfter).toMatchObject({ positionsAwaitingLotConversionIds: ["9001"] });
+    const firstTradeInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(firstTradeInsert?.values[12]).toBe("2");
+    expect(JSON.parse(String(firstTradeInsert?.values[20]))).toMatchObject({
+      positionId: "9001",
+      quantityProjection: { value: "2", unit: "base_units", lots: null, baseUnits: "2" },
+    });
     Object.assign(syncCursor, first.cursorAfter);
     providerMetadata.verifiedAccountSymbolOverrides = verifiedSymbolOverrides();
     providerDeals.splice(0, providerDeals.length);
@@ -870,6 +899,10 @@ describe("CTraderMcpSyncEngine", () => {
     const tradeInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
     expect(tradeInsert?.values[12]).toBe("0.02");
     expect(tradeInsert?.values[13]).toBeNull();
+    expect(tradeInsert?.values[5]).toBe(firstTradeInsert?.values[5]);
+    expect(tradeInsert?.sql).toContain("ON CONFLICT (broker_connection_id, external_trade_key)");
+    expect(tradeInsert?.sql).not.toContain("id=EXCLUDED.id");
+    expect(tradeInsert?.sql).toContain("row_version=trades.row_version+1");
     expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
       pnlMethod: "unavailable",
       verifiedAccountSymbolOverride: {
@@ -880,7 +913,13 @@ describe("CTraderMcpSyncEngine", () => {
       },
       classification: {
         lotSizeSource: "verified_account_symbol_override",
+        quantityUnit: "lots",
+        quantityLotsConversionAvailable: true,
         projectionQuarantined: false,
+      },
+      quantityProjection: {
+        value: "0.02", unit: "lots", lots: "0.02", baseUnits: "2",
+        contractSizeUsed: { baseUnitsPerLot: 100, source: "verified_account_symbol_override" },
       },
     });
     const symbolUpsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO symbol_specs"));
@@ -889,7 +928,10 @@ describe("CTraderMcpSyncEngine", () => {
       lotSizeSource: "verified_account_symbol_override",
       verifiedAccountSymbolOverride: { source: "verified_account_symbol_override" },
     });
-    expect(retried.cursorAfter).toMatchObject({ positionsAwaitingReviewIds: [] });
+    expect(retried.cursorAfter).toMatchObject({
+      positionsAwaitingReviewIds: [],
+      positionsAwaitingLotConversionIds: [],
+    });
   });
 
   it.each([
@@ -938,7 +980,6 @@ describe("CTraderMcpSyncEngine", () => {
   });
 
   it.each([
-    { lotSize: 50, expectedCode: "CTRADER_MCP_VERIFIED_SYMBOL_OVERRIDE_PROVIDER_CONFLICT" },
     { lotSize: "100.5", expectedCode: "CTRADER_MCP_SYMBOL_SPEC_INVALID" },
     { lotSize: -100, expectedCode: "CTRADER_MCP_SYMBOL_SPEC_INVALID" },
   ])("does not mask a provider contract-size disagreement ($lotSize)", async ({ lotSize, expectedCode }) => {
@@ -955,6 +996,35 @@ describe("CTraderMcpSyncEngine", () => {
 
     await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({ code: expectedCode });
     expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an unscaled provider lotSize as authoritative against a verified override", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const providerMetadata = {
+      historyFloorTimestamp: historyFloor,
+      historyFloorKind: "registration",
+      verifiedAccountSymbolOverrides: verifiedSymbolOverrides(),
+    };
+    const { engine, clientQueries } = harness([deal()], {
+      symbolsResponse: [{ id: "41", name: "XAU/USD", lotSize: 50, symbolCategory: "Metals" }],
+      providerMetadata,
+      lockedProviderMetadata: providerMetadata,
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[12]).toBe("0.1");
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      verifiedAccountSymbolOverride: { baseUnitsPerLot: 100 },
+      quantityProjection: {
+        value: "0.1",
+        unit: "lots",
+        baseUnits: "10",
+        contractSizeUsed: { baseUnitsPerLot: 100, source: "verified_account_symbol_override" },
+      },
+    });
   });
 
   it.each(["revoked", "changed"] as const)(
@@ -1028,7 +1098,10 @@ describe("CTraderMcpSyncEngine", () => {
         executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
       }),
     ], {
-      symbolsResponse: [{ id: "41", name: providerSymbol, lotSize: 100, symbolCategory: "Metals" }],
+      symbolsResponse: [{
+        id: "41", name: providerSymbol, lotSize: 100,
+        lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      }],
       liveManualRows: [{
         id: "00000000-0000-4000-8000-000000000301",
         row_version: 3,
@@ -1063,6 +1136,33 @@ describe("CTraderMcpSyncEngine", () => {
       manualChoices: [{ id: "00000000-0000-4000-8000-000000000301", screenshotCount: 2 }],
     });
     expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
+  });
+
+  it("does not match an equal-looking manual lot value to a cTrader base-unit quantity", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([deal()], {
+      symbolsResponse: [{ id: "41", name: "XAU/USD", symbolCategory: "Metals" }],
+      liveManualRows: [{
+        id: "00000000-0000-4000-8000-000000000304", row_version: 1, deleted_at: null,
+        symbol: "XAU/USD", direction: "Long", entry_price: "2000", exit_price: null,
+        // Numerically equal to the projected 10 base units, but this legacy
+        // manual cTrader journal quantity is expressed in lots.
+        quantity: "10", pnl: null, trade_date: "2026-08-10", entry_at: null, exit_at: null,
+        strategy: "manual", emotion: null, notes: "keep", tags: [], psychology: {},
+        custom_fields: {}, screenshot_count: 0,
+      }],
+    });
+
+    const synced = await engine.syncConnection(connectionId);
+
+    expect(synced.counters).toMatchObject({ insertedTrades: 1, positionsProjected: 1 });
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_candidates"))).toBe(false);
+    const insert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(insert?.values[12]).toBe("10");
+    expect(JSON.parse(String(insert?.values[20]))).toMatchObject({
+      quantityProjection: { value: "10", unit: "base_units", lots: null },
+    });
   });
 
   it("suggests an adjacent-day manual match only as ambiguous explicit review", async () => {
@@ -1146,7 +1246,7 @@ describe("CTraderMcpSyncEngine", () => {
     expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
   });
 
-  it("uses the connection mapping re-read under FOR UPDATE instead of a stale pre-fetch mapping", async () => {
+  it("fails closed before writes when the account mapping changes during provider fetch", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const initialAccountId = "00000000-0000-4000-8000-000000000401";
@@ -1158,12 +1258,12 @@ describe("CTraderMcpSyncEngine", () => {
       lockedMappedLegacyAccountId: "current-account",
     });
 
-    await engine.syncConnection(connectionId);
-
-    const manualMatchRead = clientQueries.find(({ sql }) => sql.includes("FROM trades manual"));
-    expect(manualMatchRead?.values.slice(2, 4)).toEqual([lockedAccountId, "current-account"]);
-    const brokerInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
-    expect(brokerInsert?.values.slice(2, 4)).toEqual([lockedAccountId, "current-account"]);
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_ACCOUNT_MAPPING_CHANGED",
+      retryable: true,
+    });
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trade_executions"))).toBe(false);
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trades"))).toBe(false);
   });
 
   it("continues updating a separately published broker trade with later close and P&L facts", async () => {
@@ -1449,6 +1549,45 @@ describe("CTraderMcpSyncEngine", () => {
           symbolId: "41", baseUnitsPerLot: 100,
           lotSizeSource: "verified_account_symbol_override", measurementUnit: "Oz",
         },
+      },
+    });
+  });
+
+  it("calculates gross from exact filled base units when no contract size is available", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal({ filledVolume: "1000" }),
+      deal({
+        dealId: "1002", orderId: "8002", tradeSide: "SELL", dealType: "EXIT",
+        filledVolume: "1000", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      }),
+    ], {
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "17", name: "XAU" }],
+      symbolsResponse: [{
+        id: "41", name: "XAU/USD", baseAssetId: "17", quoteAssetId: "15", symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[12]).toBe("10");
+    expect(tradeInsert?.values[13]).toBeNull();
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      quantityProjection: {
+        value: "10", unit: "base_units", lots: null, baseUnits: "10", contractSizeUsed: null,
+      },
+      calculatedGrossPnl: "100",
+      calculatedGrossCurrency: "USD",
+      calculatedGrossMethod: "fill_price_base_units_identity_conversion_v1",
+      calculatedGrossProvenance: {
+        volumeInterpretation: "provider_filled_volume_cents_to_base_units",
+        contractSizeRequiredForCalculation: false,
+        baseAssetId: "17", quoteAssetId: "15", depositAssetId: "15",
+        symbolSpec: { baseUnitsPerLot: null, quantityLotsConversionAvailable: false },
       },
     });
   });
