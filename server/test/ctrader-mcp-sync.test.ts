@@ -94,6 +94,7 @@ function verifiedSymbolOverrides(overrides: Record<string, unknown> = {}) {
 function harness(dealsResponse: unknown, options: {
   symbolsResponse?: unknown;
   balanceResponse?: unknown;
+  assetsResponse?: unknown;
   accountInfoResponse?: unknown;
   providerMetadata?: Record<string, unknown>;
   lockedProviderMetadata?: Record<string, unknown>;
@@ -106,6 +107,7 @@ function harness(dealsResponse: unknown, options: {
   existingTrade?: { id: string; deleted_at: Date | string | null };
   positionDetailsResponse?: unknown;
   pnlRefreshPositionIds?: string[];
+  storedExecutionPayloads?: Record<string, unknown>;
   linkedTrade?: { id: string; deleted_at: Date | string | null; tombstoned: boolean };
   liveManualRows?: Array<Record<string, unknown>>;
   liveExistingBroker?: { id: string; row_version: number; deleted_at: Date | string | null };
@@ -141,7 +143,12 @@ function harness(dealsResponse: unknown, options: {
             ? options.mappedLegacyAccountId ?? null : options.lockedMappedLegacyAccountId,
         }]);
       }
-      if (sql.includes("SELECT external_execution_id FROM trade_executions")) return result([]);
+      if (sql.includes("SELECT external_execution_id") && sql.includes("FROM trade_executions")) {
+        return result(Object.entries(options.storedExecutionPayloads ?? {}).map(([external_execution_id, raw_payload]) => ({
+          external_execution_id,
+          raw_payload,
+        })));
+      }
       if (sql.includes("INSERT INTO trade_executions")) {
         storedExecutions.push({ position: String(values[4]), payload: JSON.parse(String(values[15])) });
         return result([]);
@@ -212,6 +219,7 @@ function harness(dealsResponse: unknown, options: {
   const readClient = {
     getBalance: vi.fn(async () => options.balanceResponse
       ?? { accountId: "5032134", currency: "USD" }),
+    getAssets: vi.fn(async () => options.assetsResponse ?? [{ assetId: "15", name: "USD" }]),
     getSymbols: vi.fn(async () => options.symbolsResponse
       ?? [{ id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" }]),
     getAccountInfo: vi.fn(async () => options.accountInfoResponse ?? {}),
@@ -288,6 +296,137 @@ describe("CTraderMcpSyncEngine", () => {
     expect(readClient.close).toHaveBeenCalledOnce();
   });
 
+  it("resolves live deposit-asset currency and persists bounded exact-P&L capability telemetry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const closing = deal({
+      dealId: "1002",
+      orderId: "8002",
+      tradeSide: "SELL",
+      dealType: "EXIT",
+      executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+    });
+    const closingWithExactMoney = {
+      ...closing,
+      closePositionDetail: {
+        grossProfit: "2500",
+        commission: "-18",
+        swap: "0",
+        pnlConversionFee: "0",
+        moneyDigits: 2,
+      },
+    };
+    const { engine, readClient, clientQueries } = harness([deal(), closing], {
+      balanceResponse: { accountId: "5032134", depositAssetId: 15, moneyDigits: 2 },
+      assetsResponse: { assets: [{ assetId: 15, displayName: "USD", name: "USD" }] },
+      symbolsResponse: [{
+        symbolId: 41,
+        symbolName: "XAU/USD",
+        baseAssetId: 17,
+        quoteAssetId: 15,
+        lotSize: 100,
+        symbolCategory: "Metals",
+      }],
+      positionDetailsResponse: { deals: [deal(), closingWithExactMoney] },
+    });
+
+    await engine.syncConnection(connectionId);
+
+    expect(readClient.getAssets).toHaveBeenCalledOnce();
+    expect(readClient.getPositionDetails).toHaveBeenCalledWith("9001");
+    const executionInserts = clientQueries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"));
+    expect(executionInserts).toHaveLength(2);
+    expect(executionInserts.every(({ values }) => values[13] === "USD")).toBe(true);
+    const symbolUpsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO symbol_specs"));
+    expect(JSON.parse(String(symbolUpsert?.values[5]))).toMatchObject({
+      baseAssetId: "17",
+      quoteAssetId: "15",
+    });
+    const connectionUpdate = clientQueries.find(({ sql }) => sql.includes("sync_cursor=$1::jsonb"));
+    expect(JSON.parse(String(connectionUpdate?.values[1]))).toMatchObject({
+      accountCurrency: "USD",
+      depositAssetId: "15",
+      accountMoneyDigits: 2,
+      providerReadTelemetry: {
+        version: 1,
+        assetsAvailable: true,
+        assetCount: 1,
+        currencyResolved: true,
+        pnlEnrichment: {
+          version: 1,
+          requestedPositions: 1,
+          attemptedPositions: 1,
+          successfulResponses: 1,
+          positionDetailsAvailable: true,
+          authoritativePositions: 1,
+          unresolvedPositions: 0,
+        },
+      },
+    });
+  });
+
+  it("fails closed when a returned deposit asset cannot be resolved", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness([], {
+      balanceResponse: { accountId: "5032134", depositAssetId: 15, moneyDigits: 2 },
+      assetsResponse: { assets: [{ assetId: 16, name: "EUR" }] },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_METADATA_INVALID",
+    });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "currency across a provider metadata wrapper",
+      balanceResponse: { accountId: "5032134", currency: "USD", depositAssetId: 15, moneyDigits: 2 },
+      accountInfoResponse: {},
+      providerMetadataExtra: { data: { currencyCode: "EUR" } },
+      expectedCode: "CTRADER_MCP_CURRENCY_INVALID",
+    },
+    {
+      label: "deposit asset across a balance wrapper",
+      balanceResponse: {
+        accountId: "5032134", depositAssetId: 15, moneyDigits: 2,
+        result: { accountId: "5032134", deposit_asset_id: 16 },
+      },
+      accountInfoResponse: {},
+      providerMetadataExtra: {},
+      expectedCode: "CTRADER_MCP_METADATA_INVALID",
+    },
+    {
+      label: "money digits across account-info aliases",
+      balanceResponse: { accountId: "5032134", depositAssetId: 15, moneyDigits: 2 },
+      accountInfoResponse: { account: { accountId: "5032134", account_money_digits: 3 } },
+      providerMetadataExtra: {},
+      expectedCode: "CTRADER_MCP_METADATA_INVALID",
+    },
+  ])("fails closed on conflicting normal-sync $label", async ({
+    balanceResponse, accountInfoResponse, providerMetadataExtra, expectedCode,
+  }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const providerMetadata = {
+      historyFloorTimestamp: historyFloor,
+      historyFloorKind: "registration",
+      ...providerMetadataExtra,
+    };
+    const { engine, database } = harness([], {
+      balanceResponse,
+      accountInfoResponse,
+      assetsResponse: [{ assetId: 15, name: "USD" }, { assetId: 16, name: "EUR" }],
+      providerMetadata,
+      lockedProviderMetadata: providerMetadata,
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({ code: expectedCode });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
   it("persists generic volume provenance but quarantines projection when its scale is unknown", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -317,6 +456,7 @@ describe("CTraderMcpSyncEngine", () => {
       connectionId,
       "position:9001",
       "CTRADER_MCP_VOLUME_SCALE_UNAVAILABLE",
+      false,
     ]);
   });
 
@@ -666,6 +806,7 @@ describe("CTraderMcpSyncEngine", () => {
       connectionId,
       "position:9001",
       "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
+      true,
     ]);
     const connectionUpdate = clientQueries.find((query) => query.sql.includes("UPDATE broker_connections SET"));
     expect(JSON.parse(String(connectionUpdate?.values[0]))).toMatchObject({
@@ -1128,6 +1269,258 @@ describe("CTraderMcpSyncEngine", () => {
     });
   });
 
+  it("completes mixed exact-money closes without scheduling another P&L enrichment", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries, readClient } = harness([
+      deal(),
+      deal({
+        dealId: "1002",
+        orderId: "8002",
+        tradeSide: "SELL",
+        dealType: "EXIT",
+        filledVolume: "400",
+        executionPrice: 2_005,
+        executionTimestamp: new Date("2026-08-10T10:30:00.000Z").getTime(),
+        netPnlCents: 500,
+        commissionCents: -50,
+        swapCents: 0,
+      }),
+      deal({
+        dealId: "1003",
+        orderId: "8003",
+        tradeSide: "SELL",
+        dealType: "EXIT",
+        filledVolume: "600",
+        executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+        closePositionDetail: {
+          grossProfit: 200_000,
+          swap: -10_000,
+          commission: -5_000,
+          pnlConversionFee: 1_000,
+          moneyDigits: 4,
+        },
+      }),
+    ]);
+
+    await engine.syncConnection(connectionId);
+
+    expect(readClient.getPositionDetails).not.toHaveBeenCalled();
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBe("23.4");
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      pnlMethod: "provider_mixed_exact_money",
+      grossProfit: null,
+      commission: null,
+      swap: null,
+      pnlConversionFee: null,
+      realizedEvents: [
+        { executionId: "1002", pnl: "5", commission: "-0.5", swap: "0" },
+        { executionId: "1003", pnl: "18.4", grossProfit: "20", commission: "-0.5", swap: "-1" },
+      ],
+    });
+  });
+
+  it("retains stored exact close money when the same execution replay omits it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const opening = deal();
+    const closing = deal({
+      dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+    });
+    const storedClosing = {
+      edgebookMcpDeal: {
+        version: 1,
+        dealId: "1002", positionId: "9001", orderId: "8001", symbolId: "41",
+        symbolName: "XAU/USD", accountId: "5032134", side: "SELL", role: "CLOSE",
+        filledVolumeCents: "1000", filledVolumeSourceKey: "filledVolume",
+        filledVolumeScale: "unit_cents", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+        dealStatus: 2, providerUpdatedTimestamp: null, netPnlCents: null,
+        commissionCents: null, swapCents: null,
+        closePositionDetail: {
+          grossProfit: "250000", commission: "-5000", swap: "-10000",
+          pnlConversionFee: "1000", moneyDigits: 4,
+        },
+      },
+    };
+    const { engine, clientQueries } = harness([opening, closing], {
+      storedExecutionPayloads: { "1002": storedClosing },
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find(({ sql }) => sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBe("23.4");
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      pnlMethod: "provider_close_detail_money_digits",
+      realizedEvents: [{ executionId: "1002", pnl: "23.4" }],
+    });
+    const closingUpsert = clientQueries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"))[1];
+    expect(closingUpsert?.values[10]).toBe("23.4");
+    expect(closingUpsert?.values[18]).toBe(4);
+    expect(closingUpsert?.sql).toContain("trade_executions.close_position_detail");
+  });
+
+  it("fails closed when a stored exact execution conflicts with a replayed exact value", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const closing = deal({
+      dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+      executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(), netPnlCents: 2_500,
+    });
+    const storedClosing = {
+      edgebookMcpDeal: {
+        version: 1,
+        dealId: "1002", positionId: "9001", orderId: "8001", symbolId: "41",
+        symbolName: "XAU/USD", accountId: "5032134", side: "SELL", role: "CLOSE",
+        filledVolumeCents: "1000", filledVolumeSourceKey: "filledVolume",
+        filledVolumeScale: "unit_cents", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+        dealStatus: 2, providerUpdatedTimestamp: null, netPnlCents: 2_400,
+        commissionCents: null, swapCents: null,
+      },
+    };
+    const { engine, clientQueries } = harness([deal(), closing], {
+      storedExecutionPayloads: { "1002": storedClosing },
+    });
+
+    await expect(engine.syncConnection(connectionId)).rejects.toMatchObject({
+      code: "CTRADER_MCP_DUPLICATE_DEAL_CONFLICT",
+    });
+    expect(clientQueries.some(({ sql }) => sql.includes("INSERT INTO trade_executions"))).toBe(false);
+  });
+
+  it("stores the live XAUUSD calculated gross separately while exact net remains unavailable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T01:00:00.000Z"));
+    const liveMetadata = {
+      historyFloorTimestamp: historyFloor,
+      historyFloorKind: "registration",
+      verifiedAccountSymbolOverrides: verifiedSymbolOverrides({
+        symbolName: "XAUUSD",
+      }),
+    };
+    const { engine, clientQueries } = harness([
+      deal({
+        dealId: "6678962", positionId: "4556640", tradeSide: "SELL", dealType: undefined,
+        symbolName: "XAUUSD", filledVolume: "200", executionPrice: 4_401.84,
+        executionTimestamp: new Date("2026-08-12T04:49:17.842Z").getTime(),
+      }),
+      deal({
+        dealId: "6679278", positionId: "4556640", tradeSide: "BUY", dealType: undefined,
+        symbolName: "XAUUSD", filledVolume: "200", executionPrice: 4_391.51,
+        executionTimestamp: new Date("2026-08-12T05:30:01.003Z").getTime(),
+      }),
+    ], {
+      providerMetadata: liveMetadata,
+      lockedProviderMetadata: liveMetadata,
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "17", name: "XAU" }],
+      symbolsResponse: [{
+        id: "41", name: "XAUUSD", baseAssetId: "17", quoteAssetId: "15", symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBeNull();
+    const brokerData = JSON.parse(String(tradeInsert?.values[20]));
+    expect(brokerData).toMatchObject({
+      pnlMethod: "unavailable",
+      realizedEvents: [],
+      calculatedGrossPnl: "20.66",
+      calculatedGrossCurrency: "USD",
+      calculatedGrossMethod: "fill_price_base_units_identity_conversion_v1",
+      calculatedGrossProvenance: {
+        feesIncluded: false,
+        analyticsTreatment: "excluded_from_net_pnl",
+        accountMoneyDigits: 2,
+        baseAssetId: "17",
+        baseAssetName: "XAU",
+        roundingRule: "half_away_from_zero_at_account_money_digits",
+        quoteAssetId: "15",
+        depositAssetId: "15",
+        conversionRate: "1",
+        symbolSpec: {
+          symbolId: "41", baseUnitsPerLot: 100,
+          lotSizeSource: "verified_account_symbol_override", measurementUnit: "Oz",
+        },
+      },
+    });
+  });
+
+  it("does not calculate gross when the provider quote asset differs from the deposit asset", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal(),
+      deal({
+        dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      }),
+    ], {
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "16", name: "EUR" }],
+      symbolsResponse: [{
+        id: "41", name: "XAU/USD", baseAssetId: "17", quoteAssetId: "16",
+        lotSize: 100, symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    const brokerData = JSON.parse(String(tradeInsert?.values[20]));
+    expect(tradeInsert?.values[13]).toBeNull();
+    expect(brokerData).toMatchObject({ pnlMethod: "unavailable" });
+    expect(brokerData).toMatchObject({
+      calculatedGrossPnl: null,
+      calculatedGrossCurrency: null,
+      calculatedGrossMethod: null,
+      calculatedGrossEvents: [],
+      calculatedGrossProvenance: null,
+    });
+  });
+
+  it("provider exact net supersedes calculated gross in canonical P&L while retaining its audit", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal(),
+      deal({
+        dealId: "1002", tradeSide: "SELL", dealType: "EXIT", executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(), netPnlCents: 2_500,
+      }),
+    ], {
+      existingTrade: { id: tradeId, deleted_at: null },
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "17", name: "XAU" }],
+      symbolsResponse: [{
+        id: "41", name: "XAU/USD", baseAssetId: "17", quoteAssetId: "15",
+        lotSize: 100, lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBe("25");
+    const brokerData = JSON.parse(String(tradeInsert?.values[20]));
+    expect(brokerData).toMatchObject({
+      pnlMethod: "provider_explicit_net_cents",
+      calculatedGrossPnl: "100",
+      calculatedGrossProvenance: {
+        providerExactNetPriority: true,
+        inputFingerprintSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(brokerData.realizedEvents).toHaveLength(1);
+  });
+
   it("fails closed when explicit cents conflict with authoritative close money", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -1214,7 +1607,7 @@ describe("CTraderMcpSyncEngine", () => {
     expect(String(refreshQuery?.[0])).toContain("trade.broker_data->>'pnlMethod'='unavailable'");
     expect(String(refreshQuery?.[0])).not.toContain("trade.pnl IS NULL");
     const linkedUpdate = clientQueries.find(({ sql }) =>
-      sql.includes("UPDATE trades SET") && sql.includes("pnl=COALESCE($9::numeric,pnl)"));
+      sql.includes("UPDATE trades SET") && sql.includes("WHEN $9::numeric IS NOT NULL THEN $9::numeric"));
     expect(linkedUpdate?.values[8]).toBe("23.4");
     expect(linkedUpdate?.sql).toContain("trade_date=COALESCE(trade_date,$11::date)");
     expect(linkedUpdate?.sql).not.toContain("trade_date=$11");

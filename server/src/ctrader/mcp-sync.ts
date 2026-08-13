@@ -5,6 +5,10 @@ import type { Database } from "../db/database.js";
 import { withTransaction } from "../db/database.js";
 import type { EventBus } from "../events/event-bus.js";
 import { connectionTokenAad, type TokenCipher } from "./crypto.js";
+import {
+  calculateCTraderGrossFallback,
+  CTraderCalculatedGrossError,
+} from "./calculated-gross.js";
 import { CTraderMcpError, CTraderMcpReadClient } from "./mcp.js";
 import { CTraderSyncError, type CTraderSyncCounters, type CTraderSyncResult } from "./sync.js";
 
@@ -52,6 +56,7 @@ const ACCOUNTLESS_HISTORY_ATTESTATION_SOURCE = "operator_verified_per_account_re
 const VERIFIED_SYMBOL_OVERRIDES_KEY = "verifiedAccountSymbolOverrides";
 const VERIFIED_SYMBOL_OVERRIDE_PURPOSE = "operator_verified_ctrader_symbol_specification";
 const VERIFIED_SYMBOL_OVERRIDE_SOURCE = "verified_account_symbol_override";
+const PROVIDER_BASE_UNITS_PER_LOT_SCALE = "base_units_per_lot_v1";
 const MAX_VERIFIED_SYMBOL_OVERRIDES = 100;
 
 type AccountlessHistoryAttributionAttestation = {
@@ -200,11 +205,39 @@ type LiveReconciliationMatch = {
 type McpSymbol = {
   id: string;
   name: string;
+  baseAssetId: string | null;
+  quoteAssetId: string | null;
   category: string | null;
   lotSize: number | null;
   lotSizeSource: "provider" | "unavailable" | typeof VERIFIED_SYMBOL_OVERRIDE_SOURCE;
+  providerLotSizeScale: typeof PROVIDER_BASE_UNITS_PER_LOT_SCALE | null;
   verifiedOverride: VerifiedAccountSymbolOverride | null;
   raw: JsonRecord;
+};
+
+export type McpCurrencyContext = {
+  accountCurrency: string | null;
+  depositAssetId: string | null;
+  accountMoneyDigits: number | null;
+  assetNames: ReadonlyMap<string, string>;
+};
+
+type McpPnlEnrichmentTelemetry = {
+  version: 1;
+  requestedPositions: number;
+  attemptedPositions: number;
+  successfulResponses: number;
+  positionDetailsAvailable: boolean | null;
+  authoritativePositions: number;
+  unresolvedPositions: number;
+};
+
+type McpProviderReadTelemetry = {
+  version: 1;
+  assetsAvailable: boolean;
+  assetCount: number;
+  currencyResolved: boolean;
+  pnlEnrichment: McpPnlEnrichmentTelemetry;
 };
 
 type McpDeal = {
@@ -260,11 +293,13 @@ export type CTraderHistoricalPreviewCounters = CTraderSyncCounters & {
   deletedManual: number;
   unmatched: number;
   executionOnly: number;
+  providerReadTelemetry: McpProviderReadTelemetry;
 };
 
 export interface CTraderMcpReadClientLike {
   getAccountInfo(): Promise<unknown>;
   getBalance(): Promise<unknown>;
+  getAssets?(): Promise<unknown>;
   getSymbols(): Promise<unknown>;
   getDeals(request: { fromTimestamp: string; toTimestamp: string }): Promise<unknown>;
   getPositionDetails?(positionId: string): Promise<unknown>;
@@ -522,14 +557,170 @@ function canonicalStoredDeal(deal: McpDeal): JsonRecord {
   };
 }
 
+type McpMoneyRank = 0 | 1 | 2;
+
+function dealMoneyRank(deal: McpDeal): McpMoneyRank {
+  if (
+    deal.moneyDigits !== null
+    && deal.grossProfitScaled !== null
+    && deal.commissionScaled !== null
+    && deal.swapScaled !== null
+    && deal.pnlConversionFeeScaled !== null
+  ) return 2;
+  return deal.pnlCents === null ? 0 : 1;
+}
+
+function scaledMoneyEqual(
+  left: { value: bigint; digits: number },
+  right: { value: bigint; digits: number },
+): boolean {
+  const digits = Math.max(left.digits, right.digits);
+  return left.value * (10n ** BigInt(digits - left.digits))
+    === right.value * (10n ** BigInt(digits - right.digits));
+}
+
+function exactNet(deal: McpDeal): { value: bigint; digits: number } | null {
+  if (dealMoneyRank(deal) === 2) {
+    return {
+      value: (deal.grossProfitScaled ?? 0n) + (deal.swapScaled ?? 0n)
+        + (deal.commissionScaled ?? 0n) - (deal.pnlConversionFeeScaled ?? 0n),
+      digits: deal.moneyDigits ?? 0,
+    };
+  }
+  return deal.pnlCents === null ? null : { value: BigInt(deal.pnlCents), digits: 2 };
+}
+
+function exactComponent(
+  deal: McpDeal,
+  field: "grossProfit" | "commission" | "swap" | "pnlConversionFee",
+): { value: bigint; digits: number } | null {
+  if (dealMoneyRank(deal) === 2) {
+    const value = field === "grossProfit"
+      ? deal.grossProfitScaled
+      : field === "commission"
+        ? deal.commissionScaled
+        : field === "swap"
+          ? deal.swapScaled
+          : deal.pnlConversionFeeScaled;
+    return value === null ? null : { value, digits: deal.moneyDigits ?? 0 };
+  }
+  if (field === "commission" && deal.commissionCents !== null) {
+    return { value: BigInt(deal.commissionCents), digits: 2 };
+  }
+  if (field === "swap" && deal.swapCents !== null) {
+    return { value: BigInt(deal.swapCents), digits: 2 };
+  }
+  return null;
+}
+
+function dealConflict(dealId: string, detail: string): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_MCP_DUPLICATE_DEAL_CONFLICT",
+    `cTrader returned conflicting ${detail} for deal ${dealId}`,
+    false,
+  );
+}
+
+/**
+ * Joins two observations of one provider execution without allowing a weaker
+ * Remote MCP response to erase authoritative facts. Monetary authority is
+ * closePositionDetail > explicit net cents > absent. Any overlapping exact
+ * facts must agree even when the higher-ranked representation is available.
+ */
+function mergeDealFacts(existing: McpDeal, incoming: McpDeal): McpDeal {
+  if (existing.dealId !== incoming.dealId) throw dealConflict(incoming.dealId, "execution identities");
+  const requiredIdentity = [
+    "positionId", "symbolId", "side", "filledVolumeCents",
+    "filledVolumeSourceKey", "filledVolumeScale", "executionPrice", "executionTimestamp",
+  ] as const;
+  if (requiredIdentity.some((key) => String(existing[key]) !== String(incoming[key]))) {
+    throw dealConflict(incoming.dealId, "stable execution data");
+  }
+  const mergeOptionalIdentity = <T>(left: T | null, right: T | null, field: string): T | null => {
+    if (left !== null && right !== null && String(left) !== String(right)) {
+      throw dealConflict(incoming.dealId, field);
+    }
+    return right ?? left;
+  };
+  const accountId = mergeOptionalIdentity(existing.accountId, incoming.accountId, "account attribution");
+  const orderId = mergeOptionalIdentity(existing.orderId, incoming.orderId, "order identity");
+  const role = mergeOptionalIdentity(existing.role, incoming.role, "execution role");
+  const dealStatus = mergeOptionalIdentity(existing.dealStatus, incoming.dealStatus, "deal status");
+  let symbolName: string | null = incoming.symbolName ?? existing.symbolName;
+  if (
+    existing.symbolName !== null
+    && incoming.symbolName !== null
+    && normalizedSymbolName(existing.symbolName) !== normalizedSymbolName(incoming.symbolName)
+  ) throw dealConflict(incoming.dealId, "symbol identity");
+
+  const existingNet = exactNet(existing);
+  const incomingNet = exactNet(incoming);
+  if (existingNet !== null && incomingNet !== null && !scaledMoneyEqual(existingNet, incomingNet)) {
+    throw dealConflict(incoming.dealId, "realized P&L representations");
+  }
+  for (const field of ["grossProfit", "commission", "swap", "pnlConversionFee"] as const) {
+    const left = exactComponent(existing, field);
+    const right = exactComponent(incoming, field);
+    if (left !== null && right !== null && !scaledMoneyEqual(left, right)) {
+      throw dealConflict(incoming.dealId, `${field} representations`);
+    }
+  }
+
+  const existingRank = dealMoneyRank(existing);
+  const incomingRank = dealMoneyRank(incoming);
+  const authoritativeDetail = incomingRank === 2
+    ? incoming
+    : existingRank === 2
+      ? existing
+      : null;
+  const mergeOptionalCents = (left: number | null, right: number | null, field: string): number | null => {
+    if (left !== null && right !== null && left !== right) throw dealConflict(incoming.dealId, field);
+    return right ?? left;
+  };
+  symbolName = symbolName ?? null;
+  return {
+    ...existing,
+    ...incoming,
+    orderId,
+    symbolName,
+    accountId,
+    role,
+    dealStatus,
+    providerUpdatedTimestamp: existing.providerUpdatedTimestamp === null
+      ? incoming.providerUpdatedTimestamp
+      : incoming.providerUpdatedTimestamp === null
+        ? existing.providerUpdatedTimestamp
+        : Math.max(existing.providerUpdatedTimestamp, incoming.providerUpdatedTimestamp),
+    pnlCents: mergeOptionalCents(existing.pnlCents, incoming.pnlCents, "explicit realized P&L"),
+    commissionCents: mergeOptionalCents(existing.commissionCents, incoming.commissionCents, "explicit commission"),
+    swapCents: mergeOptionalCents(existing.swapCents, incoming.swapCents, "explicit swap"),
+    grossProfitScaled: authoritativeDetail?.grossProfitScaled ?? null,
+    commissionScaled: authoritativeDetail?.commissionScaled ?? null,
+    swapScaled: authoritativeDetail?.swapScaled ?? null,
+    pnlConversionFeeScaled: authoritativeDetail?.pnlConversionFeeScaled ?? null,
+    moneyDigits: authoritativeDetail?.moneyDigits ?? null,
+  };
+}
+
 function positionsMissingAuthoritativePnl(deals: readonly McpDeal[]): string[] {
   const grouped = new Map<string, McpDeal[]>();
   for (const deal of deals) grouped.set(deal.positionId, [...(grouped.get(deal.positionId) ?? []), deal]);
   return [...grouped].flatMap(([positionId, positionDeals]) => {
     const potentiallyClosed = positionDeals.some((deal) => deal.role === "CLOSE")
       || new Set(positionDeals.map((deal) => deal.side)).size > 1;
-    const lacksAuthoritativePnl = positionDeals.some((deal) =>
-      deal.pnlCents === null && deal.moneyDigits === null);
+    const ordered = [...positionDeals].sort((left, right) =>
+      left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
+    const openingSide = ordered.find((deal) => deal.role === "OPEN")?.side ?? ordered[0]?.side;
+    const closing = openingSide === undefined ? [] : ordered.filter((deal) =>
+      deal.role === "CLOSE" || (deal.role === null && deal.side !== openingSide));
+    const hasAuthoritativeMoney = (deal: McpDeal): boolean => deal.pnlCents !== null || (
+      deal.moneyDigits !== null
+      && deal.grossProfitScaled !== null
+      && deal.commissionScaled !== null
+      && deal.swapScaled !== null
+      && deal.pnlConversionFeeScaled !== null
+    );
+    const lacksAuthoritativePnl = closing.length === 0 || closing.some((deal) => !hasAuthoritativeMoney(deal));
     return potentiallyClosed && lacksAuthoritativePnl ? [positionId] : [];
   });
 }
@@ -909,6 +1100,23 @@ function compareDealIds(left: string, right: string): number {
   return left.localeCompare(right);
 }
 
+function optionalStrictIntegerId(raw: JsonRecord, aliases: readonly string[], field: string): string | null {
+  const values = aliases.flatMap((key) => raw[key] === undefined || raw[key] === null ? [] : [raw[key]]);
+  if (values.length === 0) return null;
+  const normalized = values.map((value) => {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
+    if (typeof value === "string" && /^[1-9]\d*$/.test(value.trim())) {
+      const number = Number(value.trim());
+      if (Number.isSafeInteger(number)) return String(number);
+    }
+    throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", `cTrader returned an invalid ${field}`, false);
+  });
+  if (normalized.some((value) => value !== normalized[0])) {
+    throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", `cTrader returned conflicting ${field} values`, false);
+  }
+  return normalized[0] ?? null;
+}
+
 function normalizeSymbols(value: unknown): McpSymbol[] {
   const rows = unwrapArray(value, ["symbols", "data", "result", "items"], "symbols");
   const symbols = new Map<string, McpSymbol>();
@@ -944,23 +1152,42 @@ function normalizeSymbols(value: unknown): McpSymbol[] {
       );
     }
     const hasProviderLot = providerLotNumber !== null;
+    const providerLotScaleAliases = [raw.lotSizeScale, raw.lot_size_scale]
+      .filter((candidate) => candidate !== undefined && candidate !== null && candidate !== "")
+      .map((candidate) => typeof candidate === "string" ? candidate.trim() : String(candidate));
+    if (providerLotScaleAliases.some((candidate) => candidate !== providerLotScaleAliases[0])) {
+      throw new CTraderSyncError(
+        "CTRADER_MCP_SYMBOL_CONFLICT",
+        `cTrader returned conflicting contract-size scales for symbol ${id}`,
+        false,
+      );
+    }
+    const providerLotSizeScale = providerLotScaleAliases[0] === PROVIDER_BASE_UNITS_PER_LOT_SCALE
+      ? PROVIDER_BASE_UNITS_PER_LOT_SCALE
+      : null;
     const normalized: McpSymbol = {
       id,
       name,
+      baseAssetId: optionalStrictIntegerId(raw, ["baseAssetId", "base_asset_id"], "base asset ID"),
+      quoteAssetId: optionalStrictIntegerId(raw, ["quoteAssetId", "quote_asset_id"], "quote asset ID"),
       category: textValue(firstValue(raw, [
         "symbolCategory", "category", "assetClass", "type", "symbolCategoryId",
       ]), "symbol category"),
       lotSize: hasProviderLot ? providerLotNumber : null,
       lotSizeSource: hasProviderLot ? "provider" : "unavailable",
+      providerLotSizeScale,
       verifiedOverride: null,
       raw,
     };
     const previous = symbols.get(id);
     if (previous) {
       const sameCanonicalSpecification = normalizedSymbolName(previous.name) === normalizedSymbolName(normalized.name)
+        && previous.baseAssetId === normalized.baseAssetId
+        && previous.quoteAssetId === normalized.quoteAssetId
         && previous.category === normalized.category
         && previous.lotSize === normalized.lotSize
         && previous.lotSizeSource === normalized.lotSizeSource
+        && previous.providerLotSizeScale === normalized.providerLotSizeScale
         && previous.verifiedOverride === normalized.verifiedOverride;
       if (!sameCanonicalSpecification) {
         throw new CTraderSyncError(
@@ -1009,6 +1236,15 @@ const REVIEWABLE_PROJECTION_ERRORS = new Set([
   "CTRADER_MCP_CALCULATION_INVALID",
 ]);
 
+// Missing symbol/contract metadata prevents a safe price/quantity projection,
+// but it does not invalidate exact provider money already tied to the same
+// stored execution lineage. Structural lineage errors intentionally do not
+// appear here and continue to clear the aggregate when quarantined.
+const QUARANTINE_REASONS_PRESERVING_EXACT_MONEY = new Set([
+  "CTRADER_MCP_SYMBOL_UNAVAILABLE",
+  "CTRADER_MCP_LOT_SIZE_UNAVAILABLE",
+]);
+
 function projectionReviewReason(error: unknown): string | null {
   return error instanceof CTraderSyncError && REVIEWABLE_PROJECTION_ERRORS.has(error.code)
     ? error.code
@@ -1024,17 +1260,6 @@ function reasonCounts(reasons: ReadonlyMap<string, string>): Record<string, numb
 function metadataTimestamp(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   try { return timestamp(value, "account registration timestamp"); } catch { return null; }
-}
-
-function unwrapFirstObject(value: unknown): JsonRecord {
-  if (Array.isArray(value)) return objectValue(value[0]);
-  const root = objectValue(value);
-  for (const key of ACCOUNT_METADATA_WRAPPER_KEYS) {
-    const nested = root[key];
-    if (Array.isArray(nested)) return objectValue(nested[0]);
-    if (typeof nested === "object" && nested !== null) return objectValue(nested);
-  }
-  return root;
 }
 
 function accountMetadataObjects(
@@ -1077,35 +1302,6 @@ function accountMetadataObjects(
   return objects;
 }
 
-function firstText(objects: readonly JsonRecord[], keys: readonly string[]): string | null {
-  for (const object of objects) {
-    for (const key of keys) {
-      const value = object[key];
-      if (typeof value === "string" && value.trim().length > 0) {
-        const trimmed = value.trim();
-        if (trimmed.length > 200 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
-          throw new CTraderSyncError(
-            "CTRADER_MCP_METADATA_INVALID",
-            "cTrader returned invalid account metadata",
-            false,
-          );
-        }
-        return trimmed;
-      }
-      if (typeof value === "number" && Number.isFinite(value)) {
-        const text = String(value);
-        if (text.length <= 200) return text;
-        throw new CTraderSyncError(
-          "CTRADER_MCP_METADATA_INVALID",
-          "cTrader returned invalid account metadata",
-          false,
-        );
-      }
-    }
-  }
-  return null;
-}
-
 function verifiedAccountAttribution(
   objects: readonly JsonRecord[],
   expectedAccountId: string,
@@ -1130,17 +1326,114 @@ function historyResponseHasVerifiedAccount(
 }
 
 function accountCurrency(objects: readonly JsonRecord[]): string | null {
-  const value = firstText(objects, ["currency", "currencyCode", "accountCurrency"]);
-  if (value === null) return null;
-  const canonical = value.toUpperCase();
-  if (!/^[A-Z0-9]{3,10}$/.test(canonical)) {
-    throw new CTraderSyncError(
-      "CTRADER_MCP_CURRENCY_INVALID",
-      "cTrader returned an invalid account currency",
-      false,
-    );
+  const values = objects.flatMap((object) => [
+    object.currency,
+    object.currencyCode,
+    object.currency_code,
+    object.accountCurrency,
+    object.account_currency,
+  ]).filter((value) => value !== undefined && value !== null && value !== "");
+  if (values.length === 0) return null;
+  const normalized = values.map((value) => {
+    if (typeof value !== "string") {
+      throw new CTraderSyncError("CTRADER_MCP_CURRENCY_INVALID", "cTrader returned an invalid account currency", false);
+    }
+    const trimmed = value.trim();
+    if (trimmed.length > 200 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+      throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned invalid account metadata", false);
+    }
+    const canonical = trimmed.toUpperCase();
+    if (!/^[A-Z0-9]{3,10}$/.test(canonical)) {
+      throw new CTraderSyncError("CTRADER_MCP_CURRENCY_INVALID", "cTrader returned an invalid account currency", false);
+    }
+    return canonical;
+  });
+  if (normalized.some((value) => value !== normalized[0])) {
+    throw new CTraderSyncError("CTRADER_MCP_CURRENCY_INVALID", "cTrader returned conflicting account currencies", false);
   }
-  return canonical;
+  return normalized[0] ?? null;
+}
+
+function normalizeAssets(value: unknown): ReadonlyMap<string, string> {
+  const rows = unwrapArray(value, ["assets", "data", "result", "items"], "assets");
+  const assets = new Map<string, string>();
+  for (const row of rows) {
+    const raw = objectValue(row);
+    const id = optionalStrictIntegerId(raw, ["assetId", "asset_id", "id"], "asset ID");
+    if (id === null) continue;
+    const name = textValue(firstValue(raw, ["name", "displayName", "display_name"]), "asset name");
+    if (name === null) continue;
+    const canonical = name.toUpperCase();
+    if (!/^[A-Z0-9.]{2,20}$/.test(canonical)) {
+      throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned an invalid asset name", false);
+    }
+    const previous = assets.get(id);
+    if (previous !== undefined && previous !== canonical) {
+      throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned conflicting asset names", false);
+    }
+    assets.set(id, canonical);
+  }
+  if (assets.size === 0) throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned no usable assets", false);
+  return assets;
+}
+
+function accountDepositAssetId(objects: readonly JsonRecord[]): string | null {
+  const values = objects.flatMap((object) => {
+    const value = optionalStrictIntegerId(
+      object,
+      ["depositAssetId", "deposit_asset_id", "accountDepositAssetId", "account_deposit_asset_id"],
+      "deposit asset ID",
+    );
+    return value === null ? [] : [value];
+  });
+  if (values.some((value) => value !== values[0])) {
+    throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned conflicting deposit asset IDs", false);
+  }
+  return values[0] ?? null;
+}
+
+function accountMoneyDigits(objects: readonly JsonRecord[]): number | null {
+  const candidates = objects.flatMap((raw) => [
+    raw.moneyDigits,
+    raw.money_digits,
+    raw.accountMoneyDigits,
+    raw.account_money_digits,
+  ]).filter((value) => value !== undefined && value !== null && value !== "");
+  if (candidates.length === 0) return null;
+  const digits = candidates.map((value) => typeof value === "number" ? value : Number(value));
+  if (digits.some((value) => !Number.isSafeInteger(value) || value < 0 || value > 18 || value !== digits[0])) {
+    throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned invalid account money digits", false);
+  }
+  return digits[0] ?? null;
+}
+
+function currencyContext(
+  balanceResponse: unknown,
+  accountInfoResponse: unknown,
+  assets: ReadonlyMap<string, string>,
+  assetsAvailable: boolean,
+  providerMetadata: JsonRecord,
+): McpCurrencyContext {
+  const objects = [
+    ...accountMetadataObjects(balanceResponse),
+    ...accountMetadataObjects(accountInfoResponse),
+    ...accountMetadataObjects(providerMetadata),
+  ];
+  const directCurrency = accountCurrency(objects);
+  const depositAssetId = accountDepositAssetId(objects);
+  const assetCurrency = depositAssetId === null ? null : assets.get(depositAssetId) ?? null;
+  if (depositAssetId !== null && assetsAvailable && assetCurrency === null) {
+    throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader deposit asset is unavailable", false);
+  }
+  if (directCurrency !== null && assetCurrency !== null && directCurrency !== assetCurrency) {
+    throw new CTraderSyncError("CTRADER_MCP_CURRENCY_INVALID", "cTrader returned conflicting account currencies", false);
+  }
+  return {
+    accountCurrency: directCurrency ?? assetCurrency,
+    depositAssetId,
+    accountMoneyDigits: accountMoneyDigits(objects),
+    assetNames: assets,
+  };
 }
 
 function historyStart(
@@ -1431,9 +1724,10 @@ function projectMcpPosition(
   dealsValue: readonly McpDeal[],
   symbol: McpSymbol,
   timeZone: string,
-  accountCurrency: string | null,
+  currency: McpCurrencyContext,
   floorKind: string,
 ): McpProjection {
+  const accountCurrency = currency.accountCurrency;
   const deals = [...dealsValue].sort((left, right) =>
     left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
   const first = deals[0];
@@ -1517,7 +1811,11 @@ function projectMcpPosition(
     && deal.pnlConversionFeeScaled !== null;
   const completeExplicitCents = closing.length > 0 && closing.every((deal) => deal.pnlCents !== null);
   const completeAuthoritativeCloseMoney = closing.length > 0 && closing.every(hasAuthoritativeCloseMoney);
-  const completeProviderPnl = completeExplicitCents || completeAuthoritativeCloseMoney;
+  const completeProviderPnl = closing.length > 0 && closing.every((deal) =>
+    deal.pnlCents !== null || hasAuthoritativeCloseMoney(deal));
+  const mixedExactMoney = completeProviderPnl
+    && !completeExplicitCents
+    && !completeAuthoritativeCloseMoney;
   const dealNetScaled = (deal: McpDeal): { value: bigint; digits: number } => {
     if (hasAuthoritativeCloseMoney(deal)) {
       return {
@@ -1570,6 +1868,28 @@ function projectMcpPosition(
     }, 0n);
     totalPnl = scaledMoneyToDecimal(total, totalDigits);
   }
+  let calculatedGross: ReturnType<typeof calculateCTraderGrossFallback> = null;
+  if (closed === opened && closing.length > 0) {
+    try {
+      calculatedGross = calculateCTraderGrossFallback({
+        deals,
+        openingSide,
+        symbol,
+        currency,
+      });
+    } catch (error) {
+      if (error instanceof CTraderCalculatedGrossError) {
+        throw new CTraderSyncError(
+          error.code === "POSITION_VOLUME_INVALID"
+            ? "CTRADER_MCP_POSITION_VOLUME_INVALID"
+            : "CTRADER_MCP_NUMERIC_OVERFLOW",
+          error.message,
+          false,
+        );
+      }
+      throw error;
+    }
+  }
   const entryLocal = localDateTime(first.executionTimestamp, timeZone);
   const lastClose = closing.at(-1) ?? null;
   const exitLocal = lastClose ? localDateTime(lastClose.executionTimestamp, timeZone) : null;
@@ -1591,6 +1911,21 @@ function projectMcpPosition(
   }
   const quantityLots = Number(opened) / lotDenominator;
   const asset = assetForSymbol(symbol);
+  const providerExecutionLineage = {
+    version: 1,
+    executionIds: deals.map((deal) => deal.dealId),
+    closingExecutionIds: closing.map((deal) => deal.dealId),
+    fingerprintSha256: createHash("sha256").update(json({
+      positionId: first.positionId,
+      executions: deals.map((deal) => ({
+        dealId: deal.dealId,
+        role: deal.role,
+        side: deal.side,
+        filledVolumeCents: deal.filledVolumeCents.toString(),
+        executionTimestamp: deal.executionTimestamp,
+      })),
+    })).digest("hex"),
+  };
   return {
     positionId: first.positionId,
     symbolId: first.symbolId,
@@ -1618,9 +1953,14 @@ function projectMcpPosition(
       openedVolumeCents: opened.toString(),
       closedVolumeCents: closed.toString(),
       openVolumeCents: openVolume.toString(),
+      providerExecutionLineage,
       pnlMethod: totalPnl === null
         ? "unavailable"
-        : completeAuthoritativeCloseMoney ? "provider_close_detail_money_digits" : "provider_explicit_net_cents",
+        : completeAuthoritativeCloseMoney
+          ? "provider_close_detail_money_digits"
+          : completeExplicitCents
+            ? "provider_explicit_net_cents"
+            : "provider_mixed_exact_money",
       grossProfit: completeAuthoritativeCloseMoney ? sumScaledMoney(closing.map((deal) => ({
         value: deal.grossProfitScaled ?? 0n,
         digits: deal.moneyDigits ?? 0,
@@ -1628,16 +1968,21 @@ function projectMcpPosition(
       commission: completeAuthoritativeCloseMoney ? sumScaledMoney(closing.map((deal) => ({
         value: deal.commissionScaled ?? 0n,
         digits: deal.moneyDigits ?? 0,
-      }))) : sumOptionalCents(closing, "commissionCents"),
+      }))) : mixedExactMoney ? null : sumOptionalCents(closing, "commissionCents"),
       swap: completeAuthoritativeCloseMoney ? sumScaledMoney(closing.map((deal) => ({
         value: deal.swapScaled ?? 0n,
         digits: deal.moneyDigits ?? 0,
-      }))) : sumOptionalCents(closing, "swapCents"),
+      }))) : mixedExactMoney ? null : sumOptionalCents(closing, "swapCents"),
       pnlConversionFee: completeAuthoritativeCloseMoney ? sumScaledMoney(closing.map((deal) => ({
         value: deal.pnlConversionFeeScaled ?? 0n,
         digits: deal.moneyDigits ?? 0,
       }))) : null,
       realizedEvents,
+      calculatedGrossPnl: calculatedGross?.calculatedGrossPnl ?? null,
+      calculatedGrossCurrency: calculatedGross?.calculatedGrossCurrency ?? null,
+      calculatedGrossMethod: calculatedGross?.calculatedGrossMethod ?? null,
+      calculatedGrossEvents: calculatedGross?.calculatedGrossEvents ?? [],
+      calculatedGrossProvenance: calculatedGross?.calculatedGrossProvenance ?? null,
       accountCurrency,
       verifiedAccountSymbolOverride: symbol.verifiedOverride,
       classification: {
@@ -1917,6 +2262,17 @@ export class CTraderMcpSyncEngine {
     try {
       const balanceRaw = await client.getBalance();
       await heartbeat();
+      let assets = new Map<string, string>();
+      let assetsAvailable = false;
+      if (client.getAssets !== undefined) {
+        try {
+          assets = new Map(normalizeAssets(await client.getAssets()));
+          assetsAvailable = true;
+          await heartbeat();
+        } catch (error) {
+          if (!(error instanceof CTraderMcpError) || error.code !== "TOOL_UNAVAILABLE") throw error;
+        }
+      }
       const symbolsRaw = await client.getSymbols();
       await heartbeat();
       let accountInfoRaw: unknown = null;
@@ -1925,8 +2281,6 @@ export class CTraderMcpSyncEngine {
       } catch (error) {
         if (!(error instanceof CTraderMcpError) || error.code !== "TOOL_UNAVAILABLE") throw error;
       }
-      const balance = unwrapFirstObject(balanceRaw);
-      const accountInfo = unwrapFirstObject(accountInfoRaw);
       const sessionAccountVerified = verifiedAccountAttribution(
         [...accountMetadataObjects(balanceRaw), ...accountMetadataObjects(accountInfoRaw)],
         connection.external_account_id,
@@ -1964,7 +2318,7 @@ export class CTraderMcpSyncEngine {
           accountlessHistoryAttested: operatorAccountAttestation !== null,
         },
       );
-      fetched = await this.enrichDealsFromPositionDetails(
+      const enrichment = await this.enrichDealsFromPositionDetails(
         client,
         fetched,
         [
@@ -1977,7 +2331,8 @@ export class CTraderMcpSyncEngine {
         true,
         heartbeat,
       );
-      const currency = accountCurrency([balance, accountInfo, providerMetadata]);
+      fetched = enrichment.deals;
+      const currency = currencyContext(balanceRaw, accountInfoRaw, assets, assetsAvailable, providerMetadata);
       const result = await this.persist({
         connection,
         fetched,
@@ -1987,7 +2342,9 @@ export class CTraderMcpSyncEngine {
         historyFloorTimestamp: metadataTimestamp(providerMetadata.historyFloorTimestamp) ?? from,
         queryFromTimestamp: from,
         syncedThroughTimestamp: now,
-        accountCurrency: currency,
+        currency,
+        assetsAvailable,
+        pnlEnrichment: enrichment.telemetry,
         operatorAccountAttestation,
         operatorSymbolOverrides,
       });
@@ -2076,6 +2433,17 @@ export class CTraderMcpSyncEngine {
     try {
       const balanceRaw = await client.getBalance();
       await heartbeat();
+      let assets = new Map<string, string>();
+      let assetsAvailable = false;
+      if (client.getAssets !== undefined) {
+        try {
+          assets = new Map(normalizeAssets(await client.getAssets()));
+          assetsAvailable = true;
+          await heartbeat();
+        } catch (error) {
+          if (!(error instanceof CTraderMcpError) || error.code !== "TOOL_UNAVAILABLE") throw error;
+        }
+      }
       const symbolsRaw = await client.getSymbols();
       await heartbeat();
       let accountInfoRaw: unknown = null;
@@ -2084,8 +2452,6 @@ export class CTraderMcpSyncEngine {
       } catch (error) {
         if (!(error instanceof CTraderMcpError) || error.code !== "TOOL_UNAVAILABLE") throw error;
       }
-      const balance = unwrapFirstObject(balanceRaw);
-      const accountInfo = unwrapFirstObject(accountInfoRaw);
       const sessionAccountVerified = verifiedAccountAttribution(
         [...accountMetadataObjects(balanceRaw), ...accountMetadataObjects(accountInfoRaw)],
         historicalImport.external_account_id,
@@ -2111,7 +2477,7 @@ export class CTraderMcpSyncEngine {
         sessionAccountVerified,
         operatorAccountAttestation !== null,
       );
-      fetched = await this.enrichDealsFromPositionDetails(
+      const enrichment = await this.enrichDealsFromPositionDetails(
         client,
         fetched,
         positionsMissingAuthoritativePnl(fetched),
@@ -2121,11 +2487,14 @@ export class CTraderMcpSyncEngine {
         false,
         heartbeat,
       );
-      const currency = accountCurrency([
-        balance,
-        accountInfo,
+      fetched = enrichment.deals;
+      const currency = currencyContext(
+        balanceRaw,
+        accountInfoRaw,
+        assets,
+        assetsAvailable,
         objectValue(connection.provider_metadata),
-      ]);
+      );
       const result = await this.persistHistoricalPreview({
         historicalImport,
         connection,
@@ -2134,7 +2503,9 @@ export class CTraderMcpSyncEngine {
         symbolById,
         boundaryTimestamp,
         throughTimestamp,
-        accountCurrency: currency,
+        currency,
+        assetsAvailable,
+        pnlEnrichment: enrichment.telemetry,
         cursorSnapshot,
         previewDeadline,
         heartbeat,
@@ -2277,15 +2648,30 @@ export class CTraderMcpSyncEngine {
     accountlessHistoryAttested: boolean,
     includeMissingDeals: boolean,
     heartbeat: () => Promise<void>,
-  ): Promise<McpDeal[]> {
-    if (client.getPositionDetails === undefined || positionIds.length === 0) return [...deals];
+  ): Promise<{ deals: McpDeal[]; telemetry: McpPnlEnrichmentTelemetry }> {
+    const requested = [...new Set(positionIds)].slice(0, MAX_MCP_PNL_REFRESH_POSITIONS);
+    const telemetry: McpPnlEnrichmentTelemetry = {
+      version: 1,
+      requestedPositions: requested.length,
+      attemptedPositions: 0,
+      successfulResponses: 0,
+      positionDetailsAvailable: requested.length === 0 ? null : client.getPositionDetails !== undefined,
+      authoritativePositions: 0,
+      unresolvedPositions: requested.length,
+    };
+    if (client.getPositionDetails === undefined || requested.length === 0) return { deals: [...deals], telemetry };
     const byId = new Map(deals.map((deal) => [deal.dealId, deal]));
-    for (const positionId of [...new Set(positionIds)].slice(0, MAX_MCP_PNL_REFRESH_POSITIONS)) {
+    for (const positionId of requested) {
       let raw: unknown;
+      telemetry.attemptedPositions += 1;
       try { raw = await client.getPositionDetails(positionId); } catch (error) {
-        if (error instanceof CTraderMcpError && error.code === "TOOL_UNAVAILABLE") break;
+        if (error instanceof CTraderMcpError && error.code === "TOOL_UNAVAILABLE") {
+          telemetry.positionDetailsAvailable = false;
+          break;
+        }
         throw error;
       }
+      telemetry.successfulResponses += 1;
       const responseAccountVerified = historyResponseHasVerifiedAccount(
         raw,
         accountId,
@@ -2320,23 +2706,21 @@ export class CTraderMcpSyncEngine {
           if (includeMissingDeals) byId.set(attributed.dealId, attributed);
           continue;
         }
-        const stableIdentity = [
-          "positionId", "orderId", "symbolId", "side", "filledVolumeCents",
-          "filledVolumeSourceKey", "filledVolumeScale", "executionPrice", "executionTimestamp", "dealStatus",
-        ] as const;
-        if (stableIdentity.some((key) => String(previous[key]) !== String(attributed[key]))) {
-          throw new CTraderSyncError(
-            "CTRADER_MCP_DUPLICATE_DEAL_CONFLICT",
-            `cTrader returned conflicting data for deal ${attributed.dealId}`,
-            false,
-          );
-        }
-        byId.set(attributed.dealId, attributed);
+        byId.set(attributed.dealId, mergeDealFacts(previous, attributed));
       }
       await heartbeat();
     }
-    return [...byId.values()].sort((left, right) =>
+    const enriched = [...byId.values()].sort((left, right) =>
       left.executionTimestamp - right.executionTimestamp || compareDealIds(left.dealId, right.dealId));
+    const missing = new Set(positionsMissingAuthoritativePnl(enriched));
+    telemetry.authoritativePositions = requested.filter((positionId) => {
+      const positionDeals = enriched.filter((deal) => deal.positionId === positionId);
+      return positionDeals.length > 0
+        && !missing.has(positionId)
+        && positionDeals.some((deal) => deal.pnlCents !== null || deal.moneyDigits !== null);
+    }).length;
+    telemetry.unresolvedPositions = requested.length - telemetry.authoritativePositions;
+    return { deals: enriched, telemetry };
   }
 
   private async fetchDeals(
@@ -2459,14 +2843,7 @@ export class CTraderMcpSyncEngine {
           ? { ...normalizedDeal, accountId }
           : normalizedDeal;
         const previous = byId.get(deal.dealId);
-        if (previous && json(canonicalStoredDeal(previous)) !== json(canonicalStoredDeal(deal))) {
-          throw new CTraderSyncError(
-            "CTRADER_MCP_DUPLICATE_DEAL_CONFLICT",
-            `cTrader returned conflicting data for deal ${deal.dealId}`,
-            false,
-          );
-        }
-        byId.set(deal.dealId, deal);
+        byId.set(deal.dealId, previous === undefined ? deal : mergeDealFacts(previous, deal));
       }
       await heartbeat();
       enforcePreviewBudget(depth);
@@ -2523,20 +2900,28 @@ export class CTraderMcpSyncEngine {
       },
     );
     const partitionById = new Map(partitionPlan.map((deal) => [deal.dealId, deal]));
-    const consistent = fullRangePlan.length === partitionPlan.length
-      && fullRangePlan.every((deal) => {
-        const other = partitionById.get(deal.dealId);
-        return other !== undefined
-          && json(canonicalStoredDeal(deal)) === json(canonicalStoredDeal(other));
-      });
-    if (!consistent) {
+    if (
+      fullRangePlan.length !== partitionPlan.length
+      || fullRangePlan.some((deal) => !partitionById.has(deal.dealId))
+    ) {
       throw new CTraderSyncError(
         "CTRADER_HISTORICAL_IMPORT_INCOMPLETE",
         "cTrader returned inconsistent historical results; no preview data was staged",
         false,
       );
     }
-    return fullRangePlan;
+    try {
+      return fullRangePlan.map((deal) => mergeDealFacts(deal, partitionById.get(deal.dealId) as McpDeal));
+    } catch (error) {
+      if (error instanceof CTraderSyncError && error.code === "CTRADER_MCP_DUPLICATE_DEAL_CONFLICT") {
+        throw new CTraderSyncError(
+          "CTRADER_HISTORICAL_IMPORT_INCOMPLETE",
+          "cTrader returned inconsistent historical results; no preview data was staged",
+          false,
+        );
+      }
+      throw error;
+    }
   }
 
   private async persistHistoricalPreview(input: {
@@ -2547,7 +2932,9 @@ export class CTraderMcpSyncEngine {
     symbolById: ReadonlyMap<string, McpSymbol>;
     boundaryTimestamp: number;
     throughTimestamp: number;
-    accountCurrency: string | null;
+    currency: McpCurrencyContext;
+    assetsAvailable: boolean;
+    pnlEnrichment: McpPnlEnrichmentTelemetry;
     cursorSnapshot: JsonRecord;
     previewDeadline: number;
     heartbeat: () => Promise<void>;
@@ -2666,18 +3053,40 @@ export class CTraderMcpSyncEngine {
         deletedManual: 0,
         unmatched: 0,
         executionOnly: 0,
+        providerReadTelemetry: {
+          version: 1,
+          assetsAvailable: input.assetsAvailable,
+          assetCount: input.currency.assetNames.size,
+          currencyResolved: input.currency.accountCurrency !== null,
+          pnlEnrichment: input.pnlEnrichment,
+        },
       };
       const externalExecutionIds = input.fetched.map((deal) => deal.dealId);
-      const existingExecutions = externalExecutionIds.length === 0
-        ? new Set<string>()
-        : new Set((await client.query<{ external_execution_id: string }>(
-            `SELECT external_execution_id FROM trade_executions
+      const existingExecutionRows = externalExecutionIds.length === 0
+        ? []
+        : (await client.query<{ external_execution_id: string; raw_payload: unknown }>(
+            `SELECT external_execution_id, raw_payload FROM trade_executions
              WHERE user_id=$1 AND broker_connection_id=$2
                AND external_execution_id=ANY($3::text[])`,
             [input.connection.user_id, input.connection.id, externalExecutionIds],
-          )).rows.map((row) => row.external_execution_id));
+          )).rows;
+      const existingExecutions = new Set(existingExecutionRows.map((row) => row.external_execution_id));
+      const storedExecutionFacts = new Map(existingExecutionRows.flatMap((row) => {
+        if (row.raw_payload === undefined || row.raw_payload === null) return [];
+        try { return [[row.external_execution_id, normalizeDeal(row.raw_payload, "stored")] as const]; } catch {
+          throw new CTraderSyncError(
+            "CTRADER_MCP_STORED_DEAL_INVALID",
+            `Stored cTrader execution ${row.external_execution_id} is invalid`,
+            false,
+          );
+        }
+      }));
+      const mergedFetched = input.fetched.map((deal) => {
+        const stored = storedExecutionFacts.get(deal.dealId);
+        return stored === undefined ? deal : mergeDealFacts(stored, deal);
+      });
 
-      for (const [dealIndex, deal] of input.fetched.entries()) {
+      for (const [dealIndex, deal] of mergedFetched.entries()) {
         enforcePersistenceDeadline();
         if (dealIndex > 0 && dealIndex % 100 === 0) await input.heartbeat();
         const rawPayload = { edgebookMcpDeal: canonicalStoredDeal(deal) };
@@ -2701,17 +3110,45 @@ export class CTraderMcpSyncEngine {
              side=EXCLUDED.side,
              quantity=EXCLUDED.quantity,
              price=EXCLUDED.price,
-             pnl=EXCLUDED.pnl,
-             commission=EXCLUDED.commission,
-             swap=EXCLUDED.swap,
-             currency_code=EXCLUDED.currency_code,
+             pnl=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.pnl ELSE EXCLUDED.pnl END,
+             commission=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.commission ELSE EXCLUDED.commission END,
+             swap=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.swap ELSE EXCLUDED.swap END,
+             currency_code=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.currency_code ELSE EXCLUDED.currency_code END,
              executed_at=EXCLUDED.executed_at,
-             raw_payload=EXCLUDED.raw_payload,
+             raw_payload=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN jsonb_set(
+                   EXCLUDED.raw_payload,
+                   '{edgebookMcpDeal}',
+                   (trade_executions.raw_payload->'edgebookMcpDeal')
+                     || ((EXCLUDED.raw_payload->'edgebookMcpDeal')
+                       - 'netPnlCents' - 'commissionCents' - 'swapCents' - 'closePositionDetail')
+                 )
+               ELSE EXCLUDED.raw_payload END,
              deal_status=EXCLUDED.deal_status,
              filled_volume_cents=EXCLUDED.filled_volume_cents,
              closed_volume_cents=NULL,
-             money_digits=EXCLUDED.money_digits,
-             close_position_detail=EXCLUDED.close_position_detail,
+             money_digits=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.money_digits ELSE EXCLUDED.money_digits END,
+             close_position_detail=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.close_position_detail ELSE EXCLUDED.close_position_detail END,
              provider_updated_at=EXCLUDED.provider_updated_at,
              imported_at=now()
            WHERE trade_executions.user_id=EXCLUDED.user_id
@@ -2731,7 +3168,7 @@ export class CTraderMcpSyncEngine {
             money.pnl,
             money.commission,
             money.swap,
-            input.accountCurrency,
+            input.currency.accountCurrency,
             new Date(deal.executionTimestamp),
             json(rawPayload),
             deal.dealStatus,
@@ -2806,7 +3243,7 @@ export class CTraderMcpSyncEngine {
         );
       }
       const grouped = new Map<string, McpDeal[]>();
-      for (const deal of input.fetched) {
+      for (const deal of mergedFetched) {
         const group = grouped.get(deal.positionId) ?? [];
         group.push(deal);
         grouped.set(deal.positionId, group);
@@ -2923,7 +3360,7 @@ export class CTraderMcpSyncEngine {
               orderedDeals,
               symbol,
               input.historicalImport.time_zone,
-              input.accountCurrency,
+              input.currency,
               "historical_preview_empty_attested",
             );
           } catch (error) {
@@ -3087,7 +3524,9 @@ export class CTraderMcpSyncEngine {
     historyFloorTimestamp: number;
     queryFromTimestamp: number;
     syncedThroughTimestamp: number;
-    accountCurrency: string | null;
+    currency: McpCurrencyContext;
+    assetsAvailable: boolean;
+    pnlEnrichment: McpPnlEnrichmentTelemetry;
     operatorAccountAttestation: AccountlessHistoryAttributionAttestation | null;
     operatorSymbolOverrides: VerifiedAccountSymbolOverrideSnapshot;
   }): Promise<CTraderSyncResult> {
@@ -3138,14 +3577,29 @@ export class CTraderMcpSyncEngine {
         positionsAwaitingReview: 0,
       };
       const executionIds = input.fetched.map((deal) => deal.dealId);
-      const existingExecutions = executionIds.length === 0
-        ? new Set<string>()
-        : new Set((await client.query<{ external_execution_id: string }>(
-            `SELECT external_execution_id FROM trade_executions
-             WHERE broker_connection_id=$1 AND external_execution_id=ANY($2::text[])`,
-            [input.connection.id, executionIds],
-          )).rows.map((row) => row.external_execution_id));
-      for (const deal of input.fetched) {
+      const existingExecutionRows = executionIds.length === 0
+        ? []
+        : (await client.query<{ external_execution_id: string; raw_payload: unknown }>(
+            `SELECT external_execution_id, raw_payload FROM trade_executions
+             WHERE user_id=$1 AND broker_connection_id=$2 AND external_execution_id=ANY($3::text[])`,
+            [input.connection.user_id, input.connection.id, executionIds],
+          )).rows;
+      const existingExecutions = new Set(existingExecutionRows.map((row) => row.external_execution_id));
+      const storedExecutionFacts = new Map(existingExecutionRows.flatMap((row) => {
+        if (row.raw_payload === undefined || row.raw_payload === null) return [];
+        try { return [[row.external_execution_id, normalizeDeal(row.raw_payload, "stored")] as const]; } catch {
+          throw new CTraderSyncError(
+            "CTRADER_MCP_STORED_DEAL_INVALID",
+            `Stored cTrader execution ${row.external_execution_id} is invalid`,
+            false,
+          );
+        }
+      }));
+      const mergedFetched = input.fetched.map((deal) => {
+        const stored = storedExecutionFacts.get(deal.dealId);
+        return stored === undefined ? deal : mergeDealFacts(stored, deal);
+      });
+      for (const deal of mergedFetched) {
         const rawPayload = { edgebookMcpDeal: canonicalStoredDeal(deal) };
         const money = executionMoneyValues(deal);
         await client.query(
@@ -3167,17 +3621,45 @@ export class CTraderMcpSyncEngine {
              side=EXCLUDED.side,
              quantity=EXCLUDED.quantity,
              price=EXCLUDED.price,
-             pnl=EXCLUDED.pnl,
-             commission=EXCLUDED.commission,
-             swap=EXCLUDED.swap,
-             currency_code=EXCLUDED.currency_code,
+             pnl=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.pnl ELSE EXCLUDED.pnl END,
+             commission=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.commission ELSE EXCLUDED.commission END,
+             swap=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.swap ELSE EXCLUDED.swap END,
+             currency_code=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.currency_code ELSE EXCLUDED.currency_code END,
              executed_at=EXCLUDED.executed_at,
-             raw_payload=EXCLUDED.raw_payload,
+             raw_payload=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN jsonb_set(
+                   EXCLUDED.raw_payload,
+                   '{edgebookMcpDeal}',
+                   (trade_executions.raw_payload->'edgebookMcpDeal')
+                     || ((EXCLUDED.raw_payload->'edgebookMcpDeal')
+                       - 'netPnlCents' - 'commissionCents' - 'swapCents' - 'closePositionDetail')
+                 )
+               ELSE EXCLUDED.raw_payload END,
              deal_status=EXCLUDED.deal_status,
              filled_volume_cents=EXCLUDED.filled_volume_cents,
              closed_volume_cents=NULL,
-             money_digits=EXCLUDED.money_digits,
-             close_position_detail=EXCLUDED.close_position_detail,
+             money_digits=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.money_digits ELSE EXCLUDED.money_digits END,
+             close_position_detail=CASE
+               WHEN EXCLUDED.pnl IS NULL AND EXCLUDED.close_position_detail IS NULL
+                 AND (trade_executions.pnl IS NOT NULL OR trade_executions.close_position_detail IS NOT NULL)
+                 THEN trade_executions.close_position_detail ELSE EXCLUDED.close_position_detail END,
              provider_updated_at=EXCLUDED.provider_updated_at,
              imported_at=now()
            WHERE trade_executions.raw_payload IS DISTINCT FROM EXCLUDED.raw_payload`,
@@ -3195,7 +3677,7 @@ export class CTraderMcpSyncEngine {
             money.pnl,
             money.commission,
             money.swap,
-            input.accountCurrency,
+            input.currency.accountCurrency,
             new Date(deal.executionTimestamp),
             json(rawPayload),
             deal.dealStatus,
@@ -3264,7 +3746,7 @@ export class CTraderMcpSyncEngine {
               deals,
               symbol,
               this.config.cTrader.tradingTimeZone,
-              input.accountCurrency,
+              input.currency,
               String(objectValue(input.connection.provider_metadata).historyFloorKind ?? "unknown"),
             );
           } catch (error) {
@@ -3313,7 +3795,16 @@ export class CTraderMcpSyncEngine {
         ? `${awaitingReview.size} cTrader position${awaitingReview.size === 1 ? "" : "s"} imported as executions but withheld from the trade journal because authoritative projection data is incomplete or inconsistent. Edgebook did not guess financial values; these positions stay out of totals until cTrader exposes complete data or a verified review workflow is available.`
         : null;
       const metadata = {
-        accountCurrency: input.accountCurrency,
+        accountCurrency: input.currency.accountCurrency,
+        depositAssetId: input.currency.depositAssetId,
+        accountMoneyDigits: input.currency.accountMoneyDigits,
+        providerReadTelemetry: {
+          version: 1,
+          assetsAvailable: input.assetsAvailable,
+          assetCount: input.currency.assetNames.size,
+          currencyResolved: input.currency.accountCurrency !== null,
+          pnlEnrichment: input.pnlEnrichment,
+        },
         lastErrorCode: null,
         lastErrorMessage: null,
         reauthRequired: false,
@@ -3480,29 +3971,45 @@ export class CTraderMcpSyncEngine {
     reason: string,
   ): Promise<void> {
     const externalKey = `position:${positionId}`;
+    const preserveExactMoney = QUARANTINE_REASONS_PRESERVING_EXACT_MONEY.has(reason);
     await client.query(
       `UPDATE trades SET
-         pnl=NULL,
-         broker_data=(broker_data
-           - 'realizedEvents' - 'grossProfit' - 'commission' - 'swap' - 'pnlConversionFee')
-           || jsonb_build_object(
-             'realizedEvents','[]'::jsonb,
-             'pnlMethod','unavailable',
-             'grossProfit',NULL,
-             'commission',NULL,
-             'swap',NULL,
-             'pnlConversionFee',NULL,
-             'classification',
-               (CASE
-                  WHEN jsonb_typeof(broker_data->'classification')='object'
-                    THEN broker_data->'classification'
-                  ELSE '{}'::jsonb
-                END) || jsonb_build_object(
-                  'projectionQuarantined',true,
-                  'projectionQuarantineReason',$4::text,
-                  'projectionQuarantinedAt',to_jsonb(now())
-                )
-           ),
+         pnl=CASE
+           WHEN $5::boolean
+             AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+             THEN pnl
+           ELSE NULL
+         END,
+         broker_data=(
+           CASE
+             WHEN $5::boolean
+               AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+               THEN broker_data
+             ELSE (broker_data
+               - 'realizedEvents' - 'grossProfit' - 'commission' - 'swap' - 'pnlConversionFee')
+               || jsonb_build_object(
+                 'realizedEvents','[]'::jsonb,
+                 'pnlMethod','unavailable',
+                 'grossProfit',NULL,
+                 'commission',NULL,
+                 'swap',NULL,
+                 'pnlConversionFee',NULL
+               )
+           END
+           - 'calculatedGrossPnl' - 'calculatedGrossCurrency' - 'calculatedGrossMethod'
+           - 'calculatedGrossEvents' - 'calculatedGrossProvenance'
+         ) || jsonb_build_object(
+           'classification',
+             (CASE
+                WHEN jsonb_typeof(broker_data->'classification')='object'
+                  THEN broker_data->'classification'
+                ELSE '{}'::jsonb
+              END) || jsonb_build_object(
+                'projectionQuarantined',true,
+                'projectionQuarantineReason',$4::text,
+                'projectionQuarantinedAt',to_jsonb(now())
+              )
+         ),
          row_version=row_version+1,
          updated_at=now()
        WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
@@ -3517,9 +4024,43 @@ export class CTraderMcpSyncEngine {
          AND (
            broker_data #> '{classification,projectionQuarantined}' IS DISTINCT FROM 'true'::jsonb
            OR broker_data #>> '{classification,projectionQuarantineReason}' IS DISTINCT FROM $4
-           OR pnl IS NOT NULL
+           OR broker_data ?| ARRAY[
+             'calculatedGrossPnl','calculatedGrossCurrency','calculatedGrossMethod',
+             'calculatedGrossEvents','calculatedGrossProvenance'
+           ]
+           OR (
+             NOT ($5::boolean
+               AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money'))
+             AND (pnl IS NOT NULL OR broker_data->>'pnlMethod' IS DISTINCT FROM 'unavailable')
+           )
          )`,
-      [connection.user_id, connection.id, externalKey, reason],
+      [connection.user_id, connection.id, externalKey, reason, preserveExactMoney],
+    );
+    // A reviewed/manual link owns the aggregate P&L and journal fields, so the
+    // quarantine above intentionally excludes it. Calculated gross is only a
+    // projection of the now-invalid provider inputs, however, and must not
+    // remain visible on a linked row after any projection quarantine.
+    await client.query(
+      `UPDATE trades SET
+         broker_data=broker_data
+           - 'calculatedGrossPnl' - 'calculatedGrossCurrency' - 'calculatedGrossMethod'
+           - 'calculatedGrossEvents' - 'calculatedGrossProvenance',
+         row_version=row_version+1,
+         updated_at=now()
+       WHERE user_id=$1 AND deleted_at IS NULL
+         AND broker_data ?| ARRAY[
+           'calculatedGrossPnl','calculatedGrossCurrency','calculatedGrossMethod',
+           'calculatedGrossEvents','calculatedGrossProvenance'
+         ]
+         AND EXISTS (
+           SELECT 1 FROM ctrader_trade_links link
+           WHERE link.user_id=trades.user_id
+             AND link.broker_connection_id=$2
+             AND link.external_position_id=$3
+             AND link.external_trade_key=$4
+             AND link.trade_id=trades.id
+         )`,
+      [connection.user_id, connection.id, positionId, externalKey],
     );
   }
 
@@ -3546,8 +4087,11 @@ export class CTraderMcpSyncEngine {
           json({
             symbolId: symbol.id,
             symbolName: symbol.name,
+            baseAssetId: symbol.baseAssetId,
+            quoteAssetId: symbol.quoteAssetId,
             lotSize: symbol.lotSize,
             lotSizeSource: symbol.lotSizeSource,
+            providerLotSizeScale: symbol.providerLotSizeScale,
             verifiedAccountSymbolOverride: symbol.verifiedOverride,
             symbolCategory: symbol.category,
             connectionMode: "mcp_read",
@@ -3753,10 +4297,31 @@ export class CTraderMcpSyncEngine {
            legacy_account_id=$2::text,
            symbol=$3, asset=COALESCE($4::text,asset), instrument=$3, direction=$5,
            entry_price=$6, exit_price=COALESCE($7::numeric,exit_price), quantity=$8,
-           pnl=COALESCE($9::numeric,pnl), is_open=$10,
+           pnl=CASE
+             WHEN $9::numeric IS NOT NULL THEN $9::numeric
+             WHEN $16::jsonb->>'pnlMethod'='unavailable'
+               AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+               AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+               AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+                 = $16::jsonb #>> '{providerExecutionLineage,fingerprintSha256}'
+               THEN pnl
+             WHEN broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+               THEN NULL
+             ELSE pnl
+           END, is_open=$10,
            trade_date=COALESCE(trade_date,$11::date), entry_at=$12, exit_at=COALESCE($13::timestamptz,exit_at),
            legacy_entry_time=$14, legacy_exit_time=COALESCE($15::time,legacy_exit_time),
-           broker_data=broker_data || $16::jsonb,
+           broker_data=CASE
+             WHEN $16::jsonb->>'pnlMethod'='unavailable'
+               AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+               AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+               AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+                 = $16::jsonb #>> '{providerExecutionLineage,fingerprintSha256}'
+               THEN broker_data || ($16::jsonb
+                 - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
+                 - 'pnlConversionFee' - 'realizedEvents')
+             ELSE broker_data || $16::jsonb
+           END,
            calculation_version=2,
            row_version=row_version+1, updated_at=now()
          WHERE id=$17 AND user_id=$18 AND deleted_at IS NULL
@@ -3774,13 +4339,34 @@ export class CTraderMcpSyncEngine {
              OR entry_price IS DISTINCT FROM $6::numeric
              OR exit_price IS DISTINCT FROM COALESCE($7::numeric,exit_price)
              OR quantity IS DISTINCT FROM $8::numeric
-             OR pnl IS DISTINCT FROM COALESCE($9::numeric,pnl)
+             OR pnl IS DISTINCT FROM CASE
+               WHEN $9::numeric IS NOT NULL THEN $9::numeric
+               WHEN $16::jsonb->>'pnlMethod'='unavailable'
+                 AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+                 AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+                 AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+                   = $16::jsonb #>> '{providerExecutionLineage,fingerprintSha256}'
+                 THEN pnl
+               WHEN broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+                 THEN NULL
+               ELSE pnl
+             END
              OR is_open IS DISTINCT FROM $10
              OR entry_at IS DISTINCT FROM $12::timestamptz
              OR exit_at IS DISTINCT FROM COALESCE($13::timestamptz,exit_at)
              OR legacy_entry_time IS DISTINCT FROM $14::time
              OR legacy_exit_time IS DISTINCT FROM COALESCE($15::time,legacy_exit_time)
-             OR broker_data IS DISTINCT FROM broker_data || $16::jsonb
+             OR broker_data IS DISTINCT FROM CASE
+               WHEN $16::jsonb->>'pnlMethod'='unavailable'
+                 AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+                 AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+                 AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+                   = $16::jsonb #>> '{providerExecutionLineage,fingerprintSha256}'
+                 THEN broker_data || ($16::jsonb
+                   - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
+                   - 'pnlConversionFee' - 'realizedEvents')
+               ELSE broker_data || $16::jsonb
+             END
              OR calculation_version IS DISTINCT FROM 2
            )
          RETURNING id`,
@@ -3882,13 +4468,33 @@ export class CTraderMcpSyncEngine {
          entry_price=EXCLUDED.entry_price,
          exit_price=EXCLUDED.exit_price,
          quantity=EXCLUDED.quantity,
-         pnl=EXCLUDED.pnl,
+         pnl=CASE
+           WHEN EXCLUDED.pnl IS NULL
+             AND EXCLUDED.broker_data->>'pnlMethod'='unavailable'
+             AND trades.broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+             AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+             AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+               = EXCLUDED.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+             THEN trades.pnl
+           ELSE EXCLUDED.pnl
+         END,
          is_open=EXCLUDED.is_open,
          entry_at=EXCLUDED.entry_at,
          exit_at=EXCLUDED.exit_at,
          legacy_entry_time=EXCLUDED.legacy_entry_time,
          legacy_exit_time=EXCLUDED.legacy_exit_time,
-         broker_data=EXCLUDED.broker_data,
+         broker_data=CASE
+           WHEN EXCLUDED.pnl IS NULL
+             AND EXCLUDED.broker_data->>'pnlMethod'='unavailable'
+             AND trades.broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+             AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+             AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+               = EXCLUDED.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+             THEN trades.broker_data || (EXCLUDED.broker_data
+               - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
+               - 'pnlConversionFee' - 'realizedEvents')
+           ELSE EXCLUDED.broker_data
+         END,
          calculation_version=EXCLUDED.calculation_version,
          row_version=trades.row_version+1
        WHERE trades.deleted_at IS NULL
@@ -3899,19 +4505,43 @@ export class CTraderMcpSyncEngine {
              AND tombstone.external_trade_key=$6
          )
          AND (
+       (
          trades.account_id, trades.legacy_account_id, trades.broker_trade_id,
          trades.symbol, trades.asset, trades.instrument, trades.direction,
-         trades.entry_price, trades.exit_price, trades.quantity, trades.pnl,
+         trades.entry_price, trades.exit_price, trades.quantity,
          trades.is_open, trades.entry_at, trades.exit_at,
-         trades.legacy_entry_time, trades.legacy_exit_time, trades.broker_data,
+         trades.legacy_entry_time, trades.legacy_exit_time,
          trades.calculation_version
        ) IS DISTINCT FROM (
          EXCLUDED.account_id, EXCLUDED.legacy_account_id, EXCLUDED.broker_trade_id,
          EXCLUDED.symbol, EXCLUDED.asset, EXCLUDED.instrument, EXCLUDED.direction,
-         EXCLUDED.entry_price, EXCLUDED.exit_price, EXCLUDED.quantity, EXCLUDED.pnl,
+         EXCLUDED.entry_price, EXCLUDED.exit_price, EXCLUDED.quantity,
          EXCLUDED.is_open, EXCLUDED.entry_at, EXCLUDED.exit_at,
-         EXCLUDED.legacy_entry_time, EXCLUDED.legacy_exit_time, EXCLUDED.broker_data,
+         EXCLUDED.legacy_entry_time, EXCLUDED.legacy_exit_time,
          EXCLUDED.calculation_version
+       )
+       OR trades.pnl IS DISTINCT FROM CASE
+         WHEN EXCLUDED.pnl IS NULL
+           AND EXCLUDED.broker_data->>'pnlMethod'='unavailable'
+           AND trades.broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+           AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+           AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+             = EXCLUDED.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+           THEN trades.pnl
+         ELSE EXCLUDED.pnl
+       END
+       OR trades.broker_data IS DISTINCT FROM CASE
+         WHEN EXCLUDED.pnl IS NULL
+           AND EXCLUDED.broker_data->>'pnlMethod'='unavailable'
+           AND trades.broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+           AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
+           AND trades.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+             = EXCLUDED.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
+           THEN trades.broker_data || (EXCLUDED.broker_data
+             - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
+             - 'pnlConversionFee' - 'realizedEvents')
+         ELSE EXCLUDED.broker_data
+       END
        )
        RETURNING id`,
       [

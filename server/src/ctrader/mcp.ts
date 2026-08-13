@@ -14,6 +14,7 @@ type FetchLike = typeof fetch;
 
 export type CTraderMcpReadTool =
   | "get_balance"
+  | "get_assets"
   | "get_symbols"
   | "get_deals"
   | "get_position_details"
@@ -22,7 +23,7 @@ export type CTraderMcpReadTool =
   | "get_account_info";
 
 const ALLOWED_TOOLS = new Set<CTraderMcpReadTool>([
-  "get_balance", "get_symbols", "get_deals", "get_position_details",
+  "get_balance", "get_assets", "get_symbols", "get_deals", "get_position_details",
   "get_account", "get_accountinfo", "get_account_info",
 ]);
 
@@ -392,6 +393,7 @@ export class CTraderMcpReadClient {
   }
 
   async getBalance(): Promise<unknown> { return this.#callTool("get_balance", {}); }
+  async getAssets(): Promise<unknown> { return this.#callTool("get_assets", {}); }
   async getSymbols(): Promise<unknown> { return this.#callTool("get_symbols", {}); }
 
   async getDeals(request: CTraderMcpDealsRequest): Promise<unknown> {

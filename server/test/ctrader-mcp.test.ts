@@ -102,20 +102,23 @@ describe("CTraderMcpReadClient", () => {
       initialized(),
       response(null, { status: 202 }),
       rpc(2, { tools: [
-        { name: "place_order" },
-        { name: "get_balance" },
-        { name: "get_symbols" },
+         { name: "place_order" },
+         { name: "get_balance" },
+         { name: "get_assets" },
+         { name: "get_symbols" },
         { name: "get_deals" },
         { name: "get_position_details" },
       ] }),
-      tool(3, { balance: 100_000, currency: "USD" }),
-      tool(4, [{ id: 1, name: "EURUSD" }]),
-      tool(5, [{ dealId: "77" }]),
-      tool(6, { position: { positionId: 77 }, deals: [{ dealId: 77 }] }),
+       tool(3, { balance: 100_000, currency: "USD" }),
+       tool(4, { assets: [{ assetId: 15, name: "USD" }] }),
+       tool(5, [{ id: 1, name: "EURUSD" }]),
+       tool(6, [{ dealId: "77" }]),
+       tool(7, { position: { positionId: 77 }, deals: [{ dealId: 77 }] }),
     ]);
     const client = new CTraderMcpReadClient(TOKEN, { fetchImplementation: mock.fetchImplementation });
 
-    await expect(client.getBalance()).resolves.toEqual({ balance: 100_000, currency: "USD" });
+     await expect(client.getBalance()).resolves.toEqual({ balance: 100_000, currency: "USD" });
+     await expect(client.getAssets()).resolves.toEqual({ assets: [{ assetId: 15, name: "USD" }] });
     await expect(client.getSymbols()).resolves.toEqual([{ id: 1, name: "EURUSD" }]);
     await expect(client.getDeals({
       fromTimestamp: "2026-08-01T00:00:00.000Z",
@@ -126,7 +129,7 @@ describe("CTraderMcpReadClient", () => {
       deals: [{ dealId: 77 }],
     });
 
-    expect(mock.calls).toHaveLength(7);
+     expect(mock.calls).toHaveLength(8);
     expect(mock.calls.every((call) => call.url === CTRADER_MCP_ENDPOINT)).toBe(true);
     expect(mock.calls.every((call) => call.init?.redirect === "error")).toBe(true);
     const initialization = postedJson(mock.calls[0]!);
@@ -136,7 +139,7 @@ describe("CTraderMcpReadClient", () => {
       const body = postedJson(call);
       return (body.params as Record<string, unknown>).name;
     });
-    expect(toolNames).toEqual(["get_balance", "get_symbols", "get_deals", "get_position_details"]);
+     expect(toolNames).toEqual(["get_balance", "get_assets", "get_symbols", "get_deals", "get_position_details"]);
     const headers = new Headers(mock.calls[3]!.init?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
     expect(headers.get("mcp-session-id")).toBe("safe-session-id");

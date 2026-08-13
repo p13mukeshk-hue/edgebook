@@ -1388,6 +1388,7 @@ try {
     ['t-date-label', { textContent: '' }],
     ['t-date-help', { textContent: '' }],
     ['broker-owned-note', { classList: { toggle() {} } }],
+    ['broker-calculated-gross', { textContent: '', classList: { toggle() {} } }],
     ...['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-date','t-time']
       .map(id => [id, { disabled: false }]),
   ]);
@@ -1396,10 +1397,11 @@ try {
     {
       stableJson: reviewStableJson,
       tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
+      tradeHasPnl: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
       isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
       document: { getElementById: id => reviewElements.get(id) || null },
     },
-    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,setTradeBrokerOwnedMode}',
+    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,cTraderCalculatedGross,calculatedGrossText,setTradeBrokerOwnedMode}',
   );
   const imported = { source: 'ctrader', isOpen: true, date: '2026-08-11', entryAt: '2026-08-11T01:00:00.000Z', brokerData: { providerTradeDate: '2026-08-11', realizedEvents: [] }, custom: {} };
   if (!review.cTraderTradeNeedsReview(imported)) failures.push('A newly imported cTrader trade was not marked for review');
@@ -1412,6 +1414,27 @@ try {
   if (!reviewElements.get('t-time').disabled || !reviewElements.get('t-entry').disabled || !reviewElements.get('t-sym').disabled) failures.push('cTrader provider execution facts were left editable');
   if (reviewElements.get('t-date-label').textContent !== 'Journal date' || !/sync will not overwrite/i.test(reviewElements.get('t-date-help').textContent)) failures.push('cTrader journal date ownership was not explained');
   if (review.cTraderProviderTradeDate({ date: '2026-08-12', brokerData: { providerTradeDate: '2026-08-11' } }) !== '2026-08-11') failures.push('cTrader provider date did not remain distinct from edited journal date');
+  const calculated = { source: 'ctrader', pnl: null, brokerData: {
+    calculatedGrossPnl: '20.66', calculatedGrossCurrency: 'USD',
+    calculatedGrossMethod: 'fill_price_base_units_identity_conversion_v1',
+    calculatedGrossEvents: [{ executionId: 'close-1', grossPnl: '20.66' }],
+    calculatedGrossProvenance: { version: 1, feesIncluded: false, accountMoneyDigits: 2, quoteCurrency: 'USD', accountCurrency: 'USD', conversionRate: '1' },
+  } };
+  if (review.calculatedGrossText(review.cTraderCalculatedGross(calculated)) !== '+$20.66') failures.push('Safe cTrader calculated-gross estimate was not exposed separately');
+  const calculatedAtDigits = (calculatedGrossPnl, accountMoneyDigits) => ({
+    ...calculated,
+    brokerData: {
+      ...calculated.brokerData,
+      calculatedGrossPnl,
+      calculatedGrossProvenance: { ...calculated.brokerData.calculatedGrossProvenance, accountMoneyDigits },
+    },
+  });
+  if (review.calculatedGrossText(review.cTraderCalculatedGross(calculatedAtDigits('21', 0))) !== '+$21') failures.push('Zero-digit calculated gross formatting did not honor provider precision');
+  if (review.calculatedGrossText(review.cTraderCalculatedGross(calculatedAtDigits('20.6', 3))) !== '+$20.600') failures.push('Three-digit calculated gross formatting did not honor provider precision');
+  if (review.calculatedGrossText(review.cTraderCalculatedGross(calculatedAtDigits('123456789012345678.123456789012345678', 18))) !== '+$123456789012345678.123456789012345678') failures.push('High-precision calculated gross formatting lost decimal precision');
+  if (review.cTraderCalculatedGross({ ...calculated, pnl: 19.5 }) !== null) failures.push('Provider exact net P&L did not supersede calculated gross in the UI');
+  review.setTradeBrokerOwnedMode(calculated);
+  if (!/Calculated gross: \+\$20\.66 USD[\s\S]*outside Net P&L and analytics/.test(reviewElements.get('broker-calculated-gross').textContent)) failures.push('cTrader calculated-gross detail did not disclose fee and analytics exclusions');
 } catch (error) {
   failures.push(`cTrader review lifecycle fixture failed: ${error.message}`);
 }
@@ -1863,6 +1886,8 @@ try {
       getAccount: id => id === account.id ? account : null,
       acctCur: () => maliciousMarkup,
       pnlBreakdown: () => maliciousMarkup,
+      cTraderCalculatedGross: () => null,
+      calculatedGrossText: () => '',
       cTraderTradeNeedsReview: () => false,
       FUTURES_SPECS: {},
       ASSET_LABELS: { eq: 'Equity', cx: 'Crypto', fx: 'Forex', cm: 'Commodity', ix: 'Index' },

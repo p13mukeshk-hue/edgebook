@@ -149,13 +149,16 @@ function harness(options: {
   manualRows?: ManualRow[];
   importStatus?: "queued" | "running" | "review" | "completed";
   existingExecutionIds?: string[];
+  existingExecutionPayloads?: Record<string, unknown>;
   identityConflict?: Record<string, unknown>;
   floorKind?: string;
   advanceClockOnConnect?: boolean;
   balanceResponse?: unknown;
+  assetsResponse?: unknown;
   accountInfoResponse?: unknown;
   operatorAccountAttestation?: Record<string, unknown>;
   verifiedSymbolOverrides?: Record<string, unknown>;
+  providerMetadataOverrides?: Record<string, unknown>;
   lockedProviderMetadata?: Record<string, unknown>;
   positionDetailsResponse?: unknown;
 } = {}) {
@@ -179,6 +182,7 @@ function harness(options: {
     ...(options.verifiedSymbolOverrides === undefined
       ? {}
       : { verifiedAccountSymbolOverrides: options.verifiedSymbolOverrides }),
+    ...(options.providerMetadataOverrides ?? {}),
   };
   let status = options.importStatus ?? "running";
   let counters: Record<string, unknown> = {};
@@ -206,8 +210,11 @@ function harness(options: {
           provider_metadata: options.lockedProviderMetadata ?? providerMetadata,
         }]);
       }
-      if (sql.includes("SELECT external_execution_id FROM trade_executions")) {
-        return result([...executionIds.keys()].map((external_execution_id) => ({ external_execution_id })));
+      if (sql.includes("SELECT external_execution_id") && sql.includes("FROM trade_executions")) {
+        return result([...executionIds.keys()].map((external_execution_id) => ({
+          external_execution_id,
+          raw_payload: options.existingExecutionPayloads?.[external_execution_id],
+        })));
       }
       if (sql.includes("INSERT INTO trade_executions")) {
         const externalId = String(values[3]);
@@ -293,6 +300,7 @@ function harness(options: {
   const readClient = {
     getBalance: vi.fn(async () => options.balanceResponse
       ?? { accountId: "5050060", currency: "USD" }),
+    getAssets: vi.fn(async () => options.assetsResponse ?? [{ assetId: "15", name: "USD" }]),
     getSymbols: vi.fn(async () => options.symbols ?? [
       { id: "41", name: "XAU/USD", lotSize: 100, symbolCategory: "Metals" },
     ]),
@@ -367,15 +375,44 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     });
     const { engine, queries, candidateRows, readClient } = harness({
       deals: baseHistoricalDeals,
+      balanceResponse: { accountId: "5050060", depositAssetId: 15, moneyDigits: 2 },
+      assetsResponse: { assets: [{ assetId: 15, name: "USD", displayName: "USD" }] },
+      symbols: [{
+        id: "41",
+        name: "XAU/USD",
+        baseAssetId: 17,
+        quoteAssetId: 15,
+        lotSize: 100,
+        symbolCategory: "Metals",
+      }],
       positionDetailsResponse: { deals: historicalDetails },
     });
 
     const preview = await engine.previewHistoricalImport(importId, connectionId);
 
-    expect(preview.counters).toMatchObject({ positionsStaged: 1, executionOnly: 0 });
+    expect(preview.counters).toMatchObject({
+      positionsStaged: 1,
+      executionOnly: 0,
+      providerReadTelemetry: {
+        version: 1,
+        assetsAvailable: true,
+        assetCount: 1,
+        currencyResolved: true,
+        pnlEnrichment: {
+          requestedPositions: 1,
+          attemptedPositions: 1,
+          successfulResponses: 1,
+          positionDetailsAvailable: true,
+          authoritativePositions: 1,
+          unresolvedPositions: 0,
+        },
+      },
+    });
+    expect(readClient.getAssets).toHaveBeenCalledOnce();
     expect(readClient.getPositionDetails).toHaveBeenCalledWith("9001");
     const executionInserts = queries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"));
     expect(executionInserts[1]?.values.slice(10, 13)).toEqual(["23.4", "-0.5", "-1"]);
+    expect(executionInserts.every(({ values }) => values[13] === "USD")).toBe(true);
     expect(executionInserts[1]?.values[18]).toBe(4);
     expect(JSON.parse(String(executionInserts[1]?.values[19]))).toMatchObject({
       grossProfit: "250000",
@@ -390,6 +427,117 @@ describe("CTraderMcpSyncEngine historical preview", () => {
     };
     expect(candidateData.allowedActions).toEqual(["publish_separate", "reject"]);
     expect(candidateData.publishBlockedReason).toBeNull();
+  });
+
+  it("stages mixed exact-money historical closes without requesting P&L enrichment", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, queries, candidateRows, readClient } = harness({
+      deals: [
+        deal(),
+        deal({
+          dealId: "1002",
+          orderId: "8002",
+          tradeSide: "SELL",
+          dealType: "EXIT",
+          filledVolume: "400",
+          executionPrice: 2_005,
+          executionTimestamp: new Date("2026-08-11T10:30:00.000Z").getTime(),
+          netPnlCents: 500,
+          commissionCents: -50,
+          swapCents: 0,
+        }),
+        deal({
+          dealId: "1003",
+          orderId: "8003",
+          tradeSide: "SELL",
+          dealType: "EXIT",
+          filledVolume: "600",
+          executionPrice: 2_010,
+          executionTimestamp: new Date("2026-08-11T11:00:00.000Z").getTime(),
+          closePositionDetail: {
+            grossProfit: 200_000,
+            swap: -10_000,
+            commission: -5_000,
+            pnlConversionFee: 1_000,
+            moneyDigits: 4,
+          },
+        }),
+      ],
+    });
+
+    const preview = await engine.previewHistoricalImport(importId, connectionId);
+
+    expect(readClient.getPositionDetails).not.toHaveBeenCalled();
+    expect(preview.counters).toMatchObject({
+      positionsStaged: 1,
+      executionOnly: 0,
+      providerReadTelemetry: {
+        pnlEnrichment: {
+          requestedPositions: 0,
+          attemptedPositions: 0,
+          authoritativePositions: 0,
+          unresolvedPositions: 0,
+        },
+      },
+    });
+    const executionInserts = queries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"));
+    expect(executionInserts.map(({ values }) => values[10])).toEqual([null, "5", "18.4"]);
+    expect(executionInserts.map(({ values }) => values[18])).toEqual([null, 2, 4]);
+    const projected = JSON.parse(String(candidateRows[0]?.values[13]));
+    expect(projected).toMatchObject({
+      pnl: "23.4",
+      brokerData: {
+        pnlMethod: "provider_mixed_exact_money",
+        grossProfit: null,
+        commission: null,
+        swap: null,
+        pnlConversionFee: null,
+        realizedEvents: [
+          { executionId: "1002", pnl: "5" },
+          { executionId: "1003", pnl: "18.4" },
+        ],
+      },
+    });
+    expect(candidateRows[0]?.values[8]).toBe("unmatched");
+  });
+
+  it("retains stored authoritative close money on an incomplete historical replay", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const historicalDeals = closedPosition(false);
+    const closing = historicalDeals[1] as Record<string, unknown>;
+    const storedClosing = {
+      edgebookMcpDeal: {
+        version: 1,
+        dealId: String(closing.dealId), positionId: "9001", orderId: "8002", symbolId: "41",
+        symbolName: "XAU/USD", accountId: "5050060", side: "SELL", role: "CLOSE",
+        filledVolumeCents: "1000", filledVolumeSourceKey: "filledVolume",
+        filledVolumeScale: "unit_cents", executionPrice: 2_010,
+        executionTimestamp: Number(closing.executionTimestamp), dealStatus: 2,
+        providerUpdatedTimestamp: null, netPnlCents: null, commissionCents: null, swapCents: null,
+        closePositionDetail: {
+          grossProfit: "250000", swap: "-10000", commission: "-5000",
+          pnlConversionFee: "1000", moneyDigits: 4,
+        },
+      },
+    };
+    const { engine, candidateRows, queries } = harness({
+      deals: historicalDeals,
+      existingExecutionIds: [String(closing.dealId)],
+      existingExecutionPayloads: { [String(closing.dealId)]: storedClosing },
+    });
+
+    await engine.previewHistoricalImport(importId, connectionId);
+
+    const projected = JSON.parse(String(candidateRows[0]?.values[13]));
+    expect(projected).toMatchObject({
+      pnl: "23.4",
+      brokerData: { pnlMethod: "provider_close_detail_money_digits" },
+    });
+    const closeUpsert = queries.filter(({ sql }) => sql.includes("INSERT INTO trade_executions"))[1];
+    expect(closeUpsert?.values[10]).toBe("23.4");
+    expect(closeUpsert?.sql).toContain("trade_executions.raw_payload");
   });
 
   it.each([
@@ -681,6 +829,45 @@ describe("CTraderMcpSyncEngine historical preview", () => {
       code: "CTRADER_MCP_ACCOUNT_MISMATCH",
       requiresReauth: true,
     });
+    expect(database.connect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "currency across provider metadata wrappers",
+      balanceResponse: { accountId: "5050060", currency: "USD", depositAssetId: 15, moneyDigits: 2 },
+      accountInfoResponse: {},
+      providerMetadataOverrides: { result: { accountCurrency: "EUR" } },
+      expectedCode: "CTRADER_MCP_CURRENCY_INVALID",
+    },
+    {
+      label: "deposit asset across balance/account-info aliases",
+      balanceResponse: { accountId: "5050060", deposit_asset_id: 15, moneyDigits: 2 },
+      accountInfoResponse: { data: { accountId: "5050060", accountDepositAssetId: 16 } },
+      providerMetadataOverrides: {},
+      expectedCode: "CTRADER_MCP_METADATA_INVALID",
+    },
+    {
+      label: "money digits across nested wrappers",
+      balanceResponse: { accountId: "5050060", depositAssetId: 15, accountMoneyDigits: 2 },
+      accountInfoResponse: { result: { accountId: "5050060", money_digits: 3 } },
+      providerMetadataOverrides: {},
+      expectedCode: "CTRADER_MCP_METADATA_INVALID",
+    },
+  ])("fails the historical preview on conflicting $label", async ({
+    balanceResponse, accountInfoResponse, providerMetadataOverrides, expectedCode,
+  }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, database } = harness({
+      balanceResponse,
+      accountInfoResponse,
+      providerMetadataOverrides,
+      assetsResponse: [{ assetId: 15, name: "USD" }, { assetId: 16, name: "EUR" }],
+      deals: [],
+    });
+
+    await expect(engine.previewHistoricalImport(importId, connectionId)).rejects.toMatchObject({ code: expectedCode });
     expect(database.connect).not.toHaveBeenCalled();
   });
 
@@ -1370,12 +1557,125 @@ describe("normal MCP sync after reviewed reconciliation", () => {
     }).upsertProjection(client, connection, projection, { ...counters });
 
     const update = queries.find(({ sql }) => sql.includes("UPDATE trades SET"));
-    expect(update?.sql).toContain("pnl=COALESCE($9::numeric,pnl)");
+    expect(update?.sql).toContain("WHEN $9::numeric IS NOT NULL THEN $9::numeric");
+    expect(update?.sql).toContain("ELSE pnl");
     expect(update?.values[8]).toBeNull();
     expect(update?.sql).not.toContain("strategy=");
     expect(update?.sql).not.toContain("psychology=");
     expect(update?.sql).not.toContain("custom_fields=");
   });
+
+  it.each(["linked", "unlinked"] as const)(
+    "applies source-ranked provider P&L transitions atomically for %s projections",
+    async (pathKind) => {
+      const queries: Array<{ sql: string; values: readonly unknown[] }> = [];
+      const client = {
+        query: vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+          queries.push({ sql, values });
+          if (sql.includes("FROM ctrader_trade_links link") && sql.includes("JOIN trades trade")) {
+            return result(pathKind === "linked" ? [{
+              id: "00000000-0000-4000-8000-000000000401",
+              deleted_at: null,
+              tombstoned: false,
+            }] : []);
+          }
+          if (sql.includes("SELECT id, deleted_at FROM trades")) {
+            return result(pathKind === "unlinked" ? [{
+              id: "00000000-0000-4000-8000-000000000402",
+              deleted_at: null,
+            }] : []);
+          }
+          if (sql.includes("UPDATE trades SET") || sql.includes("INSERT INTO trades")) {
+            return result([{ id: "00000000-0000-4000-8000-000000000401" }]);
+          }
+          return result([]);
+        }),
+      } as unknown as PoolClient;
+      const engine = bareEngine();
+
+      await (engine as unknown as {
+        upsertProjection(
+          client: PoolClient,
+          connection: typeof connection,
+          projection: typeof projection,
+          counters: typeof counters,
+        ): Promise<void>;
+      }).upsertProjection(client, connection, {
+        ...projection,
+        pnl: null,
+        brokerData: {
+          ...projection.brokerData,
+          pnlMethod: "unavailable",
+          providerExecutionLineage: { fingerprintSha256: "same-lineage" },
+          realizedEvents: [],
+        },
+      }, { ...counters });
+
+      const write = queries.find(({ sql }) => pathKind === "linked"
+        ? sql.includes("UPDATE trades SET")
+        : sql.includes("INSERT INTO trades"));
+      expect(write).toBeDefined();
+      expect(write?.sql).toContain("provider_close_detail_money_digits");
+      expect(write?.sql).toContain("provider_explicit_net_cents");
+      expect(write?.sql).toContain("provider_mixed_exact_money");
+      expect(write?.sql).toContain("providerExecutionLineage,fingerprintSha256");
+      expect(write?.sql).toContain("- 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'");
+      expect(write?.sql).toContain("- 'pnlConversionFee' - 'realizedEvents'");
+      expect(write?.sql).toMatch(pathKind === "linked"
+        ? /WHEN \$9::numeric IS NOT NULL THEN \$9::numeric[\s\S]*?THEN pnl[\s\S]*?THEN NULL[\s\S]*?ELSE pnl/
+        : /THEN trades\.pnl[\s\S]*?ELSE EXCLUDED\.pnl/);
+      expect(write?.sql).toContain("broker_data IS DISTINCT FROM CASE");
+
+      type MoneyState = {
+        pnl: string | null;
+        method: "unavailable" | "provider_close_detail_money_digits" | "provider_explicit_net_cents"
+          | "provider_mixed_exact_money";
+        lineage: string;
+        realizedEvents: string[];
+      };
+      const transition = (stored: MoneyState, incoming: MoneyState, linked: boolean): MoneyState => {
+        const storedExact = stored.method !== "unavailable";
+        const sameLineage = stored.lineage === incoming.lineage;
+        if (incoming.method === "unavailable" && storedExact && sameLineage) return stored;
+        if (linked && incoming.method === "unavailable" && !storedExact) {
+          return { ...incoming, pnl: stored.pnl };
+        }
+        return incoming;
+      };
+      const exact = (pnl: string, lineage = "same-lineage"): MoneyState => ({
+        pnl,
+        method: "provider_close_detail_money_digits",
+        lineage,
+        realizedEvents: [`close:${pnl}`],
+      });
+      const mixedExact = (pnl: string, lineage = "same-lineage"): MoneyState => ({
+        pnl,
+        method: "provider_mixed_exact_money",
+        lineage,
+        realizedEvents: [`partial-close:${pnl}`],
+      });
+      const unavailable = (lineage = "same-lineage"): MoneyState => ({
+        pnl: null,
+        method: "unavailable",
+        lineage,
+        realizedEvents: [],
+      });
+
+      expect(transition(exact("25"), unavailable(), pathKind === "linked")).toEqual(exact("25"));
+      expect(transition(mixedExact("23.4"), unavailable(), pathKind === "linked"))
+        .toEqual(mixedExact("23.4"));
+      expect(transition(exact("25"), unavailable("new-close"), pathKind === "linked"))
+        .toEqual(unavailable("new-close"));
+      expect(transition(unavailable(), exact("25"), pathKind === "linked")).toEqual(exact("25"));
+      expect(transition(exact("25"), exact("27"), pathKind === "linked")).toEqual(exact("27"));
+      if (pathKind === "linked") {
+        expect(transition({ ...unavailable(), pnl: "19" }, unavailable(), true)).toEqual({
+          ...unavailable(),
+          pnl: "19",
+        });
+      }
+    },
+  );
 
   it("never nulls or quarantines a linked manual row when a later projection is incomplete", async () => {
     const queries: string[] = [];
@@ -1399,6 +1699,13 @@ describe("normal MCP sync after reviewed reconciliation", () => {
     expect(queries[0]).toContain("NOT EXISTS");
     expect(queries[0]).toContain("FROM ctrader_trade_links link");
     expect(queries[0]).toContain("link.trade_id=trades.id");
+    expect(queries[0]).toContain("provider_mixed_exact_money");
+    expect(queries[1]).toContain("EXISTS");
+    expect(queries[1]).toContain("FROM ctrader_trade_links link");
+    expect(queries[1]).toContain("link.external_position_id=$3");
+    expect(queries[1]).toContain("- 'calculatedGrossPnl' - 'calculatedGrossCurrency' - 'calculatedGrossMethod'");
+    expect(queries[1]).toContain("- 'calculatedGrossEvents' - 'calculatedGrossProvenance'");
+    expect(queries[1]).not.toContain("pnl=");
   });
 
   it("withholds only positions that still have a pending historical review", async () => {
