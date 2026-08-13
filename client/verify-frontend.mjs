@@ -281,6 +281,7 @@ const duplicateResolutionSource = sourceBetween('async function resolveDup', 'fu
 const jsonImportSource = sourceBetween('function importTradesJSON', 'function csvFormulaSafeText');
 const csvImportCommitSource = sourceBetween('async function csvImportTrades', 'let ddRange');
 const quantityProjectionSource = sourceBetween('function isCTraderTrade', 'const CTRADER_CALCULATED_GROSS_METHOD');
+const calculatedGrossPresentationSource = sourceBetween('const CTRADER_CALCULATED_GROSS_METHOD', 'function cTraderExactPnlBreakdown');
 const sizeLabelSource = sourceBetween('function getSizeLabel', 'function tradeRow');
 requireMatch(migrationExportSource, /const bundle=\{users:\{\[legacyUid\]:\{[\s\S]*?settings:[\s\S]*?moods:[\s\S]*?dailyJournal:/, 'complete per-UID migration export shape');
 requireMatch(dataStoreSource, /saveTrades\(t\)\{[\s\S]*?window\._dataMode===['"]vps['"][\s\S]*?return this\._syncVpsTrades\(t\);[\s\S]*?return false;/, 'trade save returns false without a selected provider');
@@ -1994,16 +1995,13 @@ try {
   const account = { id: maliciousIdentifier, name: maliciousMarkup, color: '#6c63ff', currency: maliciousMarkup };
   const tradeSource = sourceBetween('function acctTagCell', 'function getBaseFilteredTrades');
   const { exports: tradeRenderer } = evaluateSecurityFixture(
-    `${securityHelperSource}\n${positionSemanticsSource}\n${screenshotLookupSource}\n${quantityProjectionSource}\n${tradeSource}`,
+    `${securityHelperSource}\n${positionSemanticsSource}\n${screenshotLookupSource}\n${quantityProjectionSource}\n${calculatedGrossPresentationSource}\n${tradeSource}`,
     {
       window: securityWindow,
       getAccount: id => id === account.id ? account : null,
       acctCur: () => maliciousMarkup,
       normalizeFxCurrency: () => null,
-      calculatedGrossCurrencyPrefix: currency => currency === 'EUR' ? '€' : `${currency} `,
       pnlBreakdown: () => maliciousMarkup,
-      cTraderCalculatedGross: () => null,
-      calculatedGrossText: () => '',
       cTraderTradeNeedsReview: () => false,
       FUTURES_SPECS: {},
       ASSET_LABELS: { eq: 'Equity', cx: 'Crypto', fx: 'Forex', cm: 'Commodity', ix: 'Index' },
@@ -2053,6 +2051,25 @@ try {
     brokerData: { accountCurrency: 'EUR' },
   });
   if (!providerMoneyHtml.includes('+€1.00')) failures.push('Trade row did not use authoritative cTrader account currency for provider P&L');
+  const calculatedGrossTrade = {
+    ...persistedTrade,
+    id: 'ctrader-calculated-gross', source: 'ctrader', pnl: null, isOpen: false,
+    brokerData: {
+      calculatedGrossPnl: '-20.5', calculatedGrossCurrency: 'USD',
+      calculatedGrossMethod: 'fill_price_base_units_identity_conversion_v1',
+      calculatedGrossProvenance: { version: 1, feesIncluded: false, accountMoneyDigits: 2, quoteCurrency: 'USD', accountCurrency: 'USD', conversionRate: '1' },
+    },
+  };
+  const calculatedGrossHtml = tradeRenderer.tradeRow(calculatedGrossTrade);
+  if (!/class="pnl-neg">−\$20\.50<\/span>/.test(calculatedGrossHtml)) failures.push('Calculated gross loss did not use the same red signed-money treatment as manual P&L');
+  if (/Calc\. gross|fa-calculator/.test(calculatedGrossHtml)) failures.push('Calculated gross row kept the noisy legacy label or calculator icon');
+  if (!/class="pnl-estimate-badge"[^>]*>est\.<\/span>/.test(calculatedGrossHtml) || !/fees and swap excluded/.test(calculatedGrossHtml)) failures.push('Calculated gross row lost its subtle estimate disclosure');
+  const calculatedGainHtml = tradeRenderer.tradeRow({
+    ...calculatedGrossTrade,
+    id: 'ctrader-calculated-gain',
+    brokerData: { ...calculatedGrossTrade.brokerData, calculatedGrossPnl: '28' },
+  });
+  if (!/class="pnl-pos">\+\$28\.00<\/span>/.test(calculatedGainHtml)) failures.push('Calculated gross gain did not use the same green signed-money treatment as manual P&L');
 } catch (error) {
   failures.push(`Trade-row XSS fixture failed: ${error.message}`);
 }

@@ -427,8 +427,8 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .pnl-pos{color:var(--green);font-family:var(--font-mono);font-size:12px;font-weight:500}
 .pnl-neg{color:var(--red);font-family:var(--font-mono);font-size:12px;font-weight:500}
 .pnl-neu{color:var(--text2);font-family:var(--font-mono);font-size:12px}
-.pnl-gross-estimate{display:inline-flex;align-items:center;gap:4px;color:var(--text2);font-family:var(--font-mono);font-size:11px;font-weight:600;white-space:nowrap}
-.pnl-gross-estimate i{color:var(--accent2);font-size:9px}
+.pnl-gross-estimate{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.pnl-estimate-badge{display:inline-flex;align-items:center;padding:1px 4px;border:1px solid var(--border);border-radius:999px;color:var(--text3);background:var(--bg3);font-family:var(--font-body);font-size:8px;font-weight:700;line-height:1.25;letter-spacing:.04em;text-transform:uppercase}
 .action-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:4px 6px;border-radius:6px;font-size:12px;transition:.15s}
 .action-btn:hover{color:var(--text);background:var(--bg4)}
 .action-btn.del:hover{color:var(--red)}
@@ -8101,7 +8101,7 @@ function tradeRow(t){
       : `<span class="pnl-neg" title="${escapeHtml(bd)}" style="cursor:help">-${pnlC}${Math.abs(pnl).toFixed(2)}</span>`;
   const calculatedGrossTitle='Calculated gross price movement only; commissions, swap and other fees are excluded. This value is not included in Net P&L or analytics.';
   const displayedPnlStr=pnl===null&&calculatedGross
-    ? `<span class="pnl-gross-estimate" title="${calculatedGrossTitle}"><i class="fa-solid fa-calculator"></i>${isOpen?'Open · ':''}Calc. gross ${escapeHtml(calculatedGrossText(calculatedGross))}</span>`
+    ? `<span class="pnl-gross-estimate" title="${calculatedGrossTitle}"><span class="${calculatedGross.sign>0?'pnl-pos':calculatedGross.sign<0?'pnl-neg':'pnl-neu'}">${isOpen?'Open · ':''}${escapeHtml(calculatedGrossText(calculatedGross))}</span><span class="pnl-estimate-badge" aria-label="Calculated gross estimate; fees and swap excluded">est.</span></span>`
     : pnlStr;
 
   const symCell = isOpen
