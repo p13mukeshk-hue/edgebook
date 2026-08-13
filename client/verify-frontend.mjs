@@ -296,6 +296,12 @@ requireMatch(tradeSaveSource, /await loadManualDuplicateCandidates\(\)[\s\S]*?fi
 requireMatch(duplicateResolutionSource, /duplicateNumericClose\(existing\.entry,incoming\.entry,\.005\)[\s\S]*?duplicateNumericClose\(existing\.exit,incoming\.exit,\.005\)[\s\S]*?duplicateNumericClose\(existing\.size,incoming\.size,\.02\)/, 'manual duplicate check covers near entry exit and size values');
 requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousCreateError\(error\)[\s\S]*?api\.get\([\s\S]*?encodeURIComponent\(trade\.id\)[\s\S]*?tradeCreateFingerprint\(current\) === tradeCreateFingerprint\(trade\)/, 'lost trade-create response reconciliation');
 requireMatch(dataAdapter, /tradeCreateFingerprint[\s\S]*?pnl:[\s\S]*?entryTime:[\s\S]*?psychology:[\s\S]*?brokerData:/, 'complete normalized trade-create recovery fingerprint');
+requireMatch(app, /function calFinancialForDay[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?estimatedGross[\s\S]*?provisional/, 'calendar shared verified-net and estimated-gross aggregation');
+requireMatch(app, /function renderCalStats[\s\S]*?Verified net[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'calendar financial provenance summary');
+requireMatch(app, /function renderHeatmap[\s\S]*?tradeFinancialPresentation[\s\S]*?Verified net[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'heatmap shared financial presentation');
+requireMatch(app, /function djDayStats[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?verifiedNet[\s\S]*?estimatedGross/, 'daily journal shared day-level financial aggregation');
+requireMatch(app, /function tradeJournalCsv[\s\S]*?P&L Status[\s\S]*?Calculated Gross[\s\S]*?Fees Included/, 'CSV financial provenance columns');
+requireMatch(app, /analytics-pnl-coverage[\s\S]*?calculated gross P&L[\s\S]*?excluded from win rate, profit factor, equity, drawdown and coaching/, 'verified-only analytics estimate disclosure');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
 requireMatch(csvImportCommitSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite[\s\S]*?return;[\s\S]*?closeModal/, 'CSV import waits for persistence before closing');
@@ -1443,13 +1449,14 @@ try {
       stableJson: reviewStableJson,
       tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
       tradeHasPnl: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
+      tradeRealizedEvents: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)) ? [{ executionId: `trade:${trade.id || ''}`, date: trade.date, pnl: Number(trade.pnl) }] : [],
       isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
       document: {
         getElementById: id => reviewElements.get(id) || null,
         querySelector: selector => selector === 'label[for-size]' ? reviewElements.get('t-size-label') : null,
       },
     },
-    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,cTraderCalculatedGross,calculatedGrossText,cTraderExactPnlBreakdown,cTraderExactPnlBreakdownText,setTradeBrokerOwnedMode}',
+    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,cTraderCalculatedGross,calculatedGrossText,tradeFinancialPresentation,calculatedGrossLedgerEvents,financialPresentationLedgerForTrades,cTraderExactPnlBreakdown,cTraderExactPnlBreakdownText,setTradeBrokerOwnedMode}',
   );
   const imported = { source: 'ctrader', isOpen: true, date: '2026-08-11', entryAt: '2026-08-11T01:00:00.000Z', brokerData: { providerTradeDate: '2026-08-11', realizedEvents: [] }, custom: {} };
   if (!review.cTraderTradeNeedsReview(imported)) failures.push('A newly imported cTrader trade was not marked for review');
@@ -1471,13 +1478,20 @@ try {
   review.setTradeBrokerOwnedMode(baseUnitTrade);
   if (!/XAU base units from cTrader; lot conversion unavailable/.test(reviewElements.get('t-size-label').innerHTML)) failures.push('Unknown-contract cTrader quantity was not identified as base units in the edit form');
   if (review.cTraderProviderTradeDate({ date: '2026-08-12', brokerData: { providerTradeDate: '2026-08-11' } }) !== '2026-08-11') failures.push('cTrader provider date did not remain distinct from edited journal date');
-  const calculated = { source: 'ctrader', pnl: null, brokerData: {
+  const calculated = { id: 'calc-1', source: 'ctrader', pnl: null, isOpen: false, exitAt: '2026-08-12T23:30:00.000Z', date: '2026-08-12', brokerData: {
     calculatedGrossPnl: '20.66', calculatedGrossCurrency: 'USD',
     calculatedGrossMethod: 'fill_price_base_units_identity_conversion_v1',
-    calculatedGrossEvents: [{ executionId: 'close-1', grossPnl: '20.66' }],
+    calculatedGrossEvents: [{ executionId: 'close-1', executedAt: '2026-08-12T23:30:00.000Z', grossPnl: '20.66' }],
+    providerTradeDateTimeZone: 'Asia/Kolkata',
     calculatedGrossProvenance: { version: 1, feesIncluded: false, accountMoneyDigits: 2, quoteCurrency: 'USD', accountCurrency: 'USD', conversionRate: '1' },
   } };
   if (review.calculatedGrossText(review.cTraderCalculatedGross(calculated)) !== '+$20.66') failures.push('Safe cTrader calculated-gross estimate was not exposed separately');
+  const financialPresentation=review.tradeFinancialPresentation(calculated);
+  if (financialPresentation?.kind !== 'estimated_gross' || financialPresentation.amount !== 20.66 || !financialPresentation.isEstimate) failures.push('Shared financial presentation rejected a valid calculated-gross estimate');
+  const calculatedLedger=review.financialPresentationLedgerForTrades([calculated]);
+  if (calculatedLedger.length !== 1 || calculatedLedger[0].ledgerDate !== '2026-08-13' || calculatedLedger[0].ledgerPnl !== 20.66 || !calculatedLedger[0].financialIsEstimate) failures.push('Calculated-gross close event was not assigned to the provider-local calendar day');
+  const malformedLedger=review.calculatedGrossLedgerEvents({ ...calculated, brokerData: { ...calculated.brokerData, calculatedGrossEvents: [{ executionId: 'close-1', executedAt: calculated.exitAt, grossPnl: '99.99' }] } });
+  if (malformedLedger.length) failures.push('Calculated-gross event ledger accepted a total that disagrees with provenance');
   const calculatedAtDigits = (calculatedGrossPnl, accountMoneyDigits) => ({
     ...calculated,
     brokerData: {
@@ -1690,10 +1704,11 @@ try {
     {
       ASSET_LABELS: { eq: 'Equities' },
       tradeIsOpen: trade => trade?.isOpen === true,
-      tradeHasPnl: trade => Number.isFinite(Number(trade?.pnl)),
+      tradeHasPnl: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
       acctName: () => '@Desk',
       acctCur: () => '$',
       normalizeFxCurrency: value => value === '$' ? 'USD' : /^[A-Z]{3}$/.test(String(value)) ? String(value) : null,
+      cTraderCalculatedGross: trade => trade?.brokerData?.calculatedGrossPnl ? { valueText: String(trade.brokerData.calculatedGrossPnl), currency: 'USD' } : null,
     },
     '{tradeJournalCsv}',
   );
@@ -1709,14 +1724,21 @@ try {
     date: '2026-01-02', symbol: 'XAUUSD', asset: 'cm', direction: 'Long', entry: 2000, exit: 2001, size: 0.02,
     pnl: 2, strategy: 'System', custom: { playbook: {} }, emotion: 'Calm', accountId: 'acct-a', notes: '', isOpen: false, source: 'ctrader',
     brokerData: { accountCurrency: 'EUR', quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
+  }, {
+    date: '2026-01-03', symbol: 'XAUUSD', asset: 'cm', direction: 'Short', entry: 2000, exit: 2002, size: 0.02,
+    pnl: null, strategy: 'System', custom: { playbook: {} }, emotion: 'Calm', accountId: 'acct-a', notes: '', isOpen: false, source: 'ctrader',
+    brokerData: { accountCurrency: 'USD', calculatedGrossPnl: '-4.00' },
   }]);
   const journalRows = JSON.parse(JSON.stringify(parser.parseCSV(journalCsv)));
-  if (!journalCsv.includes('\r\n') || journalRows.length !== 3 || journalRows[1].length !== 23 || journalRows[1][1] !== "'=CMD()" ||
-      journalRows[1][10] !== '-2.00' || journalRows[1][11] !== 'USD' || journalRows[1][12] !== "'+SUM(1,1)" || journalRows[1][13] !== "'=HYPERLINK(\"bad\")" || journalRows[1][21] !== "'@Desk" || journalRows[1][22] !== 'line 1, "quoted"\nline 2') {
+  if (!journalCsv.includes('\r\n') || journalRows.length !== 4 || journalRows[1].length !== 27 || journalRows[1][1] !== "'=CMD()" ||
+      journalRows[1][10] !== '-2.00' || journalRows[1][11] !== 'USD' || journalRows[1][12] !== 'verified_net' || journalRows[1][16] !== "'+SUM(1,1)" || journalRows[1][17] !== "'=HYPERLINK(\"bad\")" || journalRows[1][25] !== "'@Desk" || journalRows[1][26] !== 'line 1, "quoted"\nline 2') {
     failures.push('RFC 4180 journal export or spreadsheet-injection protection regressed');
   }
   if (journalRows[0][7] !== 'Size Unit' || journalRows[0][11] !== 'PnL Currency' || journalRows[2][6] !== '2' || journalRows[2][7] !== 'XAU base units' || journalRows[2][11] !== 'EUR') {
     failures.push('Journal CSV export mislabeled a cTrader base-unit quantity as lots');
+  }
+  if (journalRows[3][10] !== '' || journalRows[3][12] !== 'estimated_gross' || journalRows[3][13] !== '-4.00' || journalRows[3][14] !== 'USD' || journalRows[3][15] !== 'No') {
+    failures.push('Journal CSV export mixed calculated gross into verified net or lost estimate provenance');
   }
 } catch (error) {
   failures.push(`CSV parser/export fixture failed: ${error.message}`);
@@ -2095,6 +2117,10 @@ try {
         deletedAt: maliciousMarkup,
       }],
       acctName: () => maliciousMarkup,
+      tradeFinancialPresentation: () => null,
+      calculatedGrossText: () => '',
+      tradeMoneyPrefix: () => '$',
+      signedMoney: () => '—',
     },
     '{renderDeletedTrades}',
   );
@@ -2366,6 +2392,8 @@ try {
       hmSelected: null,
       acctCur: () => '$',
       tradeMoneyPrefix: () => '$',
+      tradeFinancialPresentation: trade => trade?.estimated ? { amount: -4, isEstimate: true, gross: { valueText: '-4.00', currency: 'USD' } } : Number.isFinite(Number(trade?.pnl)) ? { amount: Number(trade.pnl), isEstimate: false } : null,
+      calculatedGrossText: () => '−$4.00',
       formatDate: value => value,
       hmSelectTrade() {},
     },
@@ -2382,6 +2410,8 @@ try {
   }, 10);
   assertNoExecutablePayload(cell.innerHTML, 'Heatmap-cell renderer');
   assertInlineArgument(cell.innerHTML, 'openLightbox', maliciousIdentifier, 'Heatmap screenshot action');
+  const estimatedCell = heatmapCell.makeHmCell({ id: 'est-1', symbol: 'XAUUSD', direction: 'Short', date: '2026-08-13', pnl: null, isOpen: false, estimated: true, screenshots: [] }, 10, -4);
+  if (!/−\$4\.00[\s\S]*pnl-estimate-badge[\s\S]*est\./.test(estimatedCell.innerHTML) || !/fees and swap are excluded/.test(estimatedCell.innerHTML)) failures.push('Heatmap did not render the shared signed estimated-gross presentation');
 
   const filterDocument = makeFakeDocument();
   const heatmapFilterSource = sourceBetween('function buildHmAcctFilter', 'function setHmRange');
@@ -2414,6 +2444,7 @@ try {
       buildHmGridWithInsert() {},
       acctCur: () => '$',
       tradeMoneyPrefix: () => '$',
+      tradeFinancialPresentation: trade => Number.isFinite(Number(trade?.pnl)) ? { amount: Number(trade.pnl), isEstimate: false } : null,
       tradePnlToUSD: (trade, value = trade?.pnl) => Number(value),
       FxRates: { toUSD: value => value },
       ASSET_LABELS: {},
