@@ -462,6 +462,13 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .trade-voice-wave b:nth-child(2){animation-delay:.13s}.trade-voice-wave b:nth-child(3){animation-delay:.26s}.trade-voice-wave b:nth-child(4){animation-delay:.39s}
 .trade-voice-status{min-height:14px;font-size:10px;line-height:1.4;color:var(--text3)}
 .trade-voice-status.is-listening{color:var(--red);font-weight:600}.trade-voice-status.is-ready{color:var(--green)}
+.dictation-field-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
+.dictation-field-head .dj-field-label,.dictation-field-head .hm-sec-label{margin-bottom:0}
+.dictation-inline{display:flex;align-items:center;gap:7px}
+.dictation-inline>input,.dictation-inline>textarea{flex:1;min-width:0}
+.dictation-inline>.trade-voice-btn{margin-left:auto}
+.dictation-status{min-height:14px;font-size:10px;line-height:1.4;color:var(--text3)}
+.dictation-status.is-listening{color:var(--red);font-weight:600}.dictation-status.is-ready{color:var(--green)}
 @keyframes tradeVoiceWave{0%,100%{height:3px;opacity:.55}50%{height:13px;opacity:1}}
 .modal-footer{padding:16px 28px 24px;display:flex;gap:10px;justify-content:flex-end;position:sticky;bottom:0;background:var(--bg2);border-top:1px solid var(--border)}
 .btn-ghost{padding:10px 18px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text2);font-family:var(--font-body);font-size:13px;font-weight:500;cursor:pointer;transition:.15s}
@@ -1220,6 +1227,8 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
 .badge-review:hover{filter:brightness(1.15)}
 .broker-owned-note{display:none;margin:0 0 14px;padding:10px 12px;border:1px solid var(--accent-border);border-radius:9px;background:var(--accent-wash-soft);color:var(--text2);font-size:11px;line-height:1.55}
 .broker-owned-note.visible{display:block}
+.trade-date-help{margin-top:5px;color:var(--text3);font-size:10px;line-height:1.45}
+.trade-date-help:empty{display:none}
 </style>
 </head>
 <body>
@@ -1657,7 +1666,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
               </div>
             </div>
             <div class="field" style="margin-bottom:12px"><label>Confidence (1–10)</label><input type="number" id="mood-conf" min="1" max="10" placeholder="7"></div>
-            <div class="field" style="margin-bottom:16px"><label>Notes</label><textarea id="mood-notes-inp" placeholder="What's on your mind today?"></textarea></div>
+            <div class="field" style="margin-bottom:16px"><div class="trade-voice-label"><label for="mood-notes-inp">Notes</label><button type="button" class="trade-voice-btn" data-dictation-target="mood-notes-inp" onclick="toggleDictation('mood-notes-inp')" aria-label="Dictate mood notes" aria-pressed="false"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="mood-notes-inp" placeholder="What's on your mind today?"></textarea><div class="dictation-status" id="voice-status-mood-notes-inp" role="status" aria-live="polite"></div></div>
             <button class="btn-primary" style="width:100%;justify-content:center" onclick="saveMoodEntry()"><i class="fa-solid fa-check"></i> Save check-in</button>
           </div>
           <div class="mood-history"><div class="chart-title" style="margin-bottom:16px">Recent check-ins</div><div id="mood-history-list"><div class="empty-state"><i class="fa-solid fa-brain"></i><p>No check-ins yet.</p></div></div></div>
@@ -2249,7 +2258,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
   <div class="modal">
     <div class="modal-head"><div class="modal-title" id="trade-modal-title">Log a trade</div><button class="modal-close" onclick="closeModal('trade-modal')"><i class="fa-solid fa-xmark"></i></button></div>
     <div class="modal-body">
-      <div id="broker-owned-note" class="broker-owned-note"><i class="fa-solid fa-shield-halved" style="color:var(--accent2);margin-right:5px"></i> Broker facts are read-only and update automatically from cTrader. Add your playbook, psychology, notes and screenshots, then save to mark this broker revision reviewed.</div>
+      <div id="broker-owned-note" class="broker-owned-note"><i class="fa-solid fa-shield-halved" style="color:var(--accent2);margin-right:5px"></i> Broker prices, size, symbol and execution timestamps are read-only and update automatically from cTrader. Journal date, stop loss, take profit, playbook, psychology, notes and screenshots remain yours.</div>
       <div class="section-divider">Trade details</div>
       <div class="form-grid three" style="margin-bottom:14px">
         <div class="field" id="tf-asset"><label>Asset class</label><select id="t-asset" onchange="updateSymbolDropdown();updateSizeLabel()"><option value="eq">Equities</option><option value="cx">Crypto</option><option value="fx">Forex</option><option value="cm">Commodities</option><option value="ix">Index</option></select></div>
@@ -2291,7 +2300,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
         <div class="field" id="tf-takeprofit"><label>Take profit</label><input id="t-tp" type="number" placeholder="0.00"></div>
       </div>
       <div class="form-grid" style="margin-bottom:14px">
-        <div class="field" id="tf-date"><label>Date</label><input id="t-date" type="date"></div>
+        <div class="field" id="tf-date"><label id="t-date-label" for="t-date">Date</label><input id="t-date" type="date" aria-describedby="t-date-help"><div id="t-date-help" class="trade-date-help"></div></div>
         <div class="field" id="tf-time"><label>Entry time</label><input id="t-time" type="time"></div>
         <div id="custom-fields-trade" class="form-grid" style="display:contents"></div>
       </div>
@@ -2302,11 +2311,11 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
       <div class="section-divider">Psychology</div>
       <div class="form-grid" style="margin-bottom:14px">
         <div class="field" id="tf-emotion"><label>Pre-trade emotion</label><select id="t-emo"><option>😌 Calm</option><option>🎯 Focused</option><option>😤 Frustrated</option><option>😨 Anxious</option><option>🤑 Greedy</option><option>😴 Tired</option><option>💪 Confident</option></select></div>
-        <div class="field" id="tf-psych-prethought" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-prethought">Pre-trade thought</label><button type="button" class="trade-voice-btn" data-voice-target="t-psych-prethought" onclick="toggleTradeVoice('t-psych-prethought')" aria-label="Dictate pre-trade thought" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-prethought" placeholder="What was my thesis for this trade?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-prethought" role="status" aria-live="polite"></div></div>
-        <div class="field" id="tf-psych-execution" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-execution">Execution note</label><button type="button" class="trade-voice-btn" data-voice-target="t-psych-execution" onclick="toggleTradeVoice('t-psych-execution')" aria-label="Dictate execution note" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-execution" placeholder="How did I execute vs my plan?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-execution" role="status" aria-live="polite"></div></div>
-        <div class="field" id="tf-psych-review" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-review">Post-trade review</label><button type="button" class="trade-voice-btn" data-voice-target="t-psych-review" onclick="toggleTradeVoice('t-psych-review')" aria-label="Dictate post-trade review" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-review" placeholder="What did I learn from this trade?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-review" role="status" aria-live="polite"></div></div>
+        <div class="field" id="tf-psych-prethought" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-prethought">Pre-trade thought</label><button type="button" class="trade-voice-btn" data-dictation-target="t-psych-prethought" onclick="toggleDictation('t-psych-prethought')" aria-label="Dictate pre-trade thought" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-prethought" placeholder="What was my thesis for this trade?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-prethought" role="status" aria-live="polite"></div></div>
+        <div class="field" id="tf-psych-execution" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-execution">Execution note</label><button type="button" class="trade-voice-btn" data-dictation-target="t-psych-execution" onclick="toggleDictation('t-psych-execution')" aria-label="Dictate execution note" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-execution" placeholder="How did I execute vs my plan?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-execution" role="status" aria-live="polite"></div></div>
+        <div class="field" id="tf-psych-review" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-psych-review">Post-trade review</label><button type="button" class="trade-voice-btn" data-dictation-target="t-psych-review" onclick="toggleDictation('t-psych-review')" aria-label="Dictate post-trade review" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-psych-review" placeholder="What did I learn from this trade?" rows="2" style="resize:vertical"></textarea><div class="trade-voice-status" id="voice-status-t-psych-review" role="status" aria-live="polite"></div></div>
         <div id="custom-fields-psychology" class="form-grid" style="display:contents"></div>
-        <div class="field" id="tf-notes" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-notes">Notes</label><button type="button" class="trade-voice-btn" data-voice-target="t-notes" onclick="toggleTradeVoice('t-notes')" aria-label="Dictate trade notes" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-notes" placeholder="Why this trade? Thesis, key levels…"></textarea><div class="trade-voice-status" id="voice-status-t-notes" role="status" aria-live="polite"></div></div>
+        <div class="field" id="tf-notes" style="grid-column:1/-1"><div class="trade-voice-label"><label for="t-notes">Notes</label><button type="button" class="trade-voice-btn" data-dictation-target="t-notes" onclick="toggleDictation('t-notes')" aria-label="Dictate trade notes" aria-pressed="false" title="Dictate with your microphone"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="t-notes" placeholder="Why this trade? Thesis, key levels…"></textarea><div class="trade-voice-status" id="voice-status-t-notes" role="status" aria-live="polite"></div></div>
         <div id="custom-fields-notes" class="form-grid" style="display:contents"></div>
       </div>
       <div class="field full" id="tf-screenshot">
@@ -2348,7 +2357,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
         </div>
       </div>
       <div class="field" style="margin-bottom:14px"><label>Confidence (1–10)</label><input id="mm-conf" type="number" min="1" max="10" placeholder="7"></div>
-      <div class="field"><label>Notes</label><textarea id="mm-notes" placeholder="How are you feeling?"></textarea></div>
+      <div class="field"><div class="trade-voice-label"><label for="mm-notes">Notes</label><button type="button" class="trade-voice-btn" data-dictation-target="mm-notes" onclick="toggleDictation('mm-notes')" aria-label="Dictate mood check-in notes" aria-pressed="false"><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button></div><textarea id="mm-notes" placeholder="How are you feeling?"></textarea><div class="dictation-status" id="voice-status-mm-notes" role="status" aria-live="polite"></div></div>
     </div>
     <div class="modal-footer"><button class="btn-ghost" onclick="closeModal('mood-modal')">Cancel</button><button class="btn-primary" onclick="saveModalMood()"><i class="fa-solid fa-check"></i> Save</button></div>
   </div>
@@ -3486,7 +3495,7 @@ let editId=null, moodEmoji='', modalEmoji='';
 let _tradeModalGeneration=0;
 let _tradeDraftCommittedId=null;
 let _tradeDraftId=null, _tradeSaveInFlight=false, _dupResolutionInFlight=false;
-let tradeVoiceRecognition=null, tradeVoiceTarget=null, tradeVoiceBaseText='', tradeVoiceFinalText='', tradeVoiceInterimText='';
+let dictationSession=null, dictationServiceBlocked=false;
 let activeAcctId='all';   // 'all' or account id string
 let activeSymbolTab='eq'; // symbol manager tab
 let selectedNewAcctColor=ACCT_COLORS[0];
@@ -3641,6 +3650,7 @@ async function doGoogleLogin(){
 
 
 async function doSignOut(){
+  stopDictation({quiet:true,immediate:true});
   if(_tradesUnsubscribe){ _tradesUnsubscribe(); _tradesUnsubscribe=null; }
   trades=[];
   try{ sessionStorage.removeItem('edgebook_theme_uid'); }catch{}
@@ -6506,13 +6516,14 @@ function buildCustomFieldsForm(){
     if(!fields.length){ el.innerHTML=''; return; }
     el.innerHTML=fields.map(cf=>{
       const id='cf-v-'+safeDomId(cf.id); let inp='';
-      if(cf.type==='text') inp=`<input id="${id}" placeholder="${escapeHtml(cf.label)}">`;
+      if(cf.type==='text') inp=`<div class="dictation-inline"><input id="${id}" placeholder="${escapeHtml(cf.label)}">${dictationControlHtml(id,cf.label)}</div>${dictationStatusHtml(id)}`;
       else if(cf.type==='number') inp=`<input id="${id}" type="number" placeholder="0">`;
       else if(cf.type==='checkbox') inp=`<div style="padding:8px 0"><label class="toggle"><input type="checkbox" id="${id}"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div>`;
       else if(cf.type==='select'&&cf.options) inp=`<select id="${id}"><option value="">— Select —</option>${String(cf.options).split(',').map(o=>`<option>${escapeHtml(o.trim())}</option>`).join('')}</select>`;
       return `<div class="field"><label>${escapeHtml(cf.label)}</label>${inp}</div>`;
     }).join('');
   });
+  refreshDictationControls();
 }
 
 /* ══════════════════════════════════════════════════════
@@ -6768,7 +6779,7 @@ function confirmResetSettings(){ showConfirm('Reset settings?','All customisatio
 ══════════════════════════════════════════════════════ */
 const PAGE_TITLES={dashboard:'Dashboard',journal:'Trade Journal',dailyjournal:'Daily Journal',analytics:'Analytics',mood:'Mood Tracker',calendar:'Calendar',heatmap:'Trade Heatmap',drawdown:'Drawdown Tracker',risk:'Risk Manager',settings:'Settings'};
 function navigate(page,el){
-  if(page!=='dailyjournal') djStopVoiceJournal({quiet:true});
+  stopDictation({quiet:true,immediate:true});
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   el?.classList.add('active');
   document.querySelectorAll('.page-content').forEach(p=>p.classList.remove('active'));
@@ -6825,81 +6836,159 @@ function updateTradeSaveButton(){
     : '<i class="fa-solid fa-floppy-disk"></i> Save trade';
 }
 
-const TRADE_VOICE_TARGETS=new Set(['t-psych-prethought','t-psych-execution','t-psych-review','t-notes']);
-function tradeSpeechRecognitionCtor(){return window.SpeechRecognition||window.webkitSpeechRecognition||null;}
-function tradeJoinVoiceText(base,transcript){
+/* One privacy-scoped speech recognizer serves every narrative field. */
+const DICTATION_STATIC_TARGETS=new Map([
+  ['t-psych-prethought',{label:'pre-trade thought',context:'trade'}],
+  ['t-psych-execution',{label:'execution note',context:'trade'}],
+  ['t-psych-review',{label:'post-trade review',context:'trade'}],
+  ['t-notes',{label:'trade notes',context:'trade'}],
+  ['dj-mistake',{label:'biggest mistake',context:'dailyjournal'}],
+  ['dj-keylesson',{label:'key lesson',context:'dailyjournal'}],
+  ['dj-woulddodiff',{label:'what you would do differently',context:'dailyjournal'}],
+  ['dj-intentions',{label:"tomorrow's intentions",context:'dailyjournal'}],
+  ['dj-notes',{label:'journal notes',context:'dailyjournal'}],
+  ['mood-notes-inp',{label:'mood notes',context:'mood'}],
+  ['mm-notes',{label:'mood check-in notes',context:'mood'}],
+]);
+function dictationTargetSpec(target){
+  const staticSpec=DICTATION_STATIC_TARGETS.get(target);if(staticSpec)return staticSpec;
+  if(/^cf-v-[A-Za-z0-9_-]+$/.test(target))return {label:'custom trade note',context:'trade'};
+  if(/^hm-note-[A-Za-z0-9_-]+$/.test(target))return {label:'heatmap note',context:'heatmap'};
+  return null;
+}
+function dictationControlHtml(target,label){
+  if(!dictationTargetSpec(target))return '';
+  const safeTarget=escapeHtml(target),safeLabel=escapeHtml(label);
+  return `<button type="button" class="trade-voice-btn" data-dictation-target="${safeTarget}" onclick="toggleDictation('${safeTarget}')" aria-label="Dictate ${safeLabel}" aria-pressed="false" title="Audio is handled by your browser's speech service and is not stored by Edgebook."><i class="fa-solid fa-microphone"></i><span class="trade-voice-wave" aria-hidden="true"><b></b><b></b><b></b><b></b></span></button>`;
+}
+function dictationStatusHtml(target){return `<div class="dictation-status trade-voice-status" id="voice-status-${escapeHtml(target)}" role="status" aria-live="polite"></div>`;}
+function speechRecognitionCtor(){return window.SpeechRecognition||window.webkitSpeechRecognition||null;}
+function dictationCapability(){
+  if(globalThis.isSecureContext!==true)return {available:false,message:'Voice dictation requires a secure HTTPS connection. You can still type here.'};
+  if(!speechRecognitionCtor())return {available:false,message:'Voice dictation is not supported in this browser. Use Chrome or Edge, or type here.'};
+  if(dictationServiceBlocked)return {available:false,message:'This browser cannot access its speech service. Use Chrome or Edge, or type here.'};
+  return {available:true,message:''};
+}
+function dictationLanguage(){
+  const value=String(navigator.language||navigator.languages?.[0]||document.documentElement.lang||'en-IN').trim();
+  return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value)?value:'en-IN';
+}
+function joinDictationText(base,transcript){
   const existing=String(base||''),spoken=String(transcript||'').replace(/\s+/g,' ').trim();
-  if(!spoken)return existing;
-  if(!existing)return spoken;
+  if(!spoken)return existing;if(!existing)return spoken;
   return existing+(/\s$/.test(existing)?'':'\n')+spoken;
 }
-function tradeVoiceErrorMessage(code){
-  if(code==='not-allowed'||code==='service-not-allowed')return 'Microphone permission was blocked. Allow it for Edgebook and try again.';
-  if(code==='audio-capture')return 'No microphone was detected. Check your microphone and try again.';
-  if(code==='network')return 'Speech recognition could not connect. Your existing text is unchanged.';
-  if(code==='no-speech')return 'No speech was detected. Tap the microphone when you are ready.';
-  return 'Dictation stopped unexpectedly. Any captured text is still available to review.';
+function dictationReviewMessage(context){
+  if(context==='trade')return 'Transcript added — review it before saving the trade.';
+  if(context==='dailyjournal')return 'Transcript added — review it before saving the journal entry.';
+  if(context==='mood')return 'Transcript added — review it before saving the check-in.';
+  return 'Transcript added — review it before saving the note.';
 }
-function setTradeVoiceStatus(target,message,state=''){
+function dictationErrorMessage(code){
+  if(code==='not-allowed')return 'Microphone permission was blocked. Allow the microphone for Edgebook in the address bar, then try again.';
+  if(code==='service-not-allowed')return 'This browser cannot access its speech service. Use Chrome or Edge, or type here.';
+  if(code==='audio-capture')return 'No microphone was detected. Check your microphone and try again.';
+  if(code==='network')return 'The browser speech service could not connect. Captured words were kept; try Chrome or Edge, or type here.';
+  if(code==='language-not-supported')return 'Your browser speech service does not support this language. Change your browser language or type here.';
+  if(code==='no-speech')return 'No speech was detected. Tap the microphone when you are ready.';
+  if(code==='aborted')return 'Dictation stopped. Any captured words are ready to review.';
+  return 'Dictation stopped unexpectedly. Any captured words are ready to review.';
+}
+function setDictationStatus(target,message,state=''){
   const status=document.getElementById(`voice-status-${target}`);if(!status)return;
   status.textContent=message;status.classList.remove('is-listening','is-ready');if(state)status.classList.add(state);
 }
-function refreshTradeVoiceControls(){
-  const supported=!!tradeSpeechRecognitionCtor();
-  document.querySelectorAll('[data-voice-target]').forEach(button=>{
-    const target=button.dataset.voiceTarget,active=!!tradeVoiceRecognition&&tradeVoiceTarget===target;
-    button.disabled=!supported;button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
-    button.setAttribute('aria-label',active?'Stop dictation':`Dictate ${target==='t-notes'?'trade notes':target==='t-psych-prethought'?'pre-trade thought':target==='t-psych-execution'?'execution note':'post-trade review'}`);
+function dictationButtons(){return Array.from(document.querySelectorAll('[data-dictation-target]'));}
+function refreshDictationControls(){
+  const capability=dictationCapability();
+  dictationButtons().forEach(button=>{
+    const target=button.dataset.dictationTarget,spec=dictationTargetSpec(target),active=!!dictationSession&&dictationSession.target===target;
+    button.disabled=!capability.available||!spec;button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
+    button.setAttribute('aria-label',active?'Stop dictation':`Dictate ${spec?.label||'note'}`);
     const icon=button.querySelector('i');if(icon)icon.className=active?'fa-solid fa-stop':'fa-solid fa-microphone';
-    button.title=supported?(active?'Stop dictation':'Dictate with your microphone'):'Voice dictation is not supported in this browser';
+    button.title=capability.available?(active?'Stop dictation':"Audio is handled by your browser's speech service and is not stored by Edgebook."):capability.message;
+    if(!capability.available)setDictationStatus(target,capability.message);
   });
 }
-function renderTradeVoiceTranscript(){
-  const textarea=TRADE_VOICE_TARGETS.has(tradeVoiceTarget)?document.getElementById(tradeVoiceTarget):null;if(!textarea)return;
-  textarea.value=tradeJoinVoiceText(tradeVoiceBaseText,`${tradeVoiceFinalText} ${tradeVoiceInterimText}`);
+function renderDictationTranscript(session){
+  if(dictationSession===session)session.element.value=joinDictationText(session.baseText,`${session.finalText} ${session.interimText}`);
 }
-function finishTradeVoice(message,state='is-ready'){
-  const target=tradeVoiceTarget,textarea=target?document.getElementById(target):null;
-  tradeVoiceRecognition=null;tradeVoiceTarget=null;if(textarea)textarea.readOnly=false;
-  refreshTradeVoiceControls();if(target)setTradeVoiceStatus(target,message,state);
+function promoteDictationInterim(session){
+  if(session.interimText.trim())session.finalText=`${session.finalText} ${session.interimText}`.trim();
+  session.interimText='';renderDictationTranscript(session);
 }
-function stopTradeVoice({quiet=false}={}){
-  const recognition=tradeVoiceRecognition,target=tradeVoiceTarget,textarea=target?document.getElementById(target):null;
-  const hadTranscript=!!(`${tradeVoiceFinalText} ${tradeVoiceInterimText}`.trim());
-  tradeVoiceRecognition=null;tradeVoiceTarget=null;try{recognition?.stop();}catch{}
-  if(textarea)textarea.readOnly=false;refreshTradeVoiceControls();
-  if(target&&!quiet)setTradeVoiceStatus(target,hadTranscript?'Transcript added — review it before saving the trade.':'Listening stopped. No transcript was added.',hadTranscript?'is-ready':'');
+function finishDictation(session,message,state='is-ready'){
+  if(dictationSession!==session)return;
+  promoteDictationInterim(session);clearTimeout(session.watchdog);dictationSession=null;
+  session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
+  refreshDictationControls();setDictationStatus(session.target,message,state);
 }
-function toggleTradeVoice(target){
-  if(!TRADE_VOICE_TARGETS.has(target))return;
-  if(tradeVoiceRecognition&&tradeVoiceTarget===target){stopTradeVoice();return;}
-  if(tradeVoiceRecognition)stopTradeVoice({quiet:true});
-  const Recognition=tradeSpeechRecognitionCtor(),textarea=document.getElementById(target);
-  if(!Recognition||!textarea){refreshTradeVoiceControls();showToast('Voice dictation is not available in this browser','info');return;}
-  const recognition=new Recognition();tradeVoiceRecognition=recognition;tradeVoiceTarget=target;
-  tradeVoiceBaseText=textarea.value;tradeVoiceFinalText='';tradeVoiceInterimText='';textarea.readOnly=true;
-  recognition.continuous=true;recognition.interimResults=true;recognition.maxAlternatives=1;recognition.lang=navigator.language||'en-IN';
+function stopDictation({quiet=false,immediate=false}={}){
+  const session=dictationSession;if(!session)return;
+  if(immediate){
+    promoteDictationInterim(session);clearTimeout(session.watchdog);dictationSession=null;session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
+    try{session.recognition.abort();}catch{}refreshDictationControls();
+    if(!quiet)setDictationStatus(session.target,session.finalText.trim()?dictationReviewMessage(session.spec.context):'Listening stopped. No transcript was added.',session.finalText.trim()?'is-ready':'');
+    return;
+  }
+  if(session.stopRequested)return;session.stopRequested=true;setDictationStatus(session.target,'Finishing transcript…','is-listening');
+  try{session.recognition.stop();}catch{finishDictation(session,session.finalText.trim()?dictationReviewMessage(session.spec.context):'Listening stopped. No transcript was added.',session.finalText.trim()?'is-ready':'');return;}
+  clearTimeout(session.watchdog);session.watchdog=setTimeout(()=>{
+    if(dictationSession===session){const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,captured?dictationReviewMessage(session.spec.context):'Listening stopped. No transcript was added.',captured?'is-ready':'');}
+  },1800);
+}
+function toggleDictation(target){
+  const spec=dictationTargetSpec(target),element=document.getElementById(target),capability=dictationCapability();
+  if(!spec||!element)return;
+  if(dictationSession?.target===target){stopDictation();return;}
+  if(dictationSession)stopDictation({immediate:true});
+  if(!capability.available){refreshDictationControls();setDictationStatus(target,capability.message);showToast(capability.message,'info');return;}
+  const Recognition=speechRecognitionCtor(),recognition=new Recognition();
+  if(spec.context==='dailyjournal'&&typeof djAutoSaveTimer!=='undefined'){clearTimeout(djAutoSaveTimer);djAutoSaveTimer=null;}
+  const session={target,spec,element,recognition,baseText:element.value,finalText:'',interimText:'',wasReadOnly:element.readOnly,stopRequested:false,watchdog:null};
+  session.onUserInput=()=>{
+    if(dictationSession!==session)return;
+    clearTimeout(session.watchdog);dictationSession=null;element.removeEventListener('input',session.onUserInput);
+    try{recognition.abort();}catch{}refreshDictationControls();setDictationStatus(target,'Dictation stopped so your edit is preserved. Review the text before saving.','is-ready');
+  };
+  dictationSession=session;element.addEventListener('input',session.onUserInput);recognition.continuous=true;recognition.interimResults=true;recognition.maxAlternatives=1;recognition.lang=dictationLanguage();
+  recognition.onstart=()=>{if(dictationSession===session)setDictationStatus(target,'Microphone connected — listening…','is-listening');};
+  recognition.onaudiostart=()=>{if(dictationSession===session)setDictationStatus(target,'Listening… speak naturally. Edgebook stores only text you save.','is-listening');};
+  recognition.onspeechstart=()=>{if(dictationSession===session)setDictationStatus(target,'Speech detected — transcribing…','is-listening');};
   recognition.onresult=event=>{
-    if(tradeVoiceRecognition!==recognition||tradeVoiceTarget!==target)return;
-    let interim='';
-    for(let i=event.resultIndex;i<event.results.length;i++){
-      const text=event.results[i]?.[0]?.transcript||'';
-      if(event.results[i].isFinal)tradeVoiceFinalText+=text+' ';else interim+=text+' ';
-    }
-    tradeVoiceInterimText=interim;renderTradeVoiceTranscript();
+    if(dictationSession!==session)return;
+    let finalText='',interimText='';
+    for(let i=0;i<event.results.length;i++){const text=event.results[i]?.[0]?.transcript||'';if(event.results[i].isFinal)finalText+=text+' ';else interimText+=text+' ';}
+    session.finalText=finalText;session.interimText=interimText;renderDictationTranscript(session);
   };
-  recognition.onerror=event=>{if(tradeVoiceRecognition===recognition)finishTradeVoice(tradeVoiceErrorMessage(event.error),event.error==='no-speech'?'':'is-ready');};
+  recognition.onerror=event=>{
+    if(dictationSession!==session)return;
+    if(event.error==='service-not-allowed')dictationServiceBlocked=true;
+    const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,dictationErrorMessage(event.error),captured?'is-ready':'');
+  };
   recognition.onend=()=>{
-    if(tradeVoiceRecognition!==recognition)return;
-    const hadTranscript=!!(`${tradeVoiceFinalText} ${tradeVoiceInterimText}`.trim());
-    finishTradeVoice(hadTranscript?'Transcript added — review it before saving the trade.':'Listening ended. No transcript was added.',hadTranscript?'is-ready':'');
+    if(dictationSession!==session)return;
+    const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,captured?dictationReviewMessage(spec.context):'Listening ended. No transcript was added.',captured?'is-ready':'');
   };
-  refreshTradeVoiceControls();setTradeVoiceStatus(target,'Listening… speak naturally. Edgebook stores only the text you save.','is-listening');
-  try{recognition.start();}catch{finishTradeVoice('Could not start dictation. Please try again.','');}
+  refreshDictationControls();setDictationStatus(target,'Requesting microphone permission…','is-listening');
+  session.watchdog=setTimeout(()=>{if(dictationSession===session&&!session.finalText&&!session.interimText)stopDictation();},15000);
+  try{recognition.start();}catch{finishDictation(session,'Could not start dictation. Try Chrome or Edge, or type here.','');}
 }
+function toggleTradeVoice(target){toggleDictation(target);}
+function stopTradeVoice(options={}){if(dictationSession?.spec.context==='trade')stopDictation({...options,immediate:true});}
+function refreshTradeVoiceControls(){refreshDictationControls();}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')stopDictation({quiet:true,immediate:true});});
+window.addEventListener('pagehide',()=>stopDictation({quiet:true,immediate:true}));
+document.addEventListener('DOMContentLoaded',refreshDictationControls);
 
-const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-date','t-time'];
+const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-time'];
 function isCTraderTrade(trade){return String(trade?.sourceSystem||trade?.source||trade?.broker||'').toLowerCase()==='ctrader';}
+function cTraderProviderTradeDate(trade){
+  const providerDate=String(trade?.brokerData?.providerTradeDate||'');
+  if(isRealIsoDate(providerDate))return providerDate;
+  const initialJournalDate=String(trade?.date||'');
+  return isRealIsoDate(initialJournalDate)?initialJournalDate:'';
+}
 function cTraderReviewRevision(trade){
   const events=Array.isArray(trade?.brokerData?.realizedEvents)?trade.brokerData.realizedEvents:[];
   return stableJson({
@@ -6917,6 +7006,16 @@ function setTradeBrokerOwnedMode(trade){
   const locked=isCTraderTrade(trade);
   CTRADER_OWNED_FORM_IDS.forEach(id=>{const element=document.getElementById(id);if(element)element.disabled=locked;});
   document.getElementById('broker-owned-note')?.classList.toggle('visible',locked);
+  const dateLabel=document.getElementById('t-date-label'),dateHelp=document.getElementById('t-date-help');
+  if(dateLabel)dateLabel.textContent=locked?'Journal date':'Date';
+  if(dateHelp){
+    const providerDate=locked?cTraderProviderTradeDate(trade):'';
+    const providerTimeZone=locked&&typeof trade?.brokerData?.providerTradeDateTimeZone==='string'?trade.brokerData.providerTradeDateTimeZone:'';
+    const entryAt=locked&&typeof trade?.entryAt==='string'&&Number.isFinite(Date.parse(trade.entryAt))?trade.entryAt:'';
+    dateHelp.textContent=locked
+      ? `${providerDate?`cTrader-derived date${providerTimeZone?` (${providerTimeZone})`:''}: ${providerDate}. `:''}${entryAt?`Exact open timestamp: ${entryAt}. `:''}You can adjust the journal date; broker sync will not overwrite it.`
+      : '';
+  }
 }
 
 function openTradeModal(id=null){
@@ -7011,6 +7110,7 @@ function openTradeModal(id=null){
 }
 function openMoodModal(){ document.getElementById('mood-modal').classList.add('open'); }
 function closeModal(id,options={}){
+  stopDictation({quiet:true,immediate:true});
   if(id==='trade-modal'){
     if((_tradeSaveInFlight||_uploadingCount>0)&&!options.force){
       showToast('Please wait for the current save or screenshot preparation to finish.','info');
@@ -7347,6 +7447,7 @@ function tradeSaveFailureMessage(error){
 }
 
 async function saveTrade(){
+  stopDictation({quiet:true,immediate:true});
   if(_tradeSaveInFlight)return;
   _tradeSaveInFlight=true;
   updateTradeSaveButton();
@@ -7653,6 +7754,7 @@ function pickMoodEmoji(el,v){document.querySelectorAll('#mood-emoji-row .emoji-o
 function pickModalEmoji(el,v){document.querySelectorAll('#modal-emoji-row .emoji-opt').forEach(e=>e.classList.remove('selected'));el.classList.add('selected');modalEmoji=v;}
 function newMoodId(){return `mood_${globalThis.crypto?.randomUUID?.()||`${Date.now()}_${Math.random().toString(36).slice(2)}`}`;}
 async function saveMoodEntry(){
+  stopDictation({quiet:true,immediate:true});
   if(!moodEmoji){showToast('Select an emotion','error');return;}
   const mood={id:newMoodId(),type:document.getElementById('mood-type-sel').value,emotion:moodEmoji,confidence:parseInt(document.getElementById('mood-conf').value)||null,notes:document.getElementById('mood-notes-inp').value,time:nowIST(),date:TODAY};
   moods.unshift(mood);
@@ -7663,6 +7765,7 @@ async function saveMoodEntry(){
   showToast(synced?'Mood saved':'Mood saved on this device; VPS sync will retry',synced?'success':'info');
 }
 async function saveModalMood(){
+  stopDictation({quiet:true,immediate:true});
   if(!modalEmoji){showToast('Select an emotion','error');return;}
   const mood={id:newMoodId(),type:document.getElementById('mm-type').value,emotion:modalEmoji,confidence:parseInt(document.getElementById('mm-conf').value)||null,notes:document.getElementById('mm-notes').value,time:nowIST(),date:TODAY};
   moods.unshift(mood);
@@ -9948,6 +10051,7 @@ function makeHmCell(t, maxAbs, heatPnl=Number(t.pnl)){
 }
 
 function renderHeatmap(){
+  stopDictation({quiet:true,immediate:true});
   buildHmAcctFilter();
   const src = hmFilteredTrades();
   const completed = src.filter(tradeIsClosedWithPnl);
@@ -10049,6 +10153,7 @@ function buildHmGridWithInsert(container,src,maxAbs,pnlForHeat=t=>Number(t.pnl))
 }
 
 function hmSelectTrade(id){
+  stopDictation({quiet:true,immediate:true});
   const existing = document.getElementById('hm-insert-body');
   const closing  = hmSelected === id;
 
@@ -10117,8 +10222,9 @@ function renderHmInsert(t, container){
       </div>
       <div class="hm-ins-div"></div>
       <div class="hm-ins-notes">
-        <div class="hm-sec-label"><i class="fa-solid fa-note-sticky" style="font-size:10px"></i> Notes</div>
+        <div class="dictation-field-head"><div class="hm-sec-label"><i class="fa-solid fa-note-sticky" style="font-size:10px"></i> Notes</div>${dictationControlHtml(`hm-note-${domToken}`,'heatmap note')}</div>
         <textarea class="hm-ins-ta" id="hm-note-${domToken}" placeholder="Add or edit notes…">${escapeHtml(t.notes||'')}</textarea>
+        ${dictationStatusHtml(`hm-note-${domToken}`)}
         <div class="hm-ins-save-row">
           <span class="hm-ins-saved" id="hm-saved-${domToken}" style="display:none"><i class="fa-solid fa-check"></i> Saved</span>
           <button class="hm-ins-save" onclick="hmSaveNote(${tradeArg})"><i class="fa-solid fa-floppy-disk"></i> Save</button>
@@ -10135,9 +10241,11 @@ function renderHmInsert(t, container){
   // auto-save on blur
   const ta = document.getElementById(`hm-note-${domToken}`);
   if(ta) ta.addEventListener('blur', ()=>hmSaveNote(t.id));
+  refreshDictationControls();
 }
 
 async function hmSaveNote(id){
+  stopDictation({quiet:true,immediate:true});
   const domToken=safeDomId(id);
   const ta = document.getElementById(`hm-note-${domToken}`);
   if(!ta) return;
@@ -11296,130 +11404,10 @@ let djDate = TODAY; // currently viewed date
 const DJ_MOODS_PRE  = ['Focused','Calm','Anxious','Tired','Excited','Stressed','Confident','Neutral'];
 const DJ_MOODS_EOD  = ['Calm','Focused','Confident','Frustrated','Anxious','Greedy','Disappointed','Satisfied'];
 
-let djVoiceRecognition = null;
-let djVoiceListening = false;
-let djVoiceTargetDate = null;
-let djVoiceBaseText = '';
-let djVoiceFinalText = '';
-let djVoiceInterimText = '';
-
-function djSpeechRecognitionCtor(){
-  return window.SpeechRecognition||window.webkitSpeechRecognition||null;
-}
-function djJoinVoiceText(base, transcript){
-  const existing=String(base||'');
-  const spoken=String(transcript||'').replace(/\s+/g,' ').trim();
-  if(!spoken) return existing;
-  if(!existing) return spoken;
-  return existing+(/\s$/.test(existing)?'':'\n')+spoken;
-}
-function djSetVoiceStatus(message,state=''){
-  const status=document.getElementById('dj-voice-status');
-  if(!status) return;
-  status.textContent=message;
-  status.classList.remove('dj-listening','dj-ready');
-  if(state) status.classList.add(state);
-}
-function djRefreshVoiceControls(){
-  const button=document.getElementById('dj-voice-btn');
-  if(!button) return;
-  const supported=!!djSpeechRecognitionCtor();
-  const active=djVoiceListening&&djVoiceTargetDate===djDate;
-  button.disabled=!supported;
-  button.classList.toggle('dj-listening',active);
-  button.setAttribute('aria-pressed',String(active));
-  button.setAttribute('aria-label',active?'Stop voice journal':'Start voice journal');
-  const label=button.querySelector('span');
-  if(label) label.textContent=active?'Stop listening':'Start voice journal';
-  const icon=button.querySelector('i');
-  if(icon) icon.className=active?'fa-solid fa-stop':'fa-solid fa-microphone';
-  if(!supported){
-    djSetVoiceStatus('Voice dictation is not supported in this browser. You can still type your entry.');
-  }else if(active){
-    djSetVoiceStatus('Listening… speak naturally. Your existing notes are safe.','dj-listening');
-  }
-}
-function djRenderVoiceTranscript(){
-  if(djVoiceTargetDate!==djDate) return;
-  const textarea=document.getElementById('dj-notes');
-  if(!textarea) return;
-  textarea.value=djJoinVoiceText(djVoiceBaseText,`${djVoiceFinalText} ${djVoiceInterimText}`);
-}
-function djVoiceErrorMessage(code){
-  if(code==='not-allowed'||code==='service-not-allowed') return 'Microphone permission was blocked. Allow it for Edgebook and try again.';
-  if(code==='audio-capture') return 'No microphone was detected. Check your microphone and try again.';
-  if(code==='network') return 'Speech recognition could not connect. Your existing notes are unchanged.';
-  if(code==='no-speech') return 'No speech was detected. Tap the microphone when you are ready.';
-  return 'Dictation stopped unexpectedly. Any captured transcript is still available to review.';
-}
-function djFinishVoiceJournal(message,state='dj-ready'){
-  djVoiceListening=false;
-  djVoiceRecognition=null;
-  const textarea=document.getElementById('dj-notes');
-  if(textarea) textarea.readOnly=false;
-  djRefreshVoiceControls();
-  djSetVoiceStatus(message,state);
-}
-function djStopVoiceJournal({quiet=false}={}){
-  const recognition=djVoiceRecognition;
-  const hadTranscript=!!(`${djVoiceFinalText} ${djVoiceInterimText}`.trim());
-  djVoiceListening=false;
-  djVoiceRecognition=null;
-  try{recognition?.stop();}catch{}
-  const textarea=document.getElementById('dj-notes');
-  if(textarea) textarea.readOnly=false;
-  djRefreshVoiceControls();
-  if(!quiet){
-    djSetVoiceStatus(hadTranscript?'Transcript added — review it, then save the entry.':'Listening stopped. No transcript was added.',hadTranscript?'dj-ready':'');
-  }
-}
-function djToggleVoiceJournal(){
-  if(djVoiceListening){djStopVoiceJournal();return;}
-  const Recognition=djSpeechRecognitionCtor();
-  const textarea=document.getElementById('dj-notes');
-  if(!Recognition||!textarea){
-    djRefreshVoiceControls();
-    showToast('Voice dictation is not available in this browser','info');
-    return;
-  }
-  const recognition=new Recognition();
-  djVoiceRecognition=recognition;
-  djVoiceListening=true;
-  djVoiceTargetDate=djDate;
-  djVoiceBaseText=textarea.value;
-  djVoiceFinalText='';
-  djVoiceInterimText='';
-  textarea.readOnly=true;
-  recognition.continuous=true;
-  recognition.interimResults=true;
-  recognition.maxAlternatives=1;
-  recognition.lang=navigator.language||'en-IN';
-  recognition.onresult=event=>{
-    if(djVoiceRecognition!==recognition||djVoiceTargetDate!==djDate) return;
-    let interim='';
-    for(let i=event.resultIndex;i<event.results.length;i++){
-      const text=event.results[i]?.[0]?.transcript||'';
-      if(event.results[i].isFinal) djVoiceFinalText+=text+' ';
-      else interim+=text+' ';
-    }
-    djVoiceInterimText=interim;
-    djRenderVoiceTranscript();
-  };
-  recognition.onerror=event=>{
-    if(djVoiceRecognition!==recognition) return;
-    djFinishVoiceJournal(djVoiceErrorMessage(event.error),event.error==='no-speech'?'':'dj-ready');
-  };
-  recognition.onend=()=>{
-    if(djVoiceRecognition!==recognition) return;
-    const hadTranscript=!!(`${djVoiceFinalText} ${djVoiceInterimText}`.trim());
-    djFinishVoiceJournal(hadTranscript?'Transcript added — review it, then save the entry.':'Listening ended. No transcript was added.',hadTranscript?'dj-ready':'');
-  };
-  djRefreshVoiceControls();
-  try{recognition.start();}
-  catch{
-    djFinishVoiceJournal('Could not start dictation. Please try again.','');
-  }
-}
+/* Compatibility entry points now delegate to the single global controller. */
+function djToggleVoiceJournal(){toggleDictation('dj-notes');}
+function djStopVoiceJournal(options={}){if(dictationSession?.spec.context==='dailyjournal')stopDictation({...options,immediate:true});}
+function djRefreshVoiceControls(){refreshDictationControls();}
 
 function djStorageKey(){ return `tradedesk_dailyjournal_${DataStore._uid||'guest'}`; }
 function djDirtyStorageKey(){ return `edgebook_dailyjournal_dirty_${DataStore._uid||'guest'}`; }
@@ -11657,8 +11645,9 @@ function renderDjEntry(){
           ${djYnRow('overtrade','Overtraded?',entry.overtrade)}
           ${djYnRow('positionSizing','Stuck to position sizing?',entry.positionSizing)}
           <div style="margin-top:8px">
-            <span class="dj-field-label">Biggest mistake today</span>
+            <div class="dictation-field-head"><span class="dj-field-label">Biggest mistake today</span>${dictationControlHtml('dj-mistake','biggest mistake')}</div>
             <textarea class="dj-ta" id="dj-mistake" rows="2" placeholder="What went wrong…">${escapeHtml(entry.mistake||'')}</textarea>
+            ${dictationStatusHtml('dj-mistake')}
           </div>
         </div>
       </div>
@@ -11675,16 +11664,19 @@ function renderDjEntry(){
           </div>
         </div>
         <div style="margin-bottom:8px">
-          <span class="dj-field-label">Key lesson learned</span>
+          <div class="dictation-field-head"><span class="dj-field-label">Key lesson learned</span>${dictationControlHtml('dj-keylesson','key lesson')}</div>
           <textarea class="dj-ta" id="dj-keylesson" rows="2" placeholder="What did today teach you…">${escapeHtml(entry.keyLesson||'')}</textarea>
+          ${dictationStatusHtml('dj-keylesson')}
         </div>
         <div style="margin-bottom:8px">
-          <span class="dj-field-label">What I'd do differently</span>
+          <div class="dictation-field-head"><span class="dj-field-label">What I'd do differently</span>${dictationControlHtml('dj-woulddodiff','what you would do differently')}</div>
           <textarea class="dj-ta" id="dj-woulddodiff" rows="2" placeholder="If you replayed today…">${escapeHtml(entry.woulddoDiff||'')}</textarea>
+          ${dictationStatusHtml('dj-woulddodiff')}
         </div>
         <div>
-          <span class="dj-field-label">Tomorrow's intentions</span>
+          <div class="dictation-field-head"><span class="dj-field-label">Tomorrow's intentions</span>${dictationControlHtml('dj-intentions',"tomorrow's intentions")}</div>
           <textarea class="dj-ta" id="dj-intentions" rows="2" placeholder="Your focus and goals for tomorrow…">${escapeHtml(entry.tomorrowIntentions||'')}</textarea>
+          ${dictationStatusHtml('dj-intentions')}
         </div>
       </div>
     </div>
@@ -11693,17 +11685,12 @@ function renderDjEntry(){
     <div class="dj-notes-wrap">
       <div class="dj-notes-head">
         <div class="dj-sec-label" style="margin-bottom:0"><i class="fa-solid fa-notebook" style="font-size:11px"></i> Notes &amp; thoughts</div>
-        <div class="dj-voice-tools">
-          <span class="dj-voice-status" id="dj-voice-status" role="status" aria-live="polite">Your browser handles speech; Edgebook stores only text you save.</span>
-          <button type="button" class="dj-voice-btn" id="dj-voice-btn" onclick="djToggleVoiceJournal()" aria-pressed="false" aria-label="Start voice journal" title="Audio is handled by your browser's speech service and is not stored by Edgebook.">
-            <i class="fa-solid fa-microphone"></i><span>Start voice journal</span>
-          </button>
-        </div>
+        <div class="dj-voice-tools">${dictationStatusHtml('dj-notes')}${dictationControlHtml('dj-notes','journal notes')}</div>
       </div>
       <textarea class="dj-notes-ta" id="dj-notes" rows="6" placeholder="Write freely — thoughts about the market, your mindset, anything on your mind today…">${escapeHtml(entry.notes||'')}</textarea>
     </div>
   `;
-  djRefreshVoiceControls();
+  refreshDictationControls();
 }
 
 function djScoreRow(id, label, current){
@@ -11805,6 +11792,7 @@ let djAutoSaveTimer = null;
 function djAutoSave(){
   clearTimeout(djAutoSaveTimer);
   djAutoSaveTimer = setTimeout(async()=>{
+    if(dictationSession?.spec.context==='dailyjournal'){djAutoSaveTimer=null;return;}
     const synced=await djSaveEntry(djDate, djCollectForm());
     const ind = document.getElementById('dj-saved-indicator');
     if(ind){ ind.textContent=synced?'Saved':'Saved locally · sync pending'; ind.style.display='flex'; setTimeout(()=>ind.style.display='none',2000); }
@@ -11813,6 +11801,7 @@ function djAutoSave(){
 }
 
 async function djSaveForm(){
+  stopDictation({quiet:true,immediate:true});
   const synced=await djSaveEntry(djDate, djCollectForm());
   const ind = document.getElementById('dj-saved-indicator');
   if(ind){ ind.textContent=synced?'Saved':'Saved locally · sync pending'; ind.style.display='flex'; setTimeout(()=>ind.style.display='none',2500); }

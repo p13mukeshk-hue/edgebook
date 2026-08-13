@@ -267,8 +267,10 @@ describe("CTraderMcpSyncEngine", () => {
       "position:9001", "9001", "XAU/USD", "cm", "Long", "2000", "2010", "0.1", "100", false,
     ]);
     expect(JSON.stringify(storedExecutions)).not.toContain("provider-must-not-be-stored");
+    expect(tradeInsert?.sql).not.toMatch(/DO UPDATE SET[\s\S]*?trade_date\s*=\s*EXCLUDED\.trade_date/);
     const brokerData = JSON.parse(String(tradeInsert?.values[20]));
     expect(brokerData).toMatchObject({
+      providerTradeDate: "2026-08-10",
       pnlMethod: "provider_explicit_net_cents",
       grossProfit: null,
       commission: "-5",
@@ -1214,7 +1216,10 @@ describe("CTraderMcpSyncEngine", () => {
     const linkedUpdate = clientQueries.find(({ sql }) =>
       sql.includes("UPDATE trades SET") && sql.includes("pnl=COALESCE($9::numeric,pnl)"));
     expect(linkedUpdate?.values[8]).toBe("23.4");
+    expect(linkedUpdate?.sql).toContain("trade_date=COALESCE(trade_date,$11::date)");
+    expect(linkedUpdate?.sql).not.toContain("trade_date=$11");
     expect(JSON.parse(String(linkedUpdate?.values[15]))).toMatchObject({
+      providerTradeDate: "2026-08-10",
       pnlMethod: "provider_close_detail_money_digits",
       classification: { reconciledManualTrade: true },
     });

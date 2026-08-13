@@ -441,7 +441,6 @@ const providerOwnedTradeFields = [
   "size",
   "pnl",
   "isOpen",
-  "date",
   "entryAt",
   "exitAt",
   "entryTime",
@@ -461,6 +460,21 @@ export function mergeTradePatch(
     && typeof existing.brokerConnectionId === "string"
   ) {
     for (const field of providerOwnedTradeFields) merged[field] = existing[field];
+    // `date` is the user's journal grouping date. Preserve the provider-local
+    // opening date separately before allowing an older imported row to change
+    // it for the first time. cTrader sync owns this locked broker-data field
+    // thereafter, while the journal date remains user-owned.
+    const brokerData = existing.brokerData && typeof existing.brokerData === "object" && !Array.isArray(existing.brokerData)
+      ? existing.brokerData as Record<string, unknown>
+      : {};
+    const providerDate = calendarDateSchema.safeParse(brokerData.providerTradeDate).success
+      ? brokerData.providerTradeDate
+      : calendarDateSchema.safeParse(existing.date).success
+        ? existing.date
+        : null;
+    merged.brokerData = providerDate === null
+      ? brokerData
+      : { ...brokerData, providerTradeDate: providerDate };
   }
   return merged;
 }

@@ -564,27 +564,42 @@ try {
   failures.push(`Theme chart redraw fixture failed: ${error.message}`);
 }
 
-// Daily Journal dictation must remain a review-first, browser-native feature:
-// append to existing notes, expose live status, and never save automatically.
-const journalVoiceSource = sourceBetween('let djVoiceRecognition', 'function djStorageKey');
-requireMatch(app, /id=["']dj-voice-btn["'][\s\S]{0,180}?djToggleVoiceJournal\(\)/, 'visible Daily Journal voice control');
-requireMatch(app, /id=["']dj-voice-status["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/, 'accessible live dictation status');
-requireMatch(journalVoiceSource, /window\.SpeechRecognition\|\|window\.webkitSpeechRecognition/, 'browser speech-recognition compatibility');
-requireMatch(journalVoiceSource, /djVoiceBaseText=textarea\.value/, 'voice transcript preserves existing journal notes');
-requireMatch(journalVoiceSource, /textarea\.value=djJoinVoiceText/, 'voice transcript appends through the safe text-value boundary');
-requireMatch(journalVoiceSource, /Transcript added[^\n]*review it[^\n]*save the entry/, 'review-before-save dictation completion state');
-rejectMatch(journalVoiceSource, /djAutoSave|djSaveEntry/, 'automatic persistence from voice dictation');
-const tradeVoiceSource = sourceBetween('const TRADE_VOICE_TARGETS', 'function openTradeModal');
-for (const target of ['t-psych-prethought', 't-psych-execution', 't-psych-review', 't-notes']) {
-  requireMatch(app, new RegExp(`data-voice-target=["']${target}["'][\\s\\S]{0,160}?toggleTradeVoice\\('${target}'\\)`), `trade dictation control for ${target}`);
-  requireMatch(app, new RegExp(`id=["']voice-status-${target}["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']`), `accessible trade dictation status for ${target}`);
+// Dictation is one privacy-scoped, review-first controller for every narrative field.
+const dictationSource = sourceBetween('/* One privacy-scoped speech recognizer', 'const CTRADER_OWNED_FORM_IDS');
+for (const target of ['t-psych-prethought','t-psych-execution','t-psych-review','t-notes']) {
+  requireMatch(app,new RegExp(`data-dictation-target=["']${target}["'][\\s\\S]{0,160}?toggleDictation\\('${target}'\\)`),`trade dictation control for ${target}`);
 }
+for (const target of ['dj-mistake','dj-keylesson','dj-woulddodiff','dj-intentions','dj-notes']) {
+  requireMatch(app,new RegExp(`dictationControlHtml\\('${target}'`),`Daily Journal dictation control ${target}`);
+}
+for (const target of ['mood-notes-inp','mm-notes']) {
+  requireMatch(app,new RegExp(`data-dictation-target=["']${target}["']`),`mood dictation control ${target}`);
+}
+requireMatch(app,/\^cf-v-\[A-Za-z0-9_-\]\+\$[\s\S]{0,120}?context:'trade'/,'dynamic custom free-text dictation allowlist');
+requireMatch(app,/\^hm-note-\[A-Za-z0-9_-\]\+\$[\s\S]{0,120}?context:'heatmap'/,'dynamic heatmap-note dictation allowlist');
+requireMatch(app,/if\(cf\.type==='text'\)[^\n]*dictationControlHtml\(id,cf\.label\)/,'dynamic custom free-text dictation control');
+requireMatch(app,/dictationControlHtml\(`hm-note-\$\{domToken\}`,'heatmap note'\)/,'dynamic heatmap dictation control');
 requireMatch(app, /\.trade-voice-wave b\{[^}]*animation:tradeVoiceWave/, 'animated live trade dictation waveform');
-requireMatch(tradeVoiceSource, /window\.SpeechRecognition\|\|window\.webkitSpeechRecognition/, 'trade speech-recognition compatibility');
-requireMatch(tradeVoiceSource, /tradeVoiceBaseText=textarea\.value/, 'trade dictation preserves existing text');
-requireMatch(tradeVoiceSource, /textarea\.value=tradeJoinVoiceText/, 'trade dictation appends through the safe text-value boundary');
-requireMatch(tradeVoiceSource, /Transcript added[^\n]*review it before saving the trade/, 'review-before-save trade dictation completion state');
-rejectMatch(tradeVoiceSource, /saveTrade\s*\(/, 'automatic trade persistence from voice dictation');
+requireMatch(dictationSource,/globalThis\.isSecureContext!==true/,'secure-context dictation gate');
+requireMatch(dictationSource,/window\.SpeechRecognition\|\|window\.webkitSpeechRecognition/,'browser speech-recognition compatibility');
+requireMatch(dictationSource,/baseText:element\.value/,'dictation preserves existing text');
+requireMatch(dictationSource,/session\.interimText[\s\S]{0,180}?finishDictation/,'interim transcript promotion before teardown');
+requireMatch(dictationSource,/recognition\.abort\(\)/,'immediate privacy stop');
+requireMatch(dictationSource,/visibilitychange[\s\S]{0,180}?pagehide/,'background/page-exit privacy teardown');
+requireMatch(dictationSource,/service-not-allowed[\s\S]{0,180}?Chrome or Edge/,'unavailable speech-service fallback');
+requireMatch(dictationSource,/spec\.context==='dailyjournal'[\s\S]{0,120}?clearTimeout\(djAutoSaveTimer\)/,'Daily Journal pending autosave cancellation on dictation start');
+rejectMatch(dictationSource,/saveTrade\s*\(|djSaveForm\s*\(|saveMoodEntry\s*\(|hmSaveNote\s*\(/,'automatic persistence from dictation');
+for (const [start,end,readMarker,label] of [
+  ['async function saveTrade','/* ═══ END TRADE FORM',"document.getElementById('t-sym-select')",'trade save'],
+  ['async function saveMoodEntry','async function saveModalMood','moodEmoji','mood-page save'],
+  ['async function saveModalMood','function refreshAll','modalEmoji','mood-modal save'],
+  ['async function hmSaveNote','async function hmAddScreenshots','const ta =','heatmap-note save'],
+  ['async function djSaveForm','// also auto-save on textarea blur','djCollectForm()','Daily Journal save'],
+]) {
+  const saveSource=sourceBetween(start,end),stopIndex=saveSource.indexOf('stopDictation({quiet:true,immediate:true})'),readIndex=saveSource.indexOf(readMarker);
+  if(stopIndex<0||readIndex<0||stopIndex>readIndex)failures.push(`Missing: ${label} freezes dictation before reading the field`);
+}
+requireMatch(sourceBetween('function renderHeatmap','function buildHmGridWithInsert'),/stopDictation\(\{quiet:true,immediate:true\}\)/,'heatmap redraw privacy teardown');
 const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
 const equityAxisDomainSource = sourceBetween('function equityAxisDomain', 'function setDashboardInsightEmpty');
 const equityProjectionContext = {};
@@ -1001,6 +1016,9 @@ requireMatch(app, /function cTraderReviewRevision[\s\S]*?realizedEvents[\s\S]*?e
 requireMatch(app, /function cTraderTradeNeedsReview[\s\S]*?edgebookReview/, 'cTrader needs-review detection');
 requireMatch(app, /cfVals\.edgebookReview=\{version:1,providerRevision:cTraderReviewRevision\(existingTrade\)/, 'cTrader review acknowledgement on journal save');
 requireMatch(app, /const CTRADER_OWNED_FORM_IDS=[\s\S]*?function setTradeBrokerOwnedMode/, 'cTrader broker-owned form lock');
+requireMatch(app, /const CTRADER_OWNED_FORM_IDS=\[[^\]]*['"]t-time['"][^\]]*\]/, 'cTrader execution-time form lock');
+rejectMatch(app.match(/const CTRADER_OWNED_FORM_IDS=\[[^\]]*\]/)?.[0] || '', /['"]t-date['"]/, 'cTrader journal-date form lock');
+requireMatch(app, /id="t-date-label"[\s\S]*?id="t-date"[\s\S]*?id="t-date-help"/, 'editable cTrader journal-date explanation');
 requireMatch(app, /cTraderReviewBadge\(t\)/, 'cTrader needs-review table badge');
 requireMatch(app, /id="sn-brokers"[^>]*showBrokerConnections/, 'dedicated broker sync settings navigation');
 requireMatch(app, /cTrader automatic sync[\s\S]*?Setup required[\s\S]*?never paste a broker password, API secret, or access token/, 'visible fail-closed cTrader setup card');
@@ -1366,20 +1384,34 @@ try {
     if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${reviewStableJson(value[key])}`).join(',')}}`;
     return JSON.stringify(value) ?? 'null';
   };
+  const reviewElements = new Map([
+    ['t-date-label', { textContent: '' }],
+    ['t-date-help', { textContent: '' }],
+    ['broker-owned-note', { classList: { toggle() {} } }],
+    ...['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-date','t-time']
+      .map(id => [id, { disabled: false }]),
+  ]);
   const { exports: review } = evaluateSecurityFixture(
     reviewSource,
     {
       stableJson: reviewStableJson,
       tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
+      isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
+      document: { getElementById: id => reviewElements.get(id) || null },
     },
-    '{cTraderReviewRevision,cTraderTradeNeedsReview}',
+    '{cTraderReviewRevision,cTraderTradeNeedsReview,cTraderProviderTradeDate,setTradeBrokerOwnedMode}',
   );
-  const imported = { source: 'ctrader', isOpen: true, entryAt: '2026-08-11T01:00:00.000Z', brokerData: { realizedEvents: [] }, custom: {} };
+  const imported = { source: 'ctrader', isOpen: true, date: '2026-08-11', entryAt: '2026-08-11T01:00:00.000Z', brokerData: { providerTradeDate: '2026-08-11', realizedEvents: [] }, custom: {} };
   if (!review.cTraderTradeNeedsReview(imported)) failures.push('A newly imported cTrader trade was not marked for review');
   const reviewed = { ...imported, custom: { edgebookReview: { providerRevision: review.cTraderReviewRevision(imported) } } };
   if (review.cTraderTradeNeedsReview(reviewed)) failures.push('An unchanged reviewed cTrader trade remained marked for review');
   const closed = { ...reviewed, isOpen: false, exitAt: '2026-08-11T02:00:00.000Z', brokerData: { realizedEvents: [{ executionId: 'close-1', executedAt: '2026-08-11T02:00:00.000Z', pnl: '12.5' }] } };
   if (!review.cTraderTradeNeedsReview(closed)) failures.push('A newly closed cTrader trade did not return to needs-review state');
+  review.setTradeBrokerOwnedMode(imported);
+  if (reviewElements.get('t-date').disabled) failures.push('cTrader journal date was locked with provider-owned execution facts');
+  if (!reviewElements.get('t-time').disabled || !reviewElements.get('t-entry').disabled || !reviewElements.get('t-sym').disabled) failures.push('cTrader provider execution facts were left editable');
+  if (reviewElements.get('t-date-label').textContent !== 'Journal date' || !/sync will not overwrite/i.test(reviewElements.get('t-date-help').textContent)) failures.push('cTrader journal date ownership was not explained');
+  if (review.cTraderProviderTradeDate({ date: '2026-08-12', brokerData: { providerTradeDate: '2026-08-11' } }) !== '2026-08-11') failures.push('cTrader provider date did not remain distinct from edited journal date');
 } catch (error) {
   failures.push(`cTrader review lifecycle fixture failed: ${error.message}`);
 }
@@ -1807,6 +1839,9 @@ try {
       document,
       window: securityWindow,
       S: { customFields: [{ id: maliciousIdentifier, label: maliciousMarkup, type: 'select', options: `Safe,${maliciousMarkup}`, section: 'trade', order: 0 }] },
+      dictationControlHtml: () => '',
+      dictationStatusHtml: () => '',
+      refreshDictationControls() {},
     },
     '{buildCustomFieldsForm}',
   );
@@ -2177,6 +2212,7 @@ try {
       hmGroup: 'strategy',
       hmSelected: null,
       buildHmAcctFilter() {},
+      stopDictation() {},
       hmFilteredTrades: () => [maliciousHeatmapTrade],
       buildHmGridWithInsert() {},
       acctCur: () => '$',
@@ -2220,6 +2256,9 @@ try {
       djScoreRow: () => '',
       djYnRow: () => '',
       djRefreshVoiceControls() {},
+      dictationControlHtml: () => '',
+      dictationStatusHtml: () => '',
+      refreshDictationControls() {},
       cur: () => '$',
       acctCur: () => '$',
     },
@@ -2265,56 +2304,47 @@ try {
       contains: item => set.has(item),
     };
   };
-  const voiceLabel = { textContent: '' };
-  const voiceIcon = { className: '' };
-  const voiceButton = {
-    disabled: false,
-    classList: classSet(['dj-voice-btn']),
-    attributes: {},
-    setAttribute(name, value) { this.attributes[name] = String(value); },
-    querySelector(selector) { return selector === 'span' ? voiceLabel : selector === 'i' ? voiceIcon : null; },
-  };
-  const voiceStatus = { textContent: '', classList: classSet(['dj-voice-status']) };
-  const voiceNotes = { value: 'Existing note.', readOnly: false };
-  const voiceElements = new Map([
-    ['dj-voice-btn', voiceButton],
-    ['dj-voice-status', voiceStatus],
-    ['dj-notes', voiceNotes],
-  ]);
+  const voiceIcon={className:''};
+  const voiceButton={dataset:{dictationTarget:'dj-notes'},disabled:false,title:'',classList:classSet(['trade-voice-btn']),attributes:{},setAttribute(name,value){this.attributes[name]=String(value);},querySelector(selector){return selector==='i'?voiceIcon:null;}};
+  const voiceStatus={textContent:'',classList:classSet(['dictation-status'])};
+  const listeners={};
+  const voiceNotes={value:'Existing note.',readOnly:false,addEventListener(type,fn){listeners[type]=fn;},removeEventListener(type,fn){if(listeners[type]===fn)delete listeners[type];}};
+  const voiceElements=new Map([['dj-notes',voiceNotes],['voice-status-dj-notes',voiceStatus]]);
   const recognizers = [];
   class FakeSpeechRecognition {
     constructor() { recognizers.push(this); }
     start() { this.started = true; }
     stop() { this.stopped = true; }
+    abort() { this.aborted = true; }
   }
+  const noop=()=>{};
+  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,djAutoSaveTimer=null;\n${dictationSource}`;
   const { exports: voice } = evaluateSecurityFixture(
-    journalVoiceSource,
+    fixtureSource,
     {
-      document: { getElementById: id => voiceElements.get(id) || null },
-      window: { SpeechRecognition: FakeSpeechRecognition },
+      document: {documentElement:{lang:'en'},getElementById:id=>voiceElements.get(id)||null,querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],addEventListener:noop,visibilityState:'visible'},
+      window: { SpeechRecognition: FakeSpeechRecognition,addEventListener:noop },
       navigator: { language: 'en-IN' },
-      djDate: '2026-08-09',
-      showToast() {},
+      isSecureContext:true,showToast(){},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout:()=>1,
     },
-    '{djToggleVoiceJournal,djStopVoiceJournal,djJoinVoiceText,djVoiceErrorMessage}',
+    '{toggleDictation,stopDictation,dictationErrorMessage}',
   );
-  voice.djToggleVoiceJournal();
+  voice.toggleDictation('dj-notes');
   const recognition = recognizers[0];
   const finalResult = [{ transcript: 'Waited for confirmation' }];
   finalResult.isFinal = true;
-  recognition.onresult({ resultIndex: 0, results: [finalResult] });
   const interimResult = [{ transcript: 'while risk stayed small' }];
   interimResult.isFinal = false;
-  recognition.onresult({ resultIndex: 0, results: [interimResult] });
+  recognition.onresult({ resultIndex: 0, results: [finalResult,interimResult] });
   const expectedTranscript = 'Existing note.\nWaited for confirmation while risk stayed small';
-  if (!recognition.started || !voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
+  if (!recognition.started || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
     failures.push('Daily-journal dictation did not append its live transcript without overwriting existing notes');
   }
-  voice.djStopVoiceJournal();
-  if (!recognition.stopped || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'false' || !/review it.*save/i.test(voiceStatus.textContent)) {
+  voice.stopDictation({immediate:true});
+  if (!recognition.aborted || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'false' || !/review it.*saving/i.test(voiceStatus.textContent)) {
     failures.push('Daily-journal dictation did not return to an editable review-before-save state');
   }
-  if (!/permission/i.test(voice.djVoiceErrorMessage('not-allowed'))) {
+  if (!/permission/i.test(voice.dictationErrorMessage('not-allowed'))) {
     failures.push('Daily-journal dictation does not explain blocked microphone permission');
   }
 } catch (error) {
@@ -2322,79 +2352,25 @@ try {
 }
 
 try {
-  const classSet = values => {
-    const set = new Set(values);
-    return {
-      add: (...items) => items.forEach(item => set.add(item)),
-      remove: (...items) => items.forEach(item => set.delete(item)),
-      toggle: (item, force) => {
-        if (force === true) { set.add(item); return true; }
-        if (force === false) { set.delete(item); return false; }
-        if (set.has(item)) { set.delete(item); return false; }
-        set.add(item); return true;
-      },
-      contains: item => set.has(item),
-    };
-  };
-  const tradeVoiceIcon = { className: '' };
-  const tradeVoiceButton = {
-    dataset: { voiceTarget: 't-notes' },
-    disabled: false,
-    title: '',
-    classList: classSet(['trade-voice-btn']),
-    attributes: {},
-    setAttribute(name, value) { this.attributes[name] = String(value); },
-    querySelector(selector) { return selector === 'i' ? tradeVoiceIcon : null; },
-  };
-  const tradeVoiceStatus = { textContent: '', classList: classSet(['trade-voice-status']) };
-  const tradeVoiceNotes = { value: 'Existing trade note.', readOnly: false };
-  const tradeVoiceElements = new Map([
-    ['t-notes', tradeVoiceNotes],
-    ['voice-status-t-notes', tradeVoiceStatus],
-  ]);
-  const tradeRecognizers = [];
-  class FakeTradeSpeechRecognition {
-    constructor() { tradeRecognizers.push(this); }
-    start() { this.started = true; }
-    stop() { this.stopped = true; }
-  }
-  const tradeVoiceState = "let tradeVoiceRecognition=null,tradeVoiceTarget=null,tradeVoiceBaseText='',tradeVoiceFinalText='',tradeVoiceInterimText='';\n";
-  const { exports: tradeVoice } = evaluateSecurityFixture(
-    tradeVoiceState + tradeVoiceSource,
+  let queuedTimer=null,saveCalls=0;
+  const autoSaveSource=sourceBetween('let djAutoSaveTimer', 'async function djSaveForm');
+  const {context,exports:autoSave}=evaluateSecurityFixture(
+    autoSaveSource,
     {
-      document: {
-        getElementById: id => tradeVoiceElements.get(id) || null,
-        querySelectorAll: selector => selector === '[data-voice-target]' ? [tradeVoiceButton] : [],
-      },
-      window: { SpeechRecognition: FakeTradeSpeechRecognition },
-      navigator: { language: 'en-IN' },
-      showToast() {},
+      dictationSession:{spec:{context:'dailyjournal'}},
+      clearTimeout(){},setTimeout(fn){queuedTimer=fn;return 7;},
+      djDate:'2026-08-09',djCollectForm:()=>({notes:'draft'}),
+      async djSaveEntry(){saveCalls+=1;return true;},
+      document:{getElementById:()=>null},renderDjFeed(){},
     },
-    '{toggleTradeVoice,stopTradeVoice,tradeJoinVoiceText,tradeVoiceErrorMessage}',
+    '{djAutoSave,getTimer:()=>djAutoSaveTimer}',
   );
-  tradeVoice.toggleTradeVoice('t-notes');
-  const recognition = tradeRecognizers[0];
-  const finalResult = [{ transcript: 'Waited for the sweep' }];
-  finalResult.isFinal = true;
-  recognition.onresult({ resultIndex: 0, results: [finalResult] });
-  const interimResult = [{ transcript: 'before entering' }];
-  interimResult.isFinal = false;
-  recognition.onresult({ resultIndex: 0, results: [interimResult] });
-  const expectedTranscript = 'Existing trade note.\nWaited for the sweep before entering';
-  if (!recognition.started || !tradeVoiceNotes.readOnly || tradeVoiceButton.attributes['aria-pressed'] !== 'true' ||
-      !tradeVoiceButton.classList.contains('is-listening') || tradeVoiceNotes.value !== expectedTranscript) {
-    failures.push('Trade dictation did not append a live transcript with the animated listening state');
-  }
-  tradeVoice.stopTradeVoice();
-  if (!recognition.stopped || tradeVoiceNotes.readOnly || tradeVoiceButton.attributes['aria-pressed'] !== 'false' ||
-      !/review it.*saving the trade/i.test(tradeVoiceStatus.textContent)) {
-    failures.push('Trade dictation did not return to an editable review-before-save state');
-  }
-  if (!/permission/i.test(tradeVoice.tradeVoiceErrorMessage('not-allowed'))) {
-    failures.push('Trade dictation does not explain blocked microphone permission');
-  }
-} catch (error) {
-  failures.push(`Trade voice fixture failed: ${error.message}`);
+  autoSave.djAutoSave();await queuedTimer();
+  if(saveCalls!==0||autoSave.getTimer()!==null)failures.push('Daily Journal autosave did not drop a pending callback while dictation was active');
+  context.dictationSession=null;autoSave.djAutoSave();await queuedTimer();
+  if(saveCalls!==1)failures.push('Daily Journal autosave did not resume after dictation ended and the user blurred again');
+} catch(error){
+  failures.push(`Daily-journal autosave/dictation fixture failed: ${error.message}`);
 }
 
 const coachingFunctions = app.match(/function coachingLabel[\s\S]*?(?=\nasync function openAIReport)/)?.[0];
@@ -2940,6 +2916,42 @@ catch (error) { createConflictRejected = error?.status === 409; }
 if (!createConflictRejected || conflictRecoveryReads !== 0) {
   failures.push('Trade-create recovery treated a deterministic 409 conflict as an ambiguous commit');
 }
+
+// The first journal-date edit of an older cTrader row may atomically backfill
+// locked providerTradeDate metadata. A lost PATCH response must compare only
+// user-owned journal fields, while still rejecting a different canonical date.
+const cTraderDatePatch = {
+  id: 'ctrader-trade-1', version: 4, source: 'ctrader', sourceSystem: 'ctrader',
+  brokerConnectionId: '00000000-0000-4000-8000-000000000099',
+  date: '2026-08-12', sl: 4135, tp: 4170, notes: 'reviewed',
+  psychology: { review: 'patient exit' }, custom: { setupGrade: 'A' },
+  symbol: 'XAUUSD', entry: 4144, exit: 4150, size: 0.02,
+  brokerData: { provider: 'ctrader', positionId: '4556640' },
+};
+const cTraderPatchAdapter = canonicalDate => createVpsDataAdapter({
+  async patch() {
+    const error = new Error('PATCH response lost after commit');
+    error.code = 'NETWORK_ERROR';
+    throw error;
+  },
+  async get() {
+    return { trade: {
+      ...cTraderDatePatch,
+      date: canonicalDate,
+      version: 5,
+      entry: 4144.5,
+      brokerData: { ...cTraderDatePatch.brokerData, providerTradeDate: '2026-08-11' },
+    } };
+  },
+});
+const recoveredCTraderDate = await cTraderPatchAdapter('2026-08-12').trades.patch('ctrader-trade-1', cTraderDatePatch);
+if (recoveredCTraderDate?.trade?.date !== '2026-08-12' || recoveredCTraderDate?.trade?.brokerData?.providerTradeDate !== '2026-08-11') {
+  failures.push('Lost cTrader journal-date PATCH did not accept canonical provider metadata backfill');
+}
+let mismatchedCTraderDateRejected = false;
+try { await cTraderPatchAdapter('2026-08-13').trades.patch('ctrader-trade-1', cTraderDatePatch); }
+catch (error) { mismatchedCTraderDateRejected = error?.latestTrade?.date === '2026-08-13'; }
+if (!mismatchedCTraderDateRejected) failures.push('Lost cTrader journal-date PATCH accepted a different canonical journal date');
 
 // A network error after commit is reconciled by reading the authoritative
 // settings value. This avoids retrying with a stale version and reporting a

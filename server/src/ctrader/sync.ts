@@ -739,6 +739,8 @@ export class CTraderSyncEngine {
       ctidTraderAccountId: input.connection.external_account_id,
       positionId: projection.positionId,
       symbolId: projection.symbolId,
+      providerTradeDate: projection.tradeDate,
+      providerTradeDateTimeZone: this.config.cTrader.tradingTimeZone,
       openedVolumeCents: projection.openedVolumeCents,
       closedVolumeCents: projection.closedVolumeCents,
       openVolumeCents: projection.openVolumeCents,
@@ -777,7 +779,6 @@ export class CTraderSyncEngine {
          quantity=EXCLUDED.quantity,
          pnl=EXCLUDED.pnl,
          is_open=EXCLUDED.is_open,
-         trade_date=EXCLUDED.trade_date,
          entry_at=EXCLUDED.entry_at,
          exit_at=EXCLUDED.exit_at,
          legacy_entry_time=EXCLUDED.legacy_entry_time,
@@ -789,14 +790,14 @@ export class CTraderSyncEngine {
          trades.account_id, trades.legacy_account_id, trades.broker_trade_id,
          trades.symbol, trades.asset, trades.instrument, trades.direction,
          trades.entry_price, trades.exit_price, trades.quantity, trades.pnl,
-         trades.is_open, trades.trade_date, trades.entry_at, trades.exit_at,
+         trades.is_open, trades.entry_at, trades.exit_at,
          trades.legacy_entry_time, trades.legacy_exit_time, trades.broker_data,
          trades.calculation_version
        ) IS DISTINCT FROM (
          EXCLUDED.account_id, EXCLUDED.legacy_account_id, EXCLUDED.broker_trade_id,
          EXCLUDED.symbol, EXCLUDED.asset, EXCLUDED.instrument, EXCLUDED.direction,
          EXCLUDED.entry_price, EXCLUDED.exit_price, EXCLUDED.quantity, EXCLUDED.pnl,
-         EXCLUDED.is_open, EXCLUDED.trade_date, EXCLUDED.entry_at, EXCLUDED.exit_at,
+         EXCLUDED.is_open, EXCLUDED.entry_at, EXCLUDED.exit_at,
          EXCLUDED.legacy_entry_time, EXCLUDED.legacy_exit_time, EXCLUDED.broker_data,
          EXCLUDED.calculation_version
        )

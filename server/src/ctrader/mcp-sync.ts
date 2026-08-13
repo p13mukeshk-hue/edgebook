@@ -1613,6 +1613,8 @@ function projectMcpPosition(
       readOnly: true,
       positionId: first.positionId,
       symbolId: first.symbolId,
+      providerTradeDate: entryLocal.date,
+      providerTradeDateTimeZone: timeZone,
       openedVolumeCents: opened.toString(),
       closedVolumeCents: closed.toString(),
       openVolumeCents: openVolume.toString(),
@@ -3694,7 +3696,7 @@ export class CTraderMcpSyncEngine {
         brokerRow?.id ?? null, brokerRow?.row_version ?? null,
         classification, match.confidence, json(match.reasons), json(match.differences),
         json({ manualChoices: choices, preservedFields: [
-          "id", "created_at", "strategy", "emotion", "notes", "tags",
+          "id", "created_at", "trade_date", "strategy", "emotion", "notes", "tags",
           "psychology", "custom_fields", "stop_loss", "take_profit", "files",
         ] }),
         json(projectionRecord), projectionFingerprint,
@@ -3736,6 +3738,7 @@ export class CTraderMcpSyncEngine {
       }
       const brokerData = {
         ...projection.brokerData,
+        providerTradeDate: projection.tradeDate,
         classification: {
           ...objectValue(projection.brokerData.classification),
           projectionQuarantined: false,
@@ -3751,7 +3754,7 @@ export class CTraderMcpSyncEngine {
            symbol=$3, asset=COALESCE($4::text,asset), instrument=$3, direction=$5,
            entry_price=$6, exit_price=COALESCE($7::numeric,exit_price), quantity=$8,
            pnl=COALESCE($9::numeric,pnl), is_open=$10,
-           trade_date=$11, entry_at=$12, exit_at=COALESCE($13::timestamptz,exit_at),
+           trade_date=COALESCE(trade_date,$11::date), entry_at=$12, exit_at=COALESCE($13::timestamptz,exit_at),
            legacy_entry_time=$14, legacy_exit_time=COALESCE($15::time,legacy_exit_time),
            broker_data=broker_data || $16::jsonb,
            calculation_version=2,
@@ -3772,7 +3775,7 @@ export class CTraderMcpSyncEngine {
              OR exit_price IS DISTINCT FROM COALESCE($7::numeric,exit_price)
              OR quantity IS DISTINCT FROM $8::numeric
              OR pnl IS DISTINCT FROM COALESCE($9::numeric,pnl)
-             OR is_open IS DISTINCT FROM $10 OR trade_date IS DISTINCT FROM $11::date
+             OR is_open IS DISTINCT FROM $10
              OR entry_at IS DISTINCT FROM $12::timestamptz
              OR exit_at IS DISTINCT FROM COALESCE($13::timestamptz,exit_at)
              OR legacy_entry_time IS DISTINCT FROM $14::time
@@ -3842,6 +3845,7 @@ export class CTraderMcpSyncEngine {
     }
     const brokerData = {
       ...projection.brokerData,
+      providerTradeDate: projection.tradeDate,
       classification: {
         ...objectValue(projection.brokerData.classification),
         projectionQuarantined: false,
@@ -3880,7 +3884,6 @@ export class CTraderMcpSyncEngine {
          quantity=EXCLUDED.quantity,
          pnl=EXCLUDED.pnl,
          is_open=EXCLUDED.is_open,
-         trade_date=EXCLUDED.trade_date,
          entry_at=EXCLUDED.entry_at,
          exit_at=EXCLUDED.exit_at,
          legacy_entry_time=EXCLUDED.legacy_entry_time,
@@ -3899,14 +3902,14 @@ export class CTraderMcpSyncEngine {
          trades.account_id, trades.legacy_account_id, trades.broker_trade_id,
          trades.symbol, trades.asset, trades.instrument, trades.direction,
          trades.entry_price, trades.exit_price, trades.quantity, trades.pnl,
-         trades.is_open, trades.trade_date, trades.entry_at, trades.exit_at,
+         trades.is_open, trades.entry_at, trades.exit_at,
          trades.legacy_entry_time, trades.legacy_exit_time, trades.broker_data,
          trades.calculation_version
        ) IS DISTINCT FROM (
          EXCLUDED.account_id, EXCLUDED.legacy_account_id, EXCLUDED.broker_trade_id,
          EXCLUDED.symbol, EXCLUDED.asset, EXCLUDED.instrument, EXCLUDED.direction,
          EXCLUDED.entry_price, EXCLUDED.exit_price, EXCLUDED.quantity, EXCLUDED.pnl,
-         EXCLUDED.is_open, EXCLUDED.trade_date, EXCLUDED.entry_at, EXCLUDED.exit_at,
+         EXCLUDED.is_open, EXCLUDED.entry_at, EXCLUDED.exit_at,
          EXCLUDED.legacy_entry_time, EXCLUDED.legacy_exit_time, EXCLUDED.broker_data,
          EXCLUDED.calculation_version
        )

@@ -320,8 +320,13 @@ describe("cTrader live reconciliation service", () => {
       entry.sql.includes("UPDATE trades SET") && entry.sql.includes("broker_connection_id=$1"));
     expect(update?.sql).toContain("exit_price=COALESCE($8,exit_price)");
     expect(update?.sql).toContain("pnl=COALESCE($10,pnl)");
+    expect(update?.sql).toContain("trade_date=COALESCE(trade_date,$12::date)");
     expect(update?.sql).not.toMatch(/\b(strategy|emotion|notes|tags|psychology|custom_fields|created_at)\s*=/);
     expect(update?.values[9]).toBeNull();
+    expect(JSON.parse(String(update?.values[16]))).toMatchObject({
+      provider: "ctrader",
+      providerTradeDate: "2026-08-11",
+    });
     expect(update?.values.slice(17)).toEqual([manualTradeId, userId, 4]);
     expect(queries.some((entry) => entry.sql.includes("UPDATE file_objects"))).toBe(false);
 
@@ -329,6 +334,9 @@ describe("cTrader live reconciliation service", () => {
     expect(String(ledger?.values[8])).toContain("Fibonacci continuation");
     expect(String(ledger?.values[8])).toContain("keep-me");
     expect(String(ledger?.values[10])).toContain("dealIds");
+    const audit = queries.find((entry) => entry.sql.includes("ctrader.live_reconciliation_resolved"));
+    expect(audit?.sql).toContain("CASE WHEN $5::text='link_manual'");
+    expect(audit?.sql).toContain("'trade_date','stop_loss','take_profit'");
     expect(events.publish).toHaveBeenCalledTimes(2);
   });
 

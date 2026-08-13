@@ -12,8 +12,25 @@ const serverManagedTradeFields = new Set([
   'version', 'updatedAt', 'createdAt', 'deletedAt', 'recordId', 'exact',
 ]);
 
-const patchMatchesCurrentTrade = (current, fields) => Object.entries(fields || {}).every(([key, value]) =>
-  serverManagedTradeFields.has(key) || stableJson(current?.[key]) === stableJson(value));
+const cTraderJournalTradeFields = new Set([
+  'date', 'sl', 'tp', 'strategy', 'emotion', 'notes', 'tags', 'psychology',
+  'custom', 'screenshots',
+]);
+
+const patchMatchesCurrentTrade = (current, fields) => {
+  const cTraderOwned = String(current?.sourceSystem ?? current?.source ?? '').toLowerCase() === 'ctrader'
+    && typeof current?.brokerConnectionId === 'string';
+  return Object.entries(fields || {}).every(([key, value]) => {
+    if (serverManagedTradeFields.has(key)) return true;
+    // A cTrader PATCH sends the complete cached row, but the server is allowed
+    // to canonicalize/backfill broker facts (including providerTradeDate) and a
+    // concurrent sync may advance them after commit. Prove an ambiguous write
+    // only from the user-owned journal fields; provider facts are deliberately
+    // ignored because PATCH cannot mutate them.
+    if (cTraderOwned && !cTraderJournalTradeFields.has(key)) return true;
+    return stableJson(current?.[key]) === stableJson(value);
+  });
+};
 
 const tradeCreateFields = new Set([
   'id', 'legacyFirebaseDocId', 'accountId', 'internalAccountId', 'brokerConnectionId',

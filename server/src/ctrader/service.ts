@@ -698,6 +698,10 @@ function reviewedProjection(value: unknown): ReviewedProjection | null {
   };
 }
 
+function reviewedProjectionBrokerData(projection: ReviewedProjection): Record<string, unknown> {
+  return { ...projection.brokerData, providerTradeDate: projection.tradeDate };
+}
+
 const historicalImportSelect = `
   SELECT id, broker_connection_id, status, boundary_at, boundary_local, time_zone,
          through_at, normal_history_floor_at_request, normal_history_floor_kind_at_request,
@@ -1960,7 +1964,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
              symbol=$4, asset=COALESCE($5,asset), instrument=$4, direction=$6,
              entry_price=$7, exit_price=COALESCE($8,exit_price),
              quantity=$9, pnl=COALESCE($10,pnl), is_open=$11,
-             trade_date=$12, entry_at=$13, exit_at=COALESCE($14,exit_at),
+             trade_date=COALESCE(trade_date,$12::date), entry_at=$13, exit_at=COALESCE($14,exit_at),
              legacy_entry_time=$15, legacy_exit_time=COALESCE($16,legacy_exit_time),
              broker_data=broker_data || $17::jsonb, calculation_version=2,
              row_version=row_version+1
@@ -1971,7 +1975,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
             projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
-            projection.exitTime, JSON.stringify(projection.brokerData), selectedManualId,
+            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), selectedManualId,
             input.auth.user.id, expectedManualVersion,
           ],
         );
@@ -2017,7 +2021,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
               projection.symbol, projection.asset, projection.direction, projection.entryPrice,
               projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
               projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
-              projection.exitTime, JSON.stringify(projection.brokerData), input.connectionId],
+              projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), input.connectionId],
           );
           await client.query(
             `UPDATE trade_executions SET trade_id=$1
@@ -2093,7 +2097,9 @@ export class PostgresCTraderService implements CTraderBrokerService {
          ) VALUES ($1,$2,'ctrader.live_reconciliation_resolved','ctrader_live_reconciliation_candidate',$3,
            jsonb_build_object('connectionId',$4::text,'action',$5::text,
              'manualTradeId',$6::text,'resolvedTradeId',$7::text,
-             'preservedFields',jsonb_build_array('id','created_at','strategy','emotion','notes','tags','psychology','custom_fields','files')))` ,
+             'preservedFields',CASE WHEN $5::text='link_manual'
+               THEN jsonb_build_array('id','created_at','trade_date','stop_loss','take_profit','strategy','emotion','notes','tags','psychology','custom_fields','files')
+               ELSE '[]'::jsonb END))` ,
         [input.auth.user.id, input.auth.sessionId, input.candidateId, input.connectionId,
           input.action, selectedManualId, resolvedTradeId],
       );
@@ -2296,7 +2302,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
              symbol=$4, asset=COALESCE($5,asset), instrument=$4, direction=$6,
              entry_price=$7, exit_price=COALESCE($8,exit_price),
              quantity=COALESCE($9,quantity), pnl=COALESCE($10,pnl),
-             is_open=$11, trade_date=$12, entry_at=$13,
+             is_open=$11, trade_date=COALESCE(trade_date,$12::date), entry_at=$13,
              exit_at=COALESCE($14,exit_at), legacy_entry_time=$15,
              legacy_exit_time=COALESCE($16,legacy_exit_time),
              broker_data=broker_data || $17::jsonb, calculation_version=2,
@@ -2308,7 +2314,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
             projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
-            projection.exitTime, JSON.stringify(projection.brokerData), candidate.manual_trade_id,
+            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), candidate.manual_trade_id,
             input.auth.user.id, candidate.manual_row_version,
           ],
         );
@@ -2337,7 +2343,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
             projection.exitPrice, projection.quantityLots, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
-            projection.exitTime, JSON.stringify(projection.brokerData), input.connectionId,
+            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), input.connectionId,
           ],
         );
         await client.query(
@@ -2413,7 +2419,9 @@ export class PostgresCTraderService implements CTraderBrokerService {
          ) VALUES ($1,$2,'ctrader.reconciliation_resolved','ctrader_reconciliation_candidate',$3,
            jsonb_build_object('connectionId',$4::text,'importId',$5::text,'action',$6::text,
              'manualTradeId',$7::text,'resolvedTradeId',$8::text,
-             'preservedFields',jsonb_build_array('strategy','emotion','notes','tags','psychology','custom_fields','files')))`,
+             'preservedFields',CASE WHEN $6::text='link_manual'
+               THEN jsonb_build_array('trade_date','stop_loss','take_profit','strategy','emotion','notes','tags','psychology','custom_fields','files')
+               ELSE '[]'::jsonb END))`,
         [
           input.auth.user.id, input.auth.sessionId, input.candidateId, input.connectionId,
           input.importId, input.action, candidate.manual_trade_id, resolvedTradeId,

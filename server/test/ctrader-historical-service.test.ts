@@ -496,9 +496,17 @@ describe("cTrader historical preview service", () => {
     const tradeUpdate = queries.find((entry) =>
       entry.sql.includes("UPDATE trades SET") && entry.sql.includes("broker_connection_id=$1"));
     expect(tradeUpdate?.sql).toContain("broker_data=broker_data || $17::jsonb");
+    expect(tradeUpdate?.sql).toContain("trade_date=COALESCE(trade_date,$12::date)");
+    expect(JSON.parse(String(tradeUpdate?.values[16]))).toMatchObject({
+      provider: "ctrader",
+      providerTradeDate: "2026-08-11",
+    });
     const privateSnapshot = queries.find((entry) =>
       entry.sql.includes("INSERT INTO ctrader_reconciliation_resolutions"));
     expect(String(privateSnapshot?.values[8])).toContain("legacy-safe-sentinel");
+    const audit = queries.find((entry) => entry.sql.includes("ctrader.reconciliation_resolved"));
+    expect(audit?.sql).toContain("CASE WHEN $6::text='link_manual'");
+    expect(audit?.sql).toContain("'trade_date','stop_loss','take_profit'");
   });
 
   it("completes the import after the last pending candidate is non-destructively rejected", async () => {
