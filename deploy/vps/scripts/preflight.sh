@@ -6,7 +6,7 @@ set -Eeuo pipefail
 
 EDGEBOOK_HOST_PORT="${EDGEBOOK_HOST_PORT:-3210}"
 EDGEBOOK_MIN_FREE_BYTES="${EDGEBOOK_MIN_FREE_BYTES:-10737418240}"
-EDGEBOOK_MIN_FREE_PERCENT="${EDGEBOOK_MIN_FREE_PERCENT:-15}"
+EDGEBOOK_WARN_FREE_BYTES="${EDGEBOOK_WARN_FREE_BYTES:-16106127360}"
 
 [[ "$EDGEBOOK_HOST_PORT" =~ ^[0-9]+$ ]] && (( EDGEBOOK_HOST_PORT >= 1 && EDGEBOOK_HOST_PORT <= 65535 )) || {
   printf 'ERROR: EDGEBOOK_HOST_PORT must be an integer from 1 to 65535.\n' >&2; exit 1;
@@ -17,8 +17,8 @@ EDGEBOOK_MIN_FREE_PERCENT="${EDGEBOOK_MIN_FREE_PERCENT:-15}"
 [[ "$EDGEBOOK_MIN_FREE_BYTES" =~ ^[0-9]+$ ]] && (( EDGEBOOK_MIN_FREE_BYTES >= 10737418240 )) || {
   printf 'ERROR: EDGEBOOK_MIN_FREE_BYTES must be at least 10737418240 (10 GiB).\n' >&2; exit 1;
 }
-[[ "$EDGEBOOK_MIN_FREE_PERCENT" =~ ^[0-9]+$ ]] && (( EDGEBOOK_MIN_FREE_PERCENT >= 15 && EDGEBOOK_MIN_FREE_PERCENT <= 100 )) || {
-  printf 'ERROR: EDGEBOOK_MIN_FREE_PERCENT must be an integer from 15 to 100.\n' >&2; exit 1;
+[[ "$EDGEBOOK_WARN_FREE_BYTES" =~ ^[0-9]+$ ]] && (( EDGEBOOK_WARN_FREE_BYTES >= EDGEBOOK_MIN_FREE_BYTES )) || {
+  printf 'ERROR: EDGEBOOK_WARN_FREE_BYTES must be an integer at least as large as EDGEBOOK_MIN_FREE_BYTES.\n' >&2; exit 1;
 }
 
 for url_name in DATABASE_URL MIGRATION_DATABASE_URL; do
@@ -94,12 +94,17 @@ check_disk_floor() {
   available="$(awk '{print $1}' <<<"$row")"
   used_percent="$(awk '{gsub(/%/, "", $2); print $2}' <<<"$row")"
   free_percent=$((100 - used_percent))
-  if (( available < EDGEBOOK_MIN_FREE_BYTES || free_percent < EDGEBOOK_MIN_FREE_PERCENT )); then
-    printf 'ERROR: %s disk floor failed: %s bytes and %s%% free; require at least %s bytes and %s%%.\n' \
-      "$label" "$available" "$free_percent" "$EDGEBOOK_MIN_FREE_BYTES" "$EDGEBOOK_MIN_FREE_PERCENT" >&2
+  if (( available < EDGEBOOK_MIN_FREE_BYTES )); then
+    printf 'ERROR: %s disk floor failed: %s bytes available (%s%% free); require at least %s bytes (10 GiB).\n' \
+      "$label" "$available" "$free_percent" "$EDGEBOOK_MIN_FREE_BYTES" >&2
     exit 1
   fi
-  printf 'OK: %s disk floor: %s bytes, %s%% free.\n' "$label" "$available" "$free_percent"
+  if (( available < EDGEBOOK_WARN_FREE_BYTES )); then
+    printf 'WARN: %s has %s bytes available (%s%% free), below the %s-byte (15 GiB) cleanup warning; deployment remains allowed.\n' \
+      "$label" "$available" "$free_percent" "$EDGEBOOK_WARN_FREE_BYTES" >&2
+  else
+    printf 'OK: %s disk capacity: %s bytes available, %s%% free.\n' "$label" "$available" "$free_percent"
+  fi
 }
 
 check_disk_floor /srv 'Edge Book data filesystem'

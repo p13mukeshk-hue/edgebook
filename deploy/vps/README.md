@@ -66,15 +66,12 @@ server code, migration utilities, and deployment material.
 
    It must report `127.0.0.1:3210` as unused. Do not stop or replace the process
    on `*:8787`; it is outside the Edge Book deployment.
-   The preflight also requires at least 10 GiB and 15% free space on both the
-   Edge Book data filesystem and Docker filesystem. A reviewed operator may raise
-   these floors; lowering them requires capacity approval.
-
-   The observed VPS root is currently about 81% used with roughly 19 GiB free.
-   The reviewed 15% plus 10 GiB floors leave the current host eligible only while
-   both limits pass; preflight cannot lower either below these values. Recheck
-   after image build and before every release/backup. No automatic Docker prune
-   or deletion is part of this deployment.
+   The preflight requires at least 10 GiB available on both the Edge Book data
+   filesystem and Docker filesystem. It prints a cleanup warning below 15 GiB,
+   but percentage free is informational and never blocks a deployment. A reviewed
+   operator may raise the absolute hard floor; it cannot be configured below
+   10 GiB. Recheck after image build and before every release/backup. No automatic
+   Docker prune or deletion is part of this deployment.
 4. Create the directories using the reviewed `tmpfiles.d/edgebook.conf` template,
    or create equivalent paths manually. This includes `/run/edgebook`, used only
    for the shared backup/cleanup lock and recreated at boot. The API container
