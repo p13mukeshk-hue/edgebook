@@ -120,6 +120,7 @@ requireText(nginx, /Content-Security-Policy/, 'production CSP');
 requireText(nginx, /Permissions-Policy\s+"camera=\(\), microphone=\(self\), geolocation=\(\)"/, 'first-party-only microphone permission for journal dictation');
 requireText(nginx, /script-src[^;]*https:\/\/cdn\.jsdelivr\.net/, 'pinned on-device Whisper runtime permitted by CSP');
 requireText(nginx, /connect-src[^;]*https:\/\/huggingface\.co[^;]*https:\/\/\*\.xethub\.hf\.co/, 'on-device Whisper model downloads permitted by CSP');
+requireText(nginx, /worker-src[^;]*'self'[^;]*blob:[^;]*https:\/\/cdn\.jsdelivr\.net/, 'module-worker runtime import permitted by CSP');
 rejectText(nginx, /cloudfunctions\.net|firebaseio\.com|firebasestorage|www\.gstatic\.com\/firebasejs/, 'Firebase/Cloud Functions origin in production proxy policy');
 
 const build = read('deploy/vps/scripts/build-public.sh');
