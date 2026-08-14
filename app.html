@@ -3508,7 +3508,7 @@ let editId=null, moodEmoji='', modalEmoji='';
 let _tradeModalGeneration=0;
 let _tradeDraftCommittedId=null;
 let _tradeDraftId=null, _tradeSaveInFlight=false, _dupResolutionInFlight=false;
-let dictationSession=null, dictationServiceBlocked=false;
+let dictationSession=null, dictationServiceBlocked=false, dictationLocalInstallTarget=null, dictationLocalInstalling=false, dictationInstallRequest=0;
 let activeAcctId='all';   // 'all' or account id string
 let activeSymbolTab='eq'; // symbol manager tab
 let selectedNewAcctColor=ACCT_COLORS[0];
@@ -6920,6 +6920,27 @@ function dictationCapability(){
   if(dictationServiceBlocked)return {available:false,message:'This browser cannot access its speech service. Use Chrome or Edge, or type here.'};
   return {available:true,message:''};
 }
+const DICTATION_LOCAL_LANGUAGE='en-US';
+const DICTATION_LOCAL_PREF_KEY='edgebook.dictation.local.en-US.v1';
+function localDictationApi(Recognition=speechRecognitionCtor()){
+  return Recognition&&typeof Recognition.available==='function'&&typeof Recognition.install==='function'&&'processLocally' in Recognition.prototype?Recognition:null;
+}
+function localDictationPreferred(){try{return sessionStorage.getItem(DICTATION_LOCAL_PREF_KEY)==='1';}catch{return false;}}
+function setLocalDictationPreferred(value){try{if(value)sessionStorage.setItem(DICTATION_LOCAL_PREF_KEY,'1');else sessionStorage.removeItem(DICTATION_LOCAL_PREF_KEY);}catch{}}
+async function offerLocalDictationFallback(target,Recognition){
+  const LocalRecognition=localDictationApi(Recognition);if(!LocalRecognition){const message=dictationErrorMessage('network');setDictationStatus(target,message);showToast(message,'error');return;}
+  let availability='unavailable';
+  try{availability=await LocalRecognition.available({langs:[DICTATION_LOCAL_LANGUAGE],processLocally:true});}catch{}
+  if(availability==='available'){
+    setLocalDictationPreferred(true);dictationLocalInstallTarget=null;refreshDictationControls();
+    const message='Private on-device dictation is ready. Tap the microphone again to continue.';setDictationStatus(target,message,'is-ready');showToast(message,'info');return;
+  }
+  if(availability==='downloadable'||availability==='downloading'){
+    dictationLocalInstallTarget=target;refreshDictationControls();
+    const message='Brave\'s online speech service is unavailable. Tap the microphone again to download the private English speech pack once.';setDictationStatus(target,message,'is-ready');showToast(message,'info');return;
+  }
+  const message=dictationErrorMessage('network');setDictationStatus(target,message);showToast(message,'error');
+}
 function dictationLanguage(){
   const value=String(navigator.language||navigator.languages?.[0]||document.documentElement.lang||'en-IN').trim();
   return /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value)?value:'en-IN';
@@ -6953,11 +6974,11 @@ function dictationButtons(){return Array.from(document.querySelectorAll('[data-d
 function refreshDictationControls(){
   const capability=dictationCapability();
   dictationButtons().forEach(button=>{
-    const target=button.dataset.dictationTarget,spec=dictationTargetSpec(target),active=!!dictationSession&&dictationSession.target===target;
-    button.disabled=!capability.available||!spec;button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
-    button.setAttribute('aria-label',active?'Stop dictation':`Dictate ${spec?.label||'note'}`);
+    const target=button.dataset.dictationTarget,spec=dictationTargetSpec(target),installing=dictationLocalInstalling&&dictationLocalInstallTarget===target,active=(!!dictationSession&&dictationSession.target===target)||installing,installOffered=dictationLocalInstallTarget===target;
+    button.disabled=!capability.available||!spec||dictationLocalInstalling;button.classList.toggle('is-listening',active);button.setAttribute('aria-pressed',String(active));
+    button.setAttribute('aria-label',installing?'Downloading private speech pack':installOffered?'Download and use private on-device dictation':active?'Stop dictation':`Dictate ${spec?.label||'note'}`);
     const icon=button.querySelector('i');if(icon)icon.className=active?'fa-solid fa-stop':'fa-solid fa-microphone';
-    button.title=capability.available?(active?'Stop dictation':"Audio is handled by your browser's speech service and is not stored by Edgebook."):capability.message;
+    button.title=capability.available?(installing?'Downloading the browser\'s private English speech pack…':installOffered?'Download and use private on-device dictation':active?'Stop dictation':"Audio is handled by your browser's speech service and is not stored by Edgebook."):capability.message;
     if(!capability.available)setDictationStatus(target,capability.message);
   });
 }
@@ -6975,6 +6996,7 @@ function finishDictation(session,message,state='is-ready'){
   refreshDictationControls();setDictationStatus(session.target,message,state);
 }
 function stopDictation({quiet=false,immediate=false}={}){
+  if(dictationLocalInstalling){dictationInstallRequest+=1;dictationLocalInstalling=false;refreshDictationControls();}
   const session=dictationSession;if(!session)return;
   if(immediate){
     promoteDictationInterim(session);clearTimeout(session.watchdog);clearTimeout(session.restartTimer);dictationSession=null;session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
@@ -6988,13 +7010,24 @@ function stopDictation({quiet=false,immediate=false}={}){
     if(dictationSession===session){const captured=!!(session.finalText.trim()||session.interimText.trim());finishDictation(session,captured?dictationReviewMessage(session.spec.context):'Listening stopped. No transcript was added.',captured?'is-ready':'');}
   },1800);
 }
-function toggleDictation(target){
+async function toggleDictation(target){
   const spec=dictationTargetSpec(target),element=document.getElementById(target),capability=dictationCapability();
   if(!spec||!element)return;
   if(dictationSession?.target===target){stopDictation();return;}
   if(dictationSession)stopDictation({immediate:true});
   if(!capability.available){refreshDictationControls();setDictationStatus(target,capability.message);showToast(capability.message,'info');return;}
-  const Recognition=speechRecognitionCtor(),recognition=new Recognition();
+  const Recognition=speechRecognitionCtor();
+  if(dictationLocalInstallTarget===target){
+    const LocalRecognition=localDictationApi(Recognition);if(!LocalRecognition)return;
+    const installRequest=++dictationInstallRequest;
+    dictationLocalInstalling=true;refreshDictationControls();setDictationStatus(target,'Downloading private English speech pack…','is-listening');
+    let installed=false;try{installed=await LocalRecognition.install({langs:[DICTATION_LOCAL_LANGUAGE],processLocally:true});}catch{}
+    if(installRequest!==dictationInstallRequest)return;
+    dictationLocalInstalling=false;
+    if(!installed){refreshDictationControls();setDictationStatus(target,'The private speech pack could not be installed. Check Brave downloads and try again.');showToast('Private speech pack installation failed','error');return;}
+    setLocalDictationPreferred(true);dictationLocalInstallTarget=null;refreshDictationControls();
+  }
+  const recognition=new Recognition(),useLocal=localDictationPreferred()&&!!localDictationApi(Recognition);
   if(spec.context==='dailyjournal'&&typeof djAutoSaveTimer!=='undefined'){clearTimeout(djAutoSaveTimer);djAutoSaveTimer=null;}
   const session={target,spec,element,recognition,baseText:element.value,finalText:'',interimText:'',wasReadOnly:element.readOnly,stopRequested:false,watchdog:null,restartTimer:null,restartAfterNoSpeech:false,noSpeechRetries:0};
   session.onUserInput=()=>{
@@ -7002,7 +7035,7 @@ function toggleDictation(target){
     clearTimeout(session.watchdog);dictationSession=null;element.removeEventListener('input',session.onUserInput);
     try{recognition.abort();}catch{}refreshDictationControls();setDictationStatus(target,'Dictation stopped so your edit is preserved. Review the text before saving.','is-ready');
   };
-  dictationSession=session;element.addEventListener('input',session.onUserInput);recognition.continuous=true;recognition.interimResults=true;recognition.maxAlternatives=1;recognition.lang=dictationLanguage();
+  dictationSession=session;element.addEventListener('input',session.onUserInput);recognition.continuous=true;recognition.interimResults=true;recognition.maxAlternatives=1;recognition.lang=useLocal?DICTATION_LOCAL_LANGUAGE:dictationLanguage();if(useLocal)recognition.processLocally=true;session.localMode=useLocal;
   recognition.onstart=()=>{if(dictationSession===session)setDictationStatus(target,'Microphone connected — listening…','is-listening');};
   recognition.onaudiostart=()=>{if(dictationSession===session)setDictationStatus(target,'Listening… speak naturally. Edgebook stores only text you save.','is-listening');};
   recognition.onspeechstart=()=>{if(dictationSession===session)setDictationStatus(target,'Speech detected — transcribing…','is-listening');};
@@ -7021,6 +7054,10 @@ function toggleDictation(target){
     if(event.error==='no-speech'&&!captured&&!session.stopRequested&&session.noSpeechRetries<3){
       session.restartAfterNoSpeech=true;setDictationStatus(target,'No speech detected yet — still listening…','is-listening');return;
     }
+    if(event.error==='network'&&!session.localMode){
+      finishDictation(session,captured?dictationReviewMessage(spec.context):'Online speech unavailable — checking private on-device dictation…',captured?'is-ready':'');void offerLocalDictationFallback(target,Recognition);return;
+    }
+    if(event.error==='language-not-supported'&&session.localMode)setLocalDictationPreferred(false);
     if(event.error==='service-not-allowed')dictationServiceBlocked=true;
     const message=dictationErrorMessage(event.error);finishDictation(session,message,captured?'is-ready':'');showToast(message,'error');
   };

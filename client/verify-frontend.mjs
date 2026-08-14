@@ -2581,22 +2581,27 @@ try {
   const voiceNotes={value:'Existing note.',readOnly:false,addEventListener(type,fn){listeners[type]=fn;},removeEventListener(type,fn){if(listeners[type]===fn)delete listeners[type];}};
   const voiceElements=new Map([['dj-notes',voiceNotes],['voice-status-dj-notes',voiceStatus]]);
   const recognizers = [];
+  let localAvailability='downloadable',localInstallCalls=0;
   class FakeSpeechRecognition {
     constructor() { recognizers.push(this); }
+    static async available(){return localAvailability;}
+    static async install(){localInstallCalls+=1;localAvailability='available';return true;}
     start() { this.started = true; this.startCalls=(this.startCalls||0)+1; }
     stop() { this.stopped = true; }
     abort() { this.aborted = true; }
   }
+  FakeSpeechRecognition.prototype.processLocally=false;
   const noop=()=>{};
   let microphoneProbeCalls=0;
   const voiceToasts=[];
-  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,djAutoSaveTimer=null;\n${dictationSource}`;
+  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,dictationLocalInstallTarget=null,dictationLocalInstalling=false,dictationInstallRequest=0,djAutoSaveTimer=null;\n${dictationSource}`;
   const { exports: voice } = evaluateSecurityFixture(
     fixtureSource,
     {
       document: {documentElement:{lang:'en'},getElementById:id=>voiceElements.get(id)||null,querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],addEventListener:noop,visibilityState:'visible'},
       window: { SpeechRecognition: FakeSpeechRecognition,addEventListener:noop },
       navigator: { language: 'en-IN',mediaDevices:{async getUserMedia(){microphoneProbeCalls+=1;throw new Error('separate probe must not run');}} },
+      sessionStorage:{values:new Map(),getItem(key){return this.values.get(key)||null;},setItem(key,value){this.values.set(key,String(value));},removeItem(key){this.values.delete(key);}},
       isSecureContext:true,showToast(message,type){voiceToasts.push({message,type});},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout(fn,delay){if(delay<1000)fn();return 1;},
     },
     '{toggleDictation,stopDictation,dictationErrorMessage}',
@@ -2633,7 +2638,14 @@ try {
   if(recognizers[1].startCalls!==2||voiceButton.attributes['aria-pressed']!=='true')failures.push('Early no-speech did not restart browser recognition within the active session');
   voice.stopDictation({immediate:true});
   await voice.toggleDictation('dj-notes');
-  recognizers[2].onerror({error:'service-not-allowed'});
+  recognizers[2].onerror({error:'network'});
+  await new Promise(resolve=>setImmediate(resolve));
+  if(localInstallCalls!==0||voiceButton.attributes['aria-label']!=='Download and use private on-device dictation'||!/download the private English speech pack/i.test(voiceStatus.textContent))failures.push('Network failure did not offer an explicit user-triggered private speech-pack fallback');
+  await voice.toggleDictation('dj-notes');
+  if(localInstallCalls!==1||recognizers[3].processLocally!==true||recognizers[3].lang!=='en-US'||!recognizers[3].started)failures.push('Private speech-pack consent did not restart dictation in on-device mode');
+  voice.stopDictation({immediate:true});
+  await voice.toggleDictation('dj-notes');
+  recognizers[4].onerror({error:'service-not-allowed'});
   if (!voiceToasts.some(item=>item.type==='error'&&/speech service/i.test(item.message)) || !voiceButton.disabled) {
     failures.push('Dictation service failure was not surfaced visibly and disabled for the page');
   }
