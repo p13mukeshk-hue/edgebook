@@ -6970,14 +6970,14 @@ function promoteDictationInterim(session){
 }
 function finishDictation(session,message,state='is-ready'){
   if(dictationSession!==session)return;
-  promoteDictationInterim(session);clearTimeout(session.watchdog);dictationSession=null;
+  promoteDictationInterim(session);clearTimeout(session.watchdog);clearTimeout(session.restartTimer);dictationSession=null;
   session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
   refreshDictationControls();setDictationStatus(session.target,message,state);
 }
 function stopDictation({quiet=false,immediate=false}={}){
   const session=dictationSession;if(!session)return;
   if(immediate){
-    promoteDictationInterim(session);clearTimeout(session.watchdog);dictationSession=null;session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
+    promoteDictationInterim(session);clearTimeout(session.watchdog);clearTimeout(session.restartTimer);dictationSession=null;session.element.removeEventListener('input',session.onUserInput);session.element.readOnly=session.wasReadOnly;
     try{session.recognition.abort();}catch{}refreshDictationControls();
     if(!quiet)setDictationStatus(session.target,session.finalText.trim()?dictationReviewMessage(session.spec.context):'Listening stopped. No transcript was added.',session.finalText.trim()?'is-ready':'');
     return;
@@ -6996,7 +6996,7 @@ function toggleDictation(target){
   if(!capability.available){refreshDictationControls();setDictationStatus(target,capability.message);showToast(capability.message,'info');return;}
   const Recognition=speechRecognitionCtor(),recognition=new Recognition();
   if(spec.context==='dailyjournal'&&typeof djAutoSaveTimer!=='undefined'){clearTimeout(djAutoSaveTimer);djAutoSaveTimer=null;}
-  const session={target,spec,element,recognition,baseText:element.value,finalText:'',interimText:'',wasReadOnly:element.readOnly,stopRequested:false,watchdog:null};
+  const session={target,spec,element,recognition,baseText:element.value,finalText:'',interimText:'',wasReadOnly:element.readOnly,stopRequested:false,watchdog:null,restartTimer:null,restartAfterNoSpeech:false,noSpeechRetries:0};
   session.onUserInput=()=>{
     if(dictationSession!==session)return;
     clearTimeout(session.watchdog);dictationSession=null;element.removeEventListener('input',session.onUserInput);
@@ -7013,21 +7013,34 @@ function toggleDictation(target){
       const text=event.results[i]?.[0]?.transcript||'';
       if(event.results[i].isFinal)session.finalText+=text+' ';else interimText+=text+' ';
     }
-    session.interimText=interimText;renderDictationTranscript(session);
+    session.interimText=interimText;session.noSpeechRetries=0;session.restartAfterNoSpeech=false;renderDictationTranscript(session);
   };
   recognition.onerror=event=>{
     if(dictationSession!==session)return;
+    const captured=!!(session.finalText.trim()||session.interimText.trim());
+    if(event.error==='no-speech'&&!captured&&!session.stopRequested&&session.noSpeechRetries<3){
+      session.restartAfterNoSpeech=true;setDictationStatus(target,'No speech detected yet — still listening…','is-listening');return;
+    }
     if(event.error==='service-not-allowed')dictationServiceBlocked=true;
-    const captured=!!(session.finalText.trim()||session.interimText.trim()),message=dictationErrorMessage(event.error);finishDictation(session,message,captured?'is-ready':'');showToast(message,'error');
+    const message=dictationErrorMessage(event.error);finishDictation(session,message,captured?'is-ready':'');showToast(message,'error');
   };
   recognition.onend=()=>{
     if(dictationSession!==session)return;
+    if(session.restartAfterNoSpeech&&!session.stopRequested&&session.noSpeechRetries<3){
+      session.restartAfterNoSpeech=false;session.noSpeechRetries+=1;clearTimeout(session.restartTimer);
+      session.restartTimer=setTimeout(()=>{
+        if(dictationSession!==session||session.stopRequested)return;
+        setDictationStatus(target,'Listening… speak naturally.','is-listening');
+        try{recognition.start();}catch{finishDictation(session,'Could not continue dictation. Tap the microphone to try again.','');}
+      },220);
+      return;
+    }
     const captured=!!(session.finalText.trim()||session.interimText.trim());
     const message=captured?dictationReviewMessage(spec.context):session.stopRequested?'Listening stopped. No transcript was added.':'Listening stopped before speech was captured. Check microphone access and try Chrome or Edge.';
     finishDictation(session,message,captured?'is-ready':'');if(!captured&&!session.stopRequested)showToast(message,'info');
   };
   refreshDictationControls();setDictationStatus(target,'Requesting microphone permission…','is-listening');
-  session.watchdog=setTimeout(()=>{if(dictationSession===session&&!session.finalText&&!session.interimText)stopDictation();},15000);
+  session.watchdog=setTimeout(()=>{if(dictationSession===session&&!session.finalText&&!session.interimText)stopDictation();},30000);
   try{recognition.start();}catch{finishDictation(session,'Could not start dictation. Try Chrome or Edge, or type here.','');}
 }
 function toggleTradeVoice(target){toggleDictation(target);}

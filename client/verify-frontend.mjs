@@ -2583,7 +2583,7 @@ try {
   const recognizers = [];
   class FakeSpeechRecognition {
     constructor() { recognizers.push(this); }
-    start() { this.started = true; }
+    start() { this.started = true; this.startCalls=(this.startCalls||0)+1; }
     stop() { this.stopped = true; }
     abort() { this.aborted = true; }
   }
@@ -2597,7 +2597,7 @@ try {
       document: {documentElement:{lang:'en'},getElementById:id=>voiceElements.get(id)||null,querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],addEventListener:noop,visibilityState:'visible'},
       window: { SpeechRecognition: FakeSpeechRecognition,addEventListener:noop },
       navigator: { language: 'en-IN',mediaDevices:{async getUserMedia(){microphoneProbeCalls+=1;throw new Error('separate probe must not run');}} },
-      isSecureContext:true,showToast(message,type){voiceToasts.push({message,type});},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout:()=>1,
+      isSecureContext:true,showToast(message,type){voiceToasts.push({message,type});},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout(fn,delay){if(delay<1000)fn();return 1;},
     },
     '{toggleDictation,stopDictation,dictationErrorMessage}',
   );
@@ -2627,7 +2627,13 @@ try {
     failures.push('Daily-journal dictation does not explain blocked microphone permission');
   }
   await voice.toggleDictation('dj-notes');
-  recognizers[1].onerror({error:'service-not-allowed'});
+  recognizers[1].onerror({error:'no-speech'});
+  if(voiceButton.attributes['aria-pressed']!=='true'||!/still listening/i.test(voiceStatus.textContent))failures.push('Early no-speech ended dictation instead of keeping the listening session active');
+  recognizers[1].onend();
+  if(recognizers[1].startCalls!==2||voiceButton.attributes['aria-pressed']!=='true')failures.push('Early no-speech did not restart browser recognition within the active session');
+  voice.stopDictation({immediate:true});
+  await voice.toggleDictation('dj-notes');
+  recognizers[2].onerror({error:'service-not-allowed'});
   if (!voiceToasts.some(item=>item.type==='error'&&/speech service/i.test(item.message)) || !voiceButton.disabled) {
     failures.push('Dictation service failure was not surfaced visibly and disabled for the page');
   }
