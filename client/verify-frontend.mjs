@@ -2588,28 +2588,35 @@ try {
     abort() { this.aborted = true; }
   }
   const noop=()=>{};
-  let microphoneTrackStopped=false;
+  let microphoneProbeCalls=0;
   const voiceToasts=[];
-  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,dictationMicVerified=false,dictationPendingTarget=null,dictationStartRequest=0,djAutoSaveTimer=null;\n${dictationSource}`;
+  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,djAutoSaveTimer=null;\n${dictationSource}`;
   const { exports: voice } = evaluateSecurityFixture(
     fixtureSource,
     {
       document: {documentElement:{lang:'en'},getElementById:id=>voiceElements.get(id)||null,querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],addEventListener:noop,visibilityState:'visible'},
       window: { SpeechRecognition: FakeSpeechRecognition,addEventListener:noop },
-      navigator: { language: 'en-IN',mediaDevices:{async getUserMedia(){return {getTracks:()=>[{stop(){microphoneTrackStopped=true;}}]};}} },
+      navigator: { language: 'en-IN',mediaDevices:{async getUserMedia(){microphoneProbeCalls+=1;throw new Error('separate probe must not run');}} },
       isSecureContext:true,showToast(message,type){voiceToasts.push({message,type});},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout:()=>1,
     },
     '{toggleDictation,stopDictation,dictationErrorMessage}',
   );
   await voice.toggleDictation('dj-notes');
   const recognition = recognizers[0];
+  const firstInterim = [{ transcript: 'Waited for' }];
+  firstInterim.isFinal = false;
+  recognition.onresult({ resultIndex: 0, results: [firstInterim] });
+  if (voiceNotes.value !== 'Existing note.\nWaited for') failures.push('Daily-journal dictation did not render the first interim transcript live');
   const finalResult = [{ transcript: 'Waited for confirmation' }];
   finalResult.isFinal = true;
   const interimResult = [{ transcript: 'while risk stayed small' }];
   interimResult.isFinal = false;
   recognition.onresult({ resultIndex: 0, results: [finalResult,interimResult] });
-  const expectedTranscript = 'Existing note.\nWaited for confirmation while risk stayed small';
-  if (!microphoneTrackStopped || !recognition.started || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
+  const revisedInterim = [{ transcript: 'and size stayed small' }];
+  revisedInterim.isFinal = false;
+  recognition.onresult({ resultIndex: 1, results: [finalResult,revisedInterim] });
+  const expectedTranscript = 'Existing note.\nWaited for confirmation and size stayed small';
+  if (microphoneProbeCalls !== 0 || !recognition.started || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
     failures.push('Daily-journal dictation did not append its live transcript without overwriting existing notes');
   }
   voice.stopDictation({immediate:true});
