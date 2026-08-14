@@ -29,7 +29,8 @@ destination="$(realpath -m -- "$destination")"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/../../.." && pwd -P)"
 for source in index.html app.html landing.html 404.html \
-  client/api-client.js client/auth-adapter.js client/data-adapter.js; do
+  client/api-client.js client/auth-adapter.js client/data-adapter.js \
+  client/on-device-dictation.js client/on-device-whisper-worker.js; do
   [[ -f "$repo_root/$source" ]] || { printf 'Missing public source: %s\n' "$source" >&2; exit 1; }
 done
 
@@ -64,6 +65,20 @@ install -m 0644 -- "$repo_root/404.html" "$destination/404.html"
 install -m 0644 -- "$repo_root/client/api-client.js" "$destination/client/api-client.js"
 install -m 0644 -- "$repo_root/client/auth-adapter.js" "$destination/client/auth-adapter.js"
 install -m 0644 -- "$repo_root/client/data-adapter.js" "$destination/client/data-adapter.js"
+install -m 0644 -- "$repo_root/client/on-device-dictation.js" "$destination/client/on-device-dictation.js"
+install -m 0644 -- "$repo_root/client/on-device-whisper-worker.js" "$destination/client/on-device-whisper-worker.js"
+
+# The controller creates its worker at runtime. Version the worker first, then
+# hash the rewritten controller so a release can never combine mismatched
+# controller and inference code from an older browser cache.
+worker_hash="$(sha256sum "$destination/client/on-device-whisper-worker.js")"
+worker_hash="${worker_hash%% *}"
+worker_hash="${worker_hash:0:16}"
+sed -i "s#./client/on-device-whisper-worker.js#./client/on-device-whisper-worker.js?v=$worker_hash#g" "$destination/client/on-device-dictation.js"
+controller_hash="$(sha256sum "$destination/client/on-device-dictation.js")"
+controller_hash="${controller_hash%% *}"
+controller_hash="${controller_hash:0:16}"
+sed -i "s#./client/on-device-dictation.js#./client/on-device-dictation.js?v=$controller_hash#g" "$destination/app.html"
 
 # The HTML pages are deliberately non-cacheable, but a browser may still hold
 # an older module response from a previous cache policy. Content-derived query

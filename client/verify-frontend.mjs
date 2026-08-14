@@ -16,7 +16,9 @@ const marketing = `${indexPage}\n${landingPage}`;
 const apiClient = read('client/api-client.js');
 const authAdapter = read('client/auth-adapter.js');
 const dataAdapter = read('client/data-adapter.js');
-const allBrowserSource = `${app}\n${marketing}\n${apiClient}\n${authAdapter}\n${dataAdapter}`;
+const dictationControllerSource = read('client/on-device-dictation.js');
+const whisperWorkerSource = read('client/on-device-whisper-worker.js');
+const allBrowserSource = `${app}\n${marketing}\n${apiClient}\n${authAdapter}\n${dataAdapter}\n${dictationControllerSource}\n${whisperWorkerSource}`;
 
 const failures = [];
 const requireMatch = (text, pattern, label) => {
@@ -604,8 +606,9 @@ try {
   failures.push(`Theme chart redraw fixture failed: ${error.message}`);
 }
 
-// Dictation is one privacy-scoped, review-first controller for every narrative field.
-const dictationSource = sourceBetween('/* One privacy-scoped speech recognizer', 'const CTRADER_OWNED_FORM_IDS');
+// Dictation is one privacy-scoped, review-first on-device Whisper controller
+// for every narrative field. It never depends on the browser speech service.
+const dictationSource = sourceBetween('/* One privacy-scoped on-device Whisper controller', 'const CTRADER_OWNED_FORM_IDS');
 for (const target of ['t-psych-prethought','t-psych-execution','t-psych-review','t-notes']) {
   requireMatch(app,new RegExp(`data-dictation-target=["']${target}["'][\\s\\S]{0,160}?toggleDictation\\('${target}'\\)`),`trade dictation control for ${target}`);
 }
@@ -615,20 +618,31 @@ for (const target of ['dj-mistake','dj-keylesson','dj-woulddodiff','dj-intention
 for (const target of ['mood-notes-inp','mm-notes']) {
   requireMatch(app,new RegExp(`data-dictation-target=["']${target}["']`),`mood dictation control ${target}`);
 }
-requireMatch(app,/\^cf-v-\[A-Za-z0-9_-\]\+\$[\s\S]{0,120}?context:'trade'/,'dynamic custom free-text dictation allowlist');
-requireMatch(app,/\^hm-note-\[A-Za-z0-9_-\]\+\$[\s\S]{0,120}?context:'heatmap'/,'dynamic heatmap-note dictation allowlist');
+requireMatch(dictationControllerSource,/\^cf-v-\[A-Za-z0-9_-\]\+\$[\s\S]{0,120}?context:\s*'trade'/,'dynamic custom free-text dictation allowlist');
+requireMatch(dictationControllerSource,/\^hm-note-\[A-Za-z0-9_-\]\+\$[\s\S]{0,120}?context:\s*'heatmap'/,'dynamic heatmap-note dictation allowlist');
 requireMatch(app,/if\(cf\.type==='text'\)[^\n]*dictationControlHtml\(id,cf\.label\)/,'dynamic custom free-text dictation control');
 requireMatch(app,/dictationControlHtml\(`hm-note-\$\{domToken\}`,'heatmap note'\)/,'dynamic heatmap dictation control');
-requireMatch(app, /\.trade-voice-wave b\{[^}]*animation:tradeVoiceWave/, 'animated live trade dictation waveform');
-requireMatch(dictationSource,/globalThis\.isSecureContext!==true/,'secure-context dictation gate');
-requireMatch(dictationSource,/window\.SpeechRecognition\|\|window\.webkitSpeechRecognition/,'browser speech-recognition compatibility');
-requireMatch(dictationSource,/baseText:element\.value/,'dictation preserves existing text');
-requireMatch(dictationSource,/session\.interimText[\s\S]{0,180}?finishDictation/,'interim transcript promotion before teardown');
-requireMatch(dictationSource,/recognition\.abort\(\)/,'immediate privacy stop');
+requireMatch(app, /\.trade-voice-wave b\{[^}]*transition:height 70ms/, 'audio-level-driven live dictation waveform');
+requireMatch(dictationControllerSource,/root\.isSecureContext\s*!==\s*true/,'secure-context dictation gate');
+requireMatch(dictationControllerSource,/navigator\?\.mediaDevices\?\.getUserMedia/,'microphone capability gate');
+requireMatch(dictationControllerSource,/baseText:\s*element\.value/,'dictation preserves existing text');
+requireMatch(dictationControllerSource,/function promoteInterim[\s\S]{0,240}?renderTranscript/,'interim transcript promotion before teardown');
+requireMatch(dictationControllerSource,/track\.stop\(\)/,'immediate microphone privacy stop');
 requireMatch(dictationSource,/visibilitychange[\s\S]{0,180}?pagehide/,'background/page-exit privacy teardown');
-requireMatch(dictationSource,/service-not-allowed[\s\S]{0,180}?Chrome or Edge/,'unavailable speech-service fallback');
-requireMatch(dictationSource,/spec\.context==='dailyjournal'[\s\S]{0,120}?clearTimeout\(djAutoSaveTimer\)/,'Daily Journal pending autosave cancellation on dictation start');
-rejectMatch(dictationSource,/saveTrade\s*\(|djSaveForm\s*\(|saveMoodEntry\s*\(|hmSaveNote\s*\(/,'automatic persistence from dictation');
+requireMatch(dictationControllerSource,/spec\.context\s*===\s*'dailyjournal'\) cancelDailyAutosave\(\)/,'Daily Journal pending autosave cancellation on dictation start');
+requireMatch(dictationControllerSource,/First use downloads about 95 MB once/,'finite first-use model download disclosure');
+requireMatch(dictationControllerSource,/audio never leaves this device/,'on-device audio privacy disclosure');
+requireMatch(whisperWorkerSource,/onnx-community\/whisper-tiny\.en/,'pretrained Whisper Tiny English model');
+requireMatch(whisperWorkerSource,/@huggingface\/transformers@4\.2\.0/,'pinned Transformers.js runtime');
+requireMatch(whisperWorkerSource,/env\.useBrowserCache\s*=\s*true/,'browser model cache');
+requireMatch(whisperWorkerSource,/navigator\?\.gpu\s*\?\s*'webgpu'\s*:\s*'wasm'/,'WebGPU acceleration with broad WASM fallback');
+requireMatch(whisperWorkerSource,/dtype:\s*'q4'/,'efficient quantized inference');
+requireMatch(whisperWorkerSource,/preferredDevice\s*!==\s*'webgpu'[\s\S]{0,160}?createPipeline\('wasm'\)/,'automatic WebGPU initialization fallback');
+requireMatch(whisperWorkerSource,/resampleTo16Khz/,'deterministic Whisper input resampling');
+requireMatch(whisperWorkerSource,/const finalRequests\s*=\s*\[\][\s\S]{0,4000}?finalRequests\.shift\(\)\s*\|\|\s*latestInterimRequest/,'ordered final transcript queue with coalesced interim inference');
+requireMatch(whisperWorkerSource,/if\s*\(next\.final\)\s*finalRequests\.push\(next\)[\s\S]{0,100}?latestInterimRequest\s*=\s*next/,'final transcript segments cannot be displaced by newer interim audio');
+rejectMatch(`${app}\n${dictationControllerSource}`,/SpeechRecognition|webkitSpeechRecognition|processLocally|private English speech pack/,'unreliable browser speech service dependency');
+rejectMatch(dictationControllerSource,/saveTrade\s*\(|djSaveForm\s*\(|saveMoodEntry\s*\(|hmSaveNote\s*\(/,'automatic persistence from dictation');
 for (const [start,end,readMarker,label] of [
   ['async function saveTrade','/* ═══ END TRADE FORM',"document.getElementById('t-sym-select')",'trade save'],
   ['async function saveMoodEntry','async function saveModalMood','moodEmoji','mood-page save'],
@@ -2575,82 +2589,95 @@ try {
     };
   };
   const voiceIcon={className:''};
-  const voiceButton={dataset:{dictationTarget:'dj-notes'},disabled:false,title:'',classList:classSet(['trade-voice-btn']),attributes:{},setAttribute(name,value){this.attributes[name]=String(value);},querySelector(selector){return selector==='i'?voiceIcon:null;}};
+  const voiceBars=Array.from({length:4},()=>({style:{}}));
+  const voiceButton={
+    dataset:{dictationTarget:'dj-notes'},disabled:false,title:'',classList:classSet(['trade-voice-btn']),attributes:{},
+    setAttribute(name,value){this.attributes[name]=String(value);},
+    querySelector(selector){return selector==='i'?voiceIcon:null;},
+    querySelectorAll(selector){return selector==='.trade-voice-wave b'?voiceBars:[];},
+  };
   const voiceStatus={textContent:'',classList:classSet(['dictation-status'])};
   const listeners={};
   const voiceNotes={value:'Existing note.',readOnly:false,addEventListener(type,fn){listeners[type]=fn;},removeEventListener(type,fn){if(listeners[type]===fn)delete listeners[type];}};
   const voiceElements=new Map([['dj-notes',voiceNotes],['voice-status-dj-notes',voiceStatus]]);
-  const recognizers = [];
-  let localAvailability='downloadable',localInstallCalls=0;
-  class FakeSpeechRecognition {
-    constructor() { recognizers.push(this); }
-    static async available(){return localAvailability;}
-    static async install(){localInstallCalls+=1;localAvailability='available';return true;}
-    start() { this.started = true; this.startCalls=(this.startCalls||0)+1; }
-    stop() { this.stopped = true; }
-    abort() { this.aborted = true; }
+  const voiceDocument={
+    getElementById:id=>voiceElements.get(id)||null,
+    querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],
+  };
+  const workers=[];
+  class FakeWorker {
+    constructor(url,options){this.url=url;this.options=options;this.messages=[];this.listeners={};workers.push(this);}
+    addEventListener(type,fn){this.listeners[type]=fn;}
+    postMessage(message){this.messages.push(message);}
+    emit(message){this.listeners.message?.({data:message});}
+    terminate(){this.terminated=true;}
   }
-  FakeSpeechRecognition.prototype.processLocally=false;
-  const noop=()=>{};
-  let microphoneProbeCalls=0;
-  const voiceToasts=[];
-  const fixtureSource=`let dictationSession=null,dictationServiceBlocked=false,dictationLocalInstallTarget=null,dictationLocalInstalling=false,dictationInstallRequest=0,djAutoSaveTimer=null;\n${dictationSource}`;
-  const { exports: voice } = evaluateSecurityFixture(
-    fixtureSource,
-    {
-      document: {documentElement:{lang:'en'},getElementById:id=>voiceElements.get(id)||null,querySelectorAll:selector=>selector==='[data-dictation-target]'?[voiceButton]:[],addEventListener:noop,visibilityState:'visible'},
-      window: { SpeechRecognition: FakeSpeechRecognition,addEventListener:noop },
-      navigator: { language: 'en-IN',mediaDevices:{async getUserMedia(){microphoneProbeCalls+=1;throw new Error('separate probe must not run');}} },
-      sessionStorage:{values:new Map(),getItem(key){return this.values.get(key)||null;},setItem(key,value){this.values.set(key,String(value));},removeItem(key){this.values.delete(key);}},
-      isSecureContext:true,showToast(message,type){voiceToasts.push({message,type});},escapeHtml:value=>String(value),clearTimeout:noop,setTimeout(fn,delay){if(delay<1000)fn();return 1;},
-    },
-    '{toggleDictation,stopDictation,dictationErrorMessage}',
-  );
-  await voice.toggleDictation('dj-notes');
-  const recognition = recognizers[0];
-  const firstInterim = [{ transcript: 'Waited for' }];
-  firstInterim.isFinal = false;
-  recognition.onresult({ resultIndex: 0, results: [firstInterim] });
-  if (voiceNotes.value !== 'Existing note.\nWaited for') failures.push('Daily-journal dictation did not render the first interim transcript live');
-  const finalResult = [{ transcript: 'Waited for confirmation' }];
-  finalResult.isFinal = true;
-  const interimResult = [{ transcript: 'while risk stayed small' }];
-  interimResult.isFinal = false;
-  recognition.onresult({ resultIndex: 0, results: [finalResult,interimResult] });
-  const revisedInterim = [{ transcript: 'and size stayed small' }];
-  revisedInterim.isFinal = false;
-  recognition.onresult({ resultIndex: 1, results: [finalResult,revisedInterim] });
-  const expectedTranscript = 'Existing note.\nWaited for confirmation and size stayed small';
-  if (microphoneProbeCalls !== 0 || !recognition.started || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'true' || voiceNotes.value !== expectedTranscript) {
-    failures.push('Daily-journal dictation did not append its live transcript without overwriting existing notes');
+  const node=()=>({connect(){},disconnect(){}});
+  let processor=null;
+  class FakeAudioContext {
+    constructor(){this.sampleRate=16000;this.destination={};}
+    async resume(){}
+    createMediaStreamSource(){return node();}
+    createAnalyser(){return {...node(),fftSize:0,smoothingTimeConstant:0};}
+    createScriptProcessor(){processor={...node(),onaudioprocess:null};return processor;}
+    createGain(){return {...node(),gain:{value:1}};}
+    close(){this.closed=true;}
   }
-  voice.stopDictation({immediate:true});
-  if (!recognition.aborted || voiceNotes.readOnly || voiceButton.attributes['aria-pressed'] !== 'false' || !/review it.*saving/i.test(voiceStatus.textContent)) {
-    failures.push('Daily-journal dictation did not return to an editable review-before-save state');
-  }
-  if (!/permission/i.test(voice.dictationErrorMessage('not-allowed'))) {
-    failures.push('Daily-journal dictation does not explain blocked microphone permission');
-  }
-  await voice.toggleDictation('dj-notes');
-  recognizers[1].onerror({error:'no-speech'});
-  if(voiceButton.attributes['aria-pressed']!=='true'||!/still listening/i.test(voiceStatus.textContent))failures.push('Early no-speech ended dictation instead of keeping the listening session active');
-  recognizers[1].onend();
-  if(recognizers[1].startCalls!==2||voiceButton.attributes['aria-pressed']!=='true')failures.push('Early no-speech did not restart browser recognition within the active session');
-  voice.stopDictation({immediate:true});
-  await voice.toggleDictation('dj-notes');
-  recognizers[2].onerror({error:'network'});
+  let trackStopped=false,microphoneCalls=0,clock=0,activeSession=null,autosaveCancels=0;
+  const stream={getTracks:()=>[{stop(){trackStopped=true;}}]};
+  const fixtureRoot={isSecureContext:true,setTimeout,clearTimeout};
+  const fixtureContext=vm.createContext({console,setTimeout,clearTimeout,globalThis:null});
+  fixtureContext.globalThis=fixtureContext;
+  vm.runInContext(dictationControllerSource,fixtureContext,{timeout:500});
+  const controller=fixtureContext.createEdgebookDictationController({
+    root:fixtureRoot,
+    document:voiceDocument,
+    navigator:{mediaDevices:{async getUserMedia(){microphoneCalls+=1;return stream;}}},
+    performance:{now:()=>clock},
+    WorkerClass:FakeWorker,
+    AudioContextClass:FakeAudioContext,
+    escapeHtml:value=>String(value),
+    showToast(){},
+    onSessionChange(value){activeSession=value;},
+    cancelDailyAutosave(){autosaveCancels+=1;},
+  });
+  await controller.toggle('dj-notes');
+  const worker=workers[0];
+  if(!worker||worker.url!=='./client/on-device-whisper-worker.js'||worker.options?.type!=='module'||microphoneCalls!==0)failures.push('On-device dictation did not isolate model loading in its module worker before microphone capture');
+  worker.emit({type:'model-loading',progress:42});
+  if(!/42%/.test(voiceStatus.textContent)||!/95 MB/.test(voiceStatus.textContent))failures.push('On-device model download does not show finite progress and first-use size');
+  worker.emit({type:'model-ready',model:'onnx-community/whisper-tiny.en'});
   await new Promise(resolve=>setImmediate(resolve));
-  if(localInstallCalls!==0||voiceButton.attributes['aria-label']!=='Download and use private on-device dictation'||!/download the private English speech pack/i.test(voiceStatus.textContent))failures.push('Network failure did not offer an explicit user-triggered private speech-pack fallback');
-  await voice.toggleDictation('dj-notes');
-  if(localInstallCalls!==1||recognizers[3].processLocally!==true||recognizers[3].lang!=='en-US'||!recognizers[3].started)failures.push('Private speech-pack consent did not restart dictation in on-device mode');
-  voice.stopDictation({immediate:true});
-  await voice.toggleDictation('dj-notes');
-  recognizers[4].onerror({error:'service-not-allowed'});
-  if (!voiceToasts.some(item=>item.type==='error'&&/speech service/i.test(item.message)) || !voiceButton.disabled) {
-    failures.push('Dictation service failure was not surfaced visibly and disabled for the page');
-  }
+  if(microphoneCalls!==1||!processor?.onaudioprocess||voiceButton.attributes['aria-pressed']!=='true'||autosaveCancels!==1)failures.push('On-device dictation did not start one microphone stream after the cached model became ready');
+  const loud=new Float32Array(4096).fill(.08);
+  clock=260;processor.onaudioprocess({inputBuffer:{getChannelData:()=>loud}});
+  clock=520;processor.onaudioprocess({inputBuffer:{getChannelData:()=>loud}});
+  const interimRequest=worker.messages.findLast(message=>message.type==='transcribe'&&!message.final);
+  if(!interimRequest)failures.push('Live microphone audio was not submitted for an interim on-device transcript');
+  else worker.emit({type:'transcript',sessionId:interimRequest.sessionId,requestId:interimRequest.requestId,segmentId:interimRequest.segmentId,final:false,text:'Waited for'});
+  if(voiceNotes.value!=='Existing note.\nWaited for'||!voiceBars.some(bar=>Number.parseInt(bar.style.height,10)>2))failures.push('On-device Whisper did not render the live transcript or audio-level waveform');
+  const quiet=new Float32Array(4096);
+  clock=1600;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quiet}});
+  const finalRequest=worker.messages.findLast(message=>message.type==='transcribe'&&message.final);
+  if(!finalRequest)failures.push('Silence did not commit the current on-device utterance');
+  else worker.emit({type:'transcript',sessionId:finalRequest.sessionId,requestId:finalRequest.requestId,segmentId:finalRequest.segmentId,final:true,text:'Waited for confirmation'});
+  if(voiceNotes.value!=='Existing note.\nWaited for confirmation')failures.push('Final on-device transcript did not replace its interim text without duplication');
+  controller.stop({immediate:true});
+  if(!trackStopped||activeSession!==null||voiceButton.attributes['aria-pressed']!=='false'||!/review it.*saving/i.test(voiceStatus.textContent))failures.push('On-device dictation did not stop microphone capture and return to review-before-save');
+  voiceNotes.value='Manual edit';
+  await controller.toggle('dj-notes');
+  await new Promise(resolve=>setImmediate(resolve));
+  listeners.input?.();
+  if(activeSession!==null||voiceNotes.value!=='Manual edit')failures.push('Direct user input did not stop dictation while preserving the edit');
+  if(!/permission/i.test(controller.errorMessage('not-allowed')))failures.push('On-device dictation does not explain blocked microphone permission');
+  if(controller.capability().available!==true)failures.push('Supported secure browser was incorrectly rejected by on-device dictation');
+  const insecure=fixtureContext.createEdgebookDictationController({
+    root:{...fixtureRoot,isSecureContext:false},document:voiceDocument,navigator:{mediaDevices:{getUserMedia(){}}},WorkerClass:FakeWorker,AudioContextClass:FakeAudioContext,
+  });
+  if(insecure.capability().available||!/HTTPS/i.test(insecure.capability().message))failures.push('Insecure origins are not rejected before microphone/model access');
+  controller.destroy();
 } catch (error) {
-  failures.push(`Daily-journal voice fixture failed: ${error.message}`);
+  failures.push(`On-device dictation fixture failed: ${error.message}`);
 }
 
 try {

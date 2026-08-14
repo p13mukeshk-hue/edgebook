@@ -118,12 +118,17 @@ requireText(nginx, /proxy_set_header X-Forwarded-Proto https;/, 'fixed HTTPS for
 rejectText(nginx, /proxy_set_header Host \$host;|proxy_set_header X-Forwarded-Proto \$scheme;/, 'client-derived canonical upstream origin');
 requireText(nginx, /Content-Security-Policy/, 'production CSP');
 requireText(nginx, /Permissions-Policy\s+"camera=\(\), microphone=\(self\), geolocation=\(\)"/, 'first-party-only microphone permission for journal dictation');
+requireText(nginx, /script-src[^;]*https:\/\/cdn\.jsdelivr\.net/, 'pinned on-device Whisper runtime permitted by CSP');
+requireText(nginx, /connect-src[^;]*https:\/\/huggingface\.co[^;]*https:\/\/\*\.xethub\.hf\.co/, 'on-device Whisper model downloads permitted by CSP');
 rejectText(nginx, /cloudfunctions\.net|firebaseio\.com|firebasestorage|www\.gstatic\.com\/firebasejs/, 'Firebase/Cloud Functions origin in production proxy policy');
 
 const build = read('deploy/vps/scripts/build-public.sh');
-for (const publicFile of ['client/api-client.js', 'client/auth-adapter.js', 'client/data-adapter.js']) {
+for (const publicFile of ['client/api-client.js', 'client/auth-adapter.js', 'client/data-adapter.js', 'client/on-device-dictation.js', 'client/on-device-whisper-worker.js']) {
   requireText(build, new RegExp(publicFile.replace(/[./]/g, '\\$&')), `allowlisted public file ${publicFile}`);
 }
+requireText(build, /worker_hash="\$\(sha256sum "\$destination\/client\/on-device-whisper-worker\.js"\)"[\s\S]*controller_hash="\$\(sha256sum "\$destination\/client\/on-device-dictation\.js"\)"/, 'worker then controller content-derived cache versions');
+requireText(build, /sed -i [^\n]*on-device-whisper-worker\.js\?v=\$worker_hash[^\n]*on-device-dictation\.js/, 'controller receives immutable worker URL');
+requireText(build, /sed -i [^\n]*on-device-dictation\.js\?v=\$controller_hash[^\n]*app\.html/, 'app receives immutable dictation controller URL');
 requireText(build, /--mode rehearsal\|cutover/, 'separate rehearsal/cutover artifacts');
 requireText(build, /firebaseDependency["']?:false/, 'VPS-only artifact marker');
 requireText(build, /sha256sum "\$destination\/client\/\$asset\.js"/, 'content-derived client adapter cache version');
