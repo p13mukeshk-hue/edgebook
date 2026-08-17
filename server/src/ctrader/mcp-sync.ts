@@ -264,6 +264,9 @@ type McpDeal = {
   pnlCents: number | null;
   commissionCents: number | null;
   swapCents: number | null;
+  /** Unversioned Remote MCP integer observations. These are estimate inputs only. */
+  remoteCommissionRawUnits: bigint | null;
+  remoteSwapRawUnits: bigint | null;
   grossProfitScaled: bigint | null;
   commissionScaled: bigint | null;
   swapScaled: bigint | null;
@@ -480,6 +483,26 @@ function optionalSignedInteger(object: JsonRecord, keys: readonly string[], fiel
   return parsed;
 }
 
+function optionalEstimatedSignedInteger(object: JsonRecord, keys: readonly string[]): bigint | null {
+  const value = firstValue(object, keys);
+  if (value === null) return null;
+  try {
+    const parsed = typeof value === "bigint"
+      ? value
+      : typeof value === "number" && Number.isSafeInteger(value)
+        ? BigInt(value)
+        : typeof value === "string" && /^-?\d+$/.test(value.trim())
+          ? BigInt(value.trim())
+          : null;
+    if (parsed === null || parsed > BigInt(Number.MAX_SAFE_INTEGER) || parsed < BigInt(Number.MIN_SAFE_INTEGER)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function optionalMoneyDigits(value: unknown): number | null {
   if (value === null || value === undefined || value === "") return null;
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
@@ -498,6 +521,15 @@ function scaledMoneyToDecimal(value: bigint, digits: number): string {
   const fraction = raw.slice(-digits).replace(/0+$/, "");
   const decimalValue = fraction.length === 0 ? integer : `${integer}.${fraction}`;
   return `${negative ? "-" : ""}${decimalValue}`;
+}
+
+function decimalMoneyToScaled(value: string, digits: number): bigint | null {
+  const match = /^(-?)(0|[1-9]\d*)(?:\.(\d+))?$/.exec(value);
+  if (!match) return null;
+  const fraction = match[3] ?? "";
+  if (fraction.length > digits) return null;
+  const raw = BigInt(`${match[2]}${fraction.padEnd(digits, "0")}`);
+  return match[1] === "-" ? -raw : raw;
 }
 
 function accountHistoryMismatch(): CTraderSyncError {
@@ -547,13 +579,14 @@ function canonicalStoredDeal(deal: McpDeal): JsonRecord {
     executionTimestamp: deal.executionTimestamp,
     dealStatus: deal.dealStatus,
     providerUpdatedTimestamp: deal.providerUpdatedTimestamp,
-    // Monetary values are accepted only when the provider names their exact
-    // semantics and scale. Generic `pnl`/`commission` aliases are deliberately
-    // not persisted as money because the Remote MCP contract does not define
-    // whether they are gross/net or major/minor currency units.
+    // Exact monetary values are accepted only when the provider names their
+    // semantics and scale. Generic observations are retained separately and
+    // may only feed visibly estimated fees/net; they never become trade.pnl.
     netPnlCents: deal.pnlCents,
     commissionCents: deal.commissionCents,
     swapCents: deal.swapCents,
+    remoteCommissionRawUnits: deal.remoteCommissionRawUnits?.toString() ?? null,
+    remoteSwapRawUnits: deal.remoteSwapRawUnits?.toString() ?? null,
     ...(deal.moneyDigits === null ? {} : {
       closePositionDetail: {
         grossProfit: deal.grossProfitScaled?.toString() ?? null,
@@ -703,6 +736,8 @@ function mergeDealFacts(existing: McpDeal, incoming: McpDeal): McpDeal {
     pnlCents: mergeOptionalCents(existing.pnlCents, incoming.pnlCents, "explicit realized P&L"),
     commissionCents: mergeOptionalCents(existing.commissionCents, incoming.commissionCents, "explicit commission"),
     swapCents: mergeOptionalCents(existing.swapCents, incoming.swapCents, "explicit swap"),
+    remoteCommissionRawUnits: incoming.remoteCommissionRawUnits ?? existing.remoteCommissionRawUnits,
+    remoteSwapRawUnits: incoming.remoteSwapRawUnits ?? existing.remoteSwapRawUnits,
     grossProfitScaled: authoritativeDetail?.grossProfitScaled ?? null,
     commissionScaled: authoritativeDetail?.commissionScaled ?? null,
     swapScaled: authoritativeDetail?.swapScaled ?? null,
@@ -858,6 +893,14 @@ function normalizeDeal(value: unknown, origin: McpDealOrigin): McpDeal {
     pnlCents,
     commissionCents: optionalCents(raw, ["commissionCents"]),
     swapCents: optionalCents(raw, ["swapCents"]),
+    remoteCommissionRawUnits: optionalEstimatedSignedInteger(
+      raw,
+      origin === "stored" ? ["remoteCommissionRawUnits"] : ["commission"],
+    ),
+    remoteSwapRawUnits: optionalEstimatedSignedInteger(
+      raw,
+      origin === "stored" ? ["remoteSwapRawUnits"] : ["swap"],
+    ),
     grossProfitScaled,
     commissionScaled,
     swapScaled,
@@ -1938,6 +1981,44 @@ function projectMcpPosition(
   const entryLocal = localDateTime(first.executionTimestamp, timeZone);
   const lastClose = closing.at(-1) ?? null;
   const exitLocal = lastClose ? localDateTime(lastClose.executionTimestamp, timeZone) : null;
+  const estimatedCommissionComplete = deals.every((deal) => deal.remoteCommissionRawUnits !== null);
+  const observedSwapComplete = deals.every((deal) => deal.remoteSwapRawUnits !== null);
+  const sameProviderCalendarDay = exitLocal !== null && entryLocal.date === exitLocal.date;
+  const estimatedSwapComplete = observedSwapComplete || sameProviderCalendarDay;
+  const estimateDigits = currency.accountMoneyDigits;
+  let estimatedCommission: string | null = null;
+  let estimatedSwap: string | null = null;
+  let estimatedConversionFee: string | null = null;
+  let estimatedOtherCharges: string | null = null;
+  let estimatedFeesAndCharges: string | null = null;
+  let estimatedNetPnl: string | null = null;
+  if (
+    totalPnl === null
+    && calculatedGross !== null
+    && estimateDigits !== null
+    && estimatedCommissionComplete
+    && estimatedSwapComplete
+  ) {
+    const commissionRaw = deals.reduce((sum, deal) => sum + (deal.remoteCommissionRawUnits ?? 0n), 0n);
+    const swapRaw = observedSwapComplete
+      ? deals.reduce((sum, deal) => sum + (deal.remoteSwapRawUnits ?? 0n), 0n)
+      : 0n;
+    const grossRaw = decimalMoneyToScaled(calculatedGross.calculatedGrossPnl, estimateDigits);
+    if (grossRaw !== null) {
+      // Quote and deposit currency identity is already a hard gate of the
+      // calculated-gross result. Conversion and unobserved other charges are
+      // therefore estimated as zero, never asserted as provider exact.
+      const conversionRaw = 0n;
+      const otherRaw = 0n;
+      const feesRaw = commissionRaw + swapRaw - conversionRaw + otherRaw;
+      estimatedCommission = scaledMoneyToDecimal(commissionRaw, estimateDigits);
+      estimatedSwap = scaledMoneyToDecimal(swapRaw, estimateDigits);
+      estimatedConversionFee = scaledMoneyToDecimal(conversionRaw, estimateDigits);
+      estimatedOtherCharges = scaledMoneyToDecimal(otherRaw, estimateDigits);
+      estimatedFeesAndCharges = scaledMoneyToDecimal(feesRaw, estimateDigits);
+      estimatedNetPnl = scaledMoneyToDecimal(grossRaw + feesRaw, estimateDigits);
+    }
+  }
   const openVolume = opened - closed;
   if (opened > BigInt(Number.MAX_SAFE_INTEGER) || closed > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new CTraderSyncError(
@@ -2076,6 +2157,35 @@ function projectMcpPosition(
       calculatedGrossMethod: calculatedGross?.calculatedGrossMethod ?? null,
       calculatedGrossEvents: calculatedGross?.calculatedGrossEvents ?? [],
       calculatedGrossProvenance: calculatedGross?.calculatedGrossProvenance ?? null,
+      estimatedCommission,
+      estimatedSwap,
+      estimatedConversionFee,
+      estimatedOtherCharges,
+      estimatedFeesAndCharges,
+      estimatedNetPnl,
+      estimatedNetCurrency: estimatedNetPnl === null ? null : accountCurrency,
+      estimatedNetMethod: estimatedNetPnl === null
+        ? null
+        : "remote_mcp_execution_commission_same_currency_v1",
+      estimatedNetProvenance: estimatedNetPnl === null ? null : {
+        version: 1,
+        exact: false,
+        source: "RemoteMcpGenericExecutionMoney",
+        accountMoneyDigits: estimateDigits,
+        accountCurrency,
+        formula: "calculatedGrossPnl + estimatedCommission + estimatedSwap - estimatedConversionFee + estimatedOtherCharges",
+        commission: {
+          source: "sum_of_opening_and_closing_deal_commission",
+          rawUnitsAssumedAtAccountMoneyDigits: true,
+          executionCount: deals.length,
+        },
+        swap: observedSwapComplete
+          ? { source: "sum_of_deal_swap", assumedZero: false }
+          : { source: "same_provider_calendar_day_assumption", assumedZero: true },
+        conversionFee: { source: "quote_deposit_currency_identity_assumption", assumedZero: true },
+        otherCharges: { source: "not_exposed_by_remote_mcp", assumedZero: true },
+        analyticsTreatment: "provisional_net_only",
+      },
       accountCurrency,
       verifiedAccountSymbolOverride: symbol.verifiedOverride,
       classification: {
@@ -4144,6 +4254,9 @@ export class CTraderMcpSyncEngine {
            END
            - 'calculatedGrossPnl' - 'calculatedGrossCurrency' - 'calculatedGrossMethod'
            - 'calculatedGrossEvents' - 'calculatedGrossProvenance'
+           - 'estimatedCommission' - 'estimatedSwap' - 'estimatedConversionFee'
+           - 'estimatedOtherCharges' - 'estimatedFeesAndCharges' - 'estimatedNetPnl'
+           - 'estimatedNetCurrency' - 'estimatedNetMethod' - 'estimatedNetProvenance'
          ) || jsonb_build_object(
            'classification',
              (CASE
@@ -4172,7 +4285,10 @@ export class CTraderMcpSyncEngine {
            OR broker_data #>> '{classification,projectionQuarantineReason}' IS DISTINCT FROM $4
            OR broker_data ?| ARRAY[
              'calculatedGrossPnl','calculatedGrossCurrency','calculatedGrossMethod',
-             'calculatedGrossEvents','calculatedGrossProvenance'
+             'calculatedGrossEvents','calculatedGrossProvenance',
+             'estimatedCommission','estimatedSwap','estimatedConversionFee',
+             'estimatedOtherCharges','estimatedFeesAndCharges','estimatedNetPnl',
+             'estimatedNetCurrency','estimatedNetMethod','estimatedNetProvenance'
            ]
            OR (
              NOT ($5::boolean
@@ -4190,13 +4306,19 @@ export class CTraderMcpSyncEngine {
       `UPDATE trades SET
          broker_data=broker_data
            - 'calculatedGrossPnl' - 'calculatedGrossCurrency' - 'calculatedGrossMethod'
-           - 'calculatedGrossEvents' - 'calculatedGrossProvenance',
+           - 'calculatedGrossEvents' - 'calculatedGrossProvenance'
+           - 'estimatedCommission' - 'estimatedSwap' - 'estimatedConversionFee'
+           - 'estimatedOtherCharges' - 'estimatedFeesAndCharges' - 'estimatedNetPnl'
+           - 'estimatedNetCurrency' - 'estimatedNetMethod' - 'estimatedNetProvenance',
          row_version=row_version+1,
          updated_at=now()
        WHERE user_id=$1 AND deleted_at IS NULL
          AND broker_data ?| ARRAY[
            'calculatedGrossPnl','calculatedGrossCurrency','calculatedGrossMethod',
-           'calculatedGrossEvents','calculatedGrossProvenance'
+           'calculatedGrossEvents','calculatedGrossProvenance',
+           'estimatedCommission','estimatedSwap','estimatedConversionFee',
+           'estimatedOtherCharges','estimatedFeesAndCharges','estimatedNetPnl',
+           'estimatedNetCurrency','estimatedNetMethod','estimatedNetProvenance'
          ]
          AND EXISTS (
            SELECT 1 FROM ctrader_trade_links link

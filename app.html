@@ -7138,6 +7138,7 @@ function tradePnlInAccountCurrency(trade,amount=trade?.pnl){
   return mappedCurrency===providerCurrency?value:null;
 }
 const CTRADER_CALCULATED_GROSS_METHOD='fill_price_base_units_identity_conversion_v1';
+const CTRADER_ESTIMATED_NET_METHOD='remote_mcp_execution_commission_same_currency_v1';
 const CTRADER_EXACT_NET_METHODS=new Set(['provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money']);
 function cTraderProviderExactNet(trade){
   const data=trade?.brokerData||{};
@@ -7168,6 +7169,23 @@ function calculatedGrossText(gross){
   const sign=gross.sign>0?'+':gross.sign<0?'−':'';
   return `${sign}${calculatedGrossCurrencyPrefix(gross.currency)}${amount}`;
 }
+function cTraderEstimatedNet(trade){
+  if(!isCTraderTrade(trade)||tradeHasPnl(trade)||tradeIsOpen(trade))return null;
+  const data=trade?.brokerData||{},provenance=data.estimatedNetProvenance||{},gross=cTraderCalculatedGross(trade);
+  if(!gross||data.estimatedNetMethod!==CTRADER_ESTIMATED_NET_METHOD||provenance.version!==1||provenance.exact!==false)return null;
+  if(provenance.accountCurrency!==gross.currency||Number(provenance.accountMoneyDigits)!==gross.moneyDigits)return null;
+  const read=value=>{
+    const text=String(value??'');
+    if(text.length>128||!/^-?(?:0|[1-9]\d*)(?:\.\d{1,18})?$/.test(text))return null;
+    const number=Number(text);return Number.isFinite(number)?{text,number}:null;
+  };
+  const net=read(data.estimatedNetPnl),fees=read(data.estimatedFeesAndCharges),commission=read(data.estimatedCommission),swap=read(data.estimatedSwap),conversionFee=read(data.estimatedConversionFee),other=read(data.estimatedOtherCharges);
+  if(!net||!fees||!commission||!swap||!conversionFee||!other)return null;
+  const tolerance=10**(-Math.min(gross.moneyDigits,12))/2;
+  if(Math.abs((commission.number+swap.number-conversionFee.number+other.number)-fees.number)>tolerance)return null;
+  if(Math.abs((Number(gross.valueText)+fees.number)-net.number)>tolerance)return null;
+  return {amount:net.number,valueText:net.text,fees:fees.number,feesValueText:fees.text,commission:commission.number,swap:swap.number,conversionFee:conversionFee.number,otherCharges:other.number,currency:gross.currency,moneyDigits:gross.moneyDigits,gross,provenance};
+}
 function tradeFinancialPresentation(trade){
   const amount=Number(trade?.pnl),currency=tradePnlCurrency(trade)||'';
   if(isCTraderTrade(trade)){
@@ -7178,8 +7196,19 @@ function tradeFinancialPresentation(trade){
     return {kind:'manual_reported',amount,currency,isEstimate:false,isBrokerNet:false,includeInAnalytics:true,authority:String(trade?.sourceSystem||trade?.source||trade?.broker||'manual')};
   }
   if(tradeIsOpen(trade))return null;
+  const estimatedNet=cTraderEstimatedNet(trade);
+  if(estimatedNet)return {kind:'estimated_net',amount:estimatedNet.amount,currency:estimatedNet.currency,isEstimate:true,isBrokerNet:false,includeInAnalytics:false,gross:estimatedNet.gross,estimatedNet,feesAndCharges:estimatedNet.fees};
   const gross=cTraderCalculatedGross(trade),grossAmount=Number(gross?.valueText);
   return gross&&Number.isFinite(grossAmount)?{kind:'estimated_gross',amount:grossAmount,currency:gross.currency,isEstimate:true,isBrokerNet:false,includeInAnalytics:false,gross}:null;
+}
+function tradeFeesAndChargesPresentation(trade,presentation=tradeFinancialPresentation(trade)){
+  const breakdown=presentation?.breakdown;
+  if(breakdown){
+    const amount=Number(breakdown.commission)+Number(breakdown.swap)-Number(breakdown.conversionFee);
+    return Number.isFinite(amount)?{amount,currency:presentation.currency,isEstimate:false,complete:true}:null;
+  }
+  if(presentation?.kind==='estimated_net'&&Number.isFinite(presentation.feesAndCharges))return {amount:presentation.feesAndCharges,currency:presentation.currency,isEstimate:true,complete:false};
+  return null;
 }
 function tradeFinancialAmount(trade,{allAccounts=false,amount=tradeFinancialPresentation(trade)?.amount}={}){
   if(!Number.isFinite(Number(amount)))return null;
@@ -7199,7 +7228,7 @@ function financialPresentationDate(instant,timeZone,fallback){
 }
 function calculatedGrossLedgerEvents(trade){
   const presentation=tradeFinancialPresentation(trade);
-  if(presentation?.kind!=='estimated_gross')return [];
+  if(!['estimated_gross','estimated_net'].includes(presentation?.kind))return [];
   const gross=presentation.gross,timeZone=String(trade?.brokerData?.providerTradeDateTimeZone||'UTC');
   const fallback=financialPresentationDate(trade?.exitAt,timeZone,trade?.date);
   const events=gross.events.flatMap((event,index)=>{
@@ -7210,6 +7239,10 @@ function calculatedGrossLedgerEvents(trade){
   if(events.length){
     const sum=events.reduce((total,event)=>total+event.pnl,0);
     const tolerance=10**(-Math.min(gross.moneyDigits,12))/2;
+    if(presentation.kind==='estimated_net'&&events.length){
+      events[events.length-1].pnl+=presentation.amount-sum;
+      return events;
+    }
     if(Math.abs(sum-presentation.amount)<=tolerance)return events;
     return [];
   }
@@ -7220,10 +7253,10 @@ function financialPresentationLedgerForTrades(source){
   return [...scope.included,...scope.estimated].flatMap(({trade,presentation})=>{
     const exact=tradeRealizedEvents(trade);
     const events=exact.length?exact:calculatedGrossLedgerEvents(trade);
-    const kind=exact.length?presentation.kind:'estimated_gross';
+    const kind=exact.length?presentation.kind:presentation.kind;
     return events.map(event=>({
       ...trade,ledgerDate:event.date,ledgerPnl:event.pnl,realizedEvent:event,
-      financialKind:kind,financialIsEstimate:kind==='estimated_gross',
+      financialKind:kind,financialIsEstimate:presentation.isEstimate===true,
     }));
   });
 }
@@ -7382,7 +7415,7 @@ function financialDisplayViewForTrades(source,{allAccounts=false,accountId=null}
   const acceptedLedger=projectLedger(acceptedCandidates),estimatedLedger=projectLedger(estimatedCandidates);
   const acceptedRows=accepted.available,estimatedRows=estimated.available;
   const acceptedNet=acceptedRows.length?acceptedRows.reduce((sum,row)=>sum+row.displayPnl,0):null;
-  const estimatedGross=estimatedRows.length?estimatedRows.reduce((sum,row)=>sum+row.displayPnl,0):null;
+  const estimatedNet=estimatedRows.length?estimatedRows.reduce((sum,row)=>sum+row.displayPnl,0):null;
   const useEstimatedOnly=degraded&&!acceptedRows.length&&estimatedRows.length>0;
   const analysisRows=degraded?[...acceptedRows,...estimatedRows]:acceptedRows;
   const analysisLedger=degraded?[...acceptedLedger.ledger,...estimatedLedger.ledger]:acceptedLedger.ledger;
@@ -7392,7 +7425,7 @@ function financialDisplayViewForTrades(source,{allAccounts=false,accountId=null}
   const brokerExactCount=acceptedRows.filter(row=>row.financialIsBrokerExact).length,journalCount=acceptedRows.filter(row=>row.financialIsJournal).length;
   const analysisLabel=!degraded?'Overall P&L'
     :conversionUnavailableCount?'Available provisional subtotal'
-    :estimatedRows.length?(acceptedRows.length?'Mixed provisional P&L':'Estimated gross snapshot')
+    :estimatedRows.length?(acceptedRows.length?'Mixed provisional net P&L':'Estimated net snapshot')
     :brokerExactCount&&journalCount?'Mixed provisional P&L'
     :brokerExactCount?'Available broker snapshot'
     :journalCount?'Journal snapshot P&L'
@@ -7401,7 +7434,7 @@ function financialDisplayViewForTrades(source,{allAccounts=false,accountId=null}
     coverage,degraded,useEstimatedOnly,analysisLabel,
     acceptedRows,estimatedRows,analysisRows,closedRows,
     acceptedLedger:acceptedLedger.ledger,estimatedLedger:estimatedLedger.ledger,analysisLedger,
-    acceptedNet,estimatedGross,analysisNet,
+    acceptedNet,estimatedGross:estimatedNet,estimatedNet,analysisNet,
     brokerExactCount,journalCount,
     estimatedCount:estimatedRows.length,
     conversionUnavailableCount,acceptedConversionUnavailableCount:accepted.unavailable.length,estimatedConversionUnavailableCount:estimated.unavailable.length,
@@ -7414,7 +7447,12 @@ function financialDisplayViewNotice(view){
   const parts=[];
   if(view.brokerExactCount)parts.push(`${view.brokerExactCount} broker-exact value${view.brokerExactCount===1?'':'s'}`);
   if(view.journalCount)parts.push(`${view.journalCount} journal-reported value${view.journalCount===1?'':'s'}`);
-  if(view.estimatedCount)parts.push(`${view.estimatedCount} calculated gross estimate${view.estimatedCount===1?'':'s'} (fees and swap excluded)`);
+  if(view.estimatedCount){
+    const estimatedNetCount=view.estimatedRows.filter(row=>row.presentation.kind==='estimated_net').length;
+    const grossOnlyCount=view.estimatedCount-estimatedNetCount;
+    if(estimatedNetCount)parts.push(`${estimatedNetCount} estimated net value${estimatedNetCount===1?'':'s'} using observed execution commissions and disclosed fee assumptions`);
+    if(grossOnlyCount)parts.push(`${grossOnlyCount} calculated gross estimate${grossOnlyCount===1?'':'s'} with fees unavailable`);
+  }
   const visible=parts.length?parts.join(' plus '):'no currently valued rows';
   const exclusions=[];
   if(view.conversionUnavailableCount)exclusions.push(`${view.conversionUnavailableCount} value${view.conversionUnavailableCount===1?'':'s'} without a safe currency conversion`);
@@ -8438,7 +8476,7 @@ function tradeRow(t){
   const pnlC   = escapeHtml(tradeMoneyPrefix(t));
   const pnl    = (t.pnl !== undefined && t.pnl !== null) ? t.pnl : null;
   const financialPresentation=tradeFinancialPresentation(t);
-  const calculatedGross=cTraderCalculatedGross(t);
+  const feesPresentation=tradeFeesAndChargesPresentation(t,financialPresentation);
   const rawSym = String(t.symbol || '—').toUpperCase();
   const sym    = escapeHtml(rawSym);
   const asset  = ['eq','cx','fx','cm','ix'].includes(t.asset) ? t.asset : 'eq';
@@ -8465,11 +8503,16 @@ function tradeRow(t){
       : pnl >= 0
       ? `<span class="pnl-pos" title="${escapeHtml(bd)}" style="cursor:help">+${pnlC}${pnl.toFixed(2)}</span>`
       : `<span class="pnl-neg" title="${escapeHtml(bd)}" style="cursor:help">-${pnlC}${Math.abs(pnl).toFixed(2)}</span>`;
-  const calculatedGrossTitle='Calculated gross price movement only; commissions, swap and other fees are excluded. It is excluded from exact broker Overall P&L, but included in clearly labelled mixed provisional views while exact net is pending.';
   const authorityBadge=financialPresentation?.kind==='manual_reported'?'<span class="pnl-estimate-badge" title="Journal-reported P&L; not broker-exact">journal</span>':'';
-  const displayedPnlStr=pnl===null&&calculatedGross
-    ? `<span class="pnl-gross-estimate" title="${calculatedGrossTitle}"><span class="${calculatedGross.sign>0?'pnl-pos':calculatedGross.sign<0?'pnl-neg':'pnl-neu'}">${isOpen?'Open · ':''}${escapeHtml(calculatedGrossText(calculatedGross))}</span><span class="pnl-estimate-badge" aria-label="Calculated gross estimate; fees and swap excluded">est.</span></span>`
-    : `${pnlStr}${authorityBadge}`;
+  const estimatedNetTitle='Estimated net P&L: calculated gross price movement plus observed opening/closing execution commissions and disclosed swap/conversion/other-charge assumptions. Exact broker net supersedes it automatically when available.';
+  const displayedPnlStr=financialPresentation?.kind==='estimated_net'
+    ? `<span class="pnl-gross-estimate" title="${estimatedNetTitle}"><span class="${financialPresentation.amount>0?'pnl-pos':financialPresentation.amount<0?'pnl-neg':'pnl-neu'}">${financialPresentation.amount>0?'+':financialPresentation.amount<0?'-':''}${pnlC}${Math.abs(financialPresentation.amount).toFixed(2)}</span><span class="pnl-estimate-badge" aria-label="Estimated net P&L">est.</span></span>`
+    : financialPresentation?.kind==='estimated_gross'
+      ? '<span style="color:var(--text3)" title="Gross price movement is available, but fees are incomplete; net P&L is withheld.">Net pending</span>'
+      : `${pnlStr}${authorityBadge}`;
+  const feesStr=feesPresentation
+    ? `<span class="${feesPresentation.amount>0?'pnl-pos':feesPresentation.amount<0?'pnl-neg':'pnl-neu'}" title="${feesPresentation.isEstimate?'Estimated combined opening/closing commission, swap, conversion fee and other attributable charges.':'Exact combined commission, swap and conversion fee from cTrader close details.'}">${feesPresentation.amount>0?'+':feesPresentation.amount<0?'-':''}${escapeHtml(calculatedGrossCurrencyPrefix(feesPresentation.currency))}${Math.abs(feesPresentation.amount).toFixed(2)}</span>${feesPresentation.isEstimate?'<span class="pnl-estimate-badge" aria-label="Estimated fees and charges">est.</span>':''}`
+    : '<span style="color:var(--text3)" title="Combined fees and charges are unavailable for this row.">—</span>';
 
   const symCell = isOpen
     ? `<div class="sym-open-wrap"><span class="sym-open-name" style="font-weight:600">${sym}</span><span class="sym-open-label">live</span></div>`
@@ -8500,6 +8543,7 @@ function tradeRow(t){
     <td>${acctTagCell(t)}</td>
     <td>${sourceBadge(t)}${cTraderReviewBadge(t)}</td>
     <td>${(()=>{const src=getThumbSrc(t),count=Array.isArray(t.screenshots)?t.screenshots.length:0;return src?`<span class="ss-cell-thumb" onclick="openLightbox(${inlineStringArg(t.id)},0)" title="View ${count} screenshot${count>1?'s':''}"><img src="${escapeHtml(src)}" alt="chart"></span>${count>1?`<span style="font-size:10px;color:var(--text3);margin-left:4px">+${count-1}</span>`:''}`:'<span style="font-size:11px;color:var(--text3)">—</span>';})()}</td>
+    <td>${feesStr}</td>
     <td>${displayedPnlStr}</td>
     <td style="white-space:nowrap">
       <button class="action-btn" onclick="openTradeModal(${inlineStringArg(t.id)})" title="Edit"><i class="fa-solid fa-pen-to-square"></i></button>
@@ -8620,7 +8664,7 @@ function setJournalPage(p){
   renderFullJournal();
 }
 
-const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Entry time</th><th>Duration</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>P&L</th><th></th></tr></thead>';
+const TABLE_HEADS = '<thead><tr><th style="min-width:70px">Date</th><th>Entry time</th><th>Duration</th><th>Symbol</th><th>Class</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Size</th><th>R:R</th><th>Mood</th><th>Strategy</th><th>Account</th><th>Source</th><th>Chart</th><th>Fees &amp; charges</th><th>Net P&amp;L</th><th></th></tr></thead>';
 
 let _rttTimer=null;
 function renderTradeTableDebounced(){ clearTimeout(_rttTimer); _rttTimer=setTimeout(renderTradeTable,120); }
@@ -9013,12 +9057,12 @@ function csvEncodeRow(cells,textColumns=new Set()){
   return cells.map((value,index)=>csvEncodeCell(value,{text:textColumns.has(index)})).join(',');
 }
 function tradeJournalCsv(source){
-  const header=['Date','Entry Time','Exit Time','Duration','Duration Seconds','Symbol','Asset','Dir','Entry','Exit','Size','Size Unit','SL','TP','PnL','PnL Currency','P&L Status','Calculated Gross','Calculated Gross Currency','Fees Included','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
-  const textColumns=new Set([0,1,2,3,5,6,7,11,15,16,18,19,20,21,22,23,24,25,26,27,28,29,30]);
-  const body=source.map(t=>{const pb=t.custom?.playbook||{},presentation=tradeFinancialPresentation(t),gross=presentation?.isEstimate?cTraderCalculatedGross(t):null,breakdown=presentation?.breakdown||null;return csvEncodeRow([
+  const header=['Date','Entry Time','Exit Time','Duration','Duration Seconds','Symbol','Asset','Dir','Entry','Exit','Size','Size Unit','SL','TP','Net P&L','P&L Currency','P&L Status','Fees & Charges','Fee Status','Calculated Gross','Calculated Gross Currency','Strategy','Setup','Setup Grade','Estimated Probability','Trade Horizon','Overnight Exposure','Market Condition','Execution Quality','Emotion','Account','Notes'];
+  const textColumns=new Set([0,1,2,3,5,6,7,11,15,16,18,20,21,22,23,24,25,26,27,28,29,30,31]);
+  const body=source.map(t=>{const pb=t.custom?.playbook||{},presentation=tradeFinancialPresentation(t),gross=cTraderCalculatedGross(t),fees=tradeFeesAndChargesPresentation(t,presentation);return csvEncodeRow([
     tradeJournalDate(t),t.entryTime||'',t.exitTime||'',tradeDurationText(t,{includeOpen:false}),tradeDurationSeconds(t,{includeOpen:false})??'',t.symbol,ASSET_LABELS[t.asset]||t.asset||'',t.direction,t.entry,t.exit??'',getTradeSizeValue(t),getSizeLabel(t),t.sl??'',t.tp??'',
-    tradeIsOpen(t)?(tradeHasPnl(t)?`Open · realized ${Number(t.pnl).toFixed(2)}`:'Open'):(tradeHasPnl(t)?Number(t.pnl).toFixed(2):''),
-    tradePnlCurrency(t)||'',presentation?.kind||(tradeIsOpen(t)?'open':'unavailable'),gross?.valueText||'',gross?.currency||'',breakdown?'Yes':gross?'No':'Unknown',
+    tradeIsOpen(t)?(tradeHasPnl(t)?`Open · realized ${Number(t.pnl).toFixed(2)}`:'Open'):(Number.isFinite(presentation?.amount)?Number(presentation.amount).toFixed(2):''),
+    tradePnlCurrency(t)||'',presentation?.kind||(tradeIsOpen(t)?'open':'unavailable'),fees?Number(fees.amount).toFixed(2):'',fees?(fees.isEstimate?'estimated':'exact'):'unavailable',gross?.valueText||'',gross?.currency||'',
     t.strategy||'',pb.setup||'',pb.grade||'',pb.probability||'',pb.horizon||'',pb.overnight||'',pb.condition||'',pb.execution||'',t.emotion||'',acctName(t.accountId||''),t.notes||'',
   ],textColumns)});
   return [csvEncodeRow(header),...body].join('\r\n');
@@ -9042,7 +9086,7 @@ function xlsxColumnName(index){let value=index+1,name='';while(value>0){value--;
 const XLSX_SAFE_CELL_BUDGET=230000;
 function detailedExportCashFlowRowLimit(source){
   const realizedCount=financialPresentationLedgerForTrades(source).length;
-  const baseCells=(source.length+1)*52+(realizedCount+1)*30+(source.length*2+realizedCount+25)*9+10000;
+  const baseCells=(source.length+1)*56+(realizedCount+1)*32+(source.length*2+realizedCount+25)*9+10000;
   return Math.max(0,Math.min(5000,Math.floor((XLSX_SAFE_CELL_BUDGET-baseCells)/32)));
 }
 
@@ -9125,9 +9169,9 @@ function edgebookDetailedWorkbook(source,cashFlowExport){
     const value=Number(item.timestamp),date=new Date(value<1e12?value*1000:value);
     return `${item.accountId||item.connectionId}: ${Number.isNaN(date.getTime())?'timestamp unavailable':date.toISOString()}${item.connected===false?' (stored snapshot; disconnected)':''}`;
   }).join('; ');
-  const tradeHeaders=['Journal Date','Opened At (UTC)','Closed At (UTC)','Duration Seconds','Trade ID','External Trade Key','Position ID','Broker Connection ID','Account','Account ID','Source','Symbol','Direction','Entry','Exit','Size','Size Unit','Position Status','Gross P&L','Commission','Swap','Conversion Fee','Other Attributed Charges','Broker Net P&L','Manual Reported P&L','Estimated Gross','Currency','Financial Status','P&L Authority','P&L Method','Component Coverage','Strategy','Setup','Grade','Emotion','Notes','Other Charge Attribution','Entry Exact Text','Exit Exact Text','Size Exact Text','Gross Exact Text','Commission Exact Text','Swap Exact Text','Conversion Fee Exact Text','Broker Net Exact Text','Manual Reported Exact Text','Estimated Gross Exact Text','Money Digits','Quantity Projection Unit','Quantity Lots Exact Text','Quantity Base Units Exact Text','Quantity Projection Value Exact Text'];
+  const tradeHeaders=['Journal Date','Opened At (UTC)','Closed At (UTC)','Duration Seconds','Trade ID','External Trade Key','Position ID','Broker Connection ID','Account','Account ID','Source','Symbol','Direction','Entry','Exit','Size','Size Unit','Position Status','Gross P&L','Commission','Swap','Conversion Fee','Other Attributed Charges','Broker Net P&L','Manual Reported P&L','Estimated Gross','Estimated Fees & Charges','Estimated Net P&L','Currency','Financial Status','P&L Authority','P&L Method','Component Coverage','Strategy','Setup','Grade','Emotion','Notes','Other Charge Attribution','Entry Exact Text','Exit Exact Text','Size Exact Text','Gross Exact Text','Commission Exact Text','Swap Exact Text','Conversion Fee Exact Text','Broker Net Exact Text','Manual Reported Exact Text','Estimated Gross Exact Text','Estimated Fees Exact Text','Estimated Net Exact Text','Money Digits','Quantity Projection Unit','Quantity Lots Exact Text','Quantity Base Units Exact Text','Quantity Projection Value Exact Text'];
   const tradeRows=source.map(trade=>{
-    const presentation=tradeFinancialPresentation(trade),breakdown=presentation?.breakdown||null,pb=trade?.custom?.playbook||{};
+    const presentation=tradeFinancialPresentation(trade),breakdown=presentation?.breakdown||null,estimated=cTraderEstimatedNet(trade),grossEstimate=cTraderCalculatedGross(trade),pb=trade?.custom?.playbook||{};
     const gross=breakdown?Number(breakdown.gross):null,commission=breakdown?Number(breakdown.commission):null,swap=breakdown?Number(breakdown.swap):null,conversionFee=breakdown?Number(breakdown.conversionFee):null;
     const financialStatus=presentation?.kind||(tradeIsOpen(trade)?'open_unrealized':'pnl_unavailable');
     return [
@@ -9135,23 +9179,23 @@ function edgebookDetailedWorkbook(source,cashFlowExport){
       xlsxExactText(trade.id||trade.recordId),xlsxExactText(trade.externalTradeKey),xlsxExactText(trade?.brokerData?.positionId||trade.brokerTradeId),xlsxExactText(trade.brokerConnectionId||trade?.brokerData?.brokerConnectionId),acctName(trade.accountId||''),xlsxExactText(trade.accountId),xlsxText(trade.sourceSystem||trade.source||trade.broker||'manual'),xlsxText(trade.symbol),xlsxText(trade.direction),
       xlsxNumber(trade.entry),xlsxNumber(trade.exit),xlsxNumber(getTradeSizeValue(trade)),getSizeLabel(trade),tradeIsOpen(trade)?'Open':'Closed',
       xlsxNumber(gross,'money'),xlsxNumber(commission,'money'),xlsxNumber(swap,'money'),xlsxNumber(conversionFee,'money'),null,
-      presentation?.isBrokerNet?xlsxNumber(presentation.amount,'money'):null,presentation?.kind==='manual_reported'?xlsxNumber(presentation.amount,'money'):null,presentation?.isEstimate?xlsxNumber(presentation.amount,'money'):null,
+      presentation?.isBrokerNet?xlsxNumber(presentation.amount,'money'):null,presentation?.kind==='manual_reported'?xlsxNumber(presentation.amount,'money'):null,xlsxNumber(grossEstimate?.valueText,'money'),xlsxNumber(estimated?.fees,'money'),xlsxNumber(estimated?.amount,'money'),
       presentation?.currency||tradePnlCurrency(trade)||'',financialStatus,xlsxText(trade?.brokerData?.pnlAuthority||presentation?.authority),xlsxText(trade?.brokerData?.pnlMethod),
-      breakdown?'Exact broker net and components':presentation?.isBrokerNet?'Exact broker net; component breakdown unavailable':presentation?.isEstimate?'Calculated gross only; fees excluded':presentation?.kind==='manual_reported'?'Journal-reported; not broker exact':'Unavailable',
+      breakdown?'Exact broker net and components':presentation?.isBrokerNet?'Exact broker net; component breakdown unavailable':presentation?.kind==='estimated_net'?'Estimated net using observed execution commissions and disclosed fee assumptions':presentation?.isEstimate?'Calculated gross only; fee estimate unavailable':presentation?.kind==='manual_reported'?'Journal-reported; not broker exact':'Unavailable',
       xlsxText(trade.strategy),xlsxText(pb.setup),xlsxText(pb.grade),xlsxText(trade.emotion),xlsxText(trade.notes),'Not attributed by cTrader; see Account Adjustments',
       xlsxExactText(trade?.exact?.entry??trade.entry),xlsxExactText(trade?.exact?.exit??trade.exit),xlsxExactText(trade?.exact?.size??trade.size),xlsxExactText(breakdown?.gross),xlsxExactText(breakdown?.commission),xlsxExactText(breakdown?.swap),xlsxExactText(breakdown?.conversionFee),
-      presentation?.isBrokerNet?xlsxExactText(trade?.exact?.pnl??trade.pnl):'',presentation?.kind==='manual_reported'?xlsxExactText(trade?.exact?.pnl??trade.pnl):'',presentation?.isEstimate?xlsxExactText(presentation?.gross?.valueText??presentation.amount):'',xlsxExactText(trade?.brokerData?.accountMoneyDigits),
+      presentation?.isBrokerNet?xlsxExactText(trade?.exact?.pnl??trade.pnl):'',presentation?.kind==='manual_reported'?xlsxExactText(trade?.exact?.pnl??trade.pnl):'',xlsxExactText(grossEstimate?.valueText),xlsxExactText(estimated?.feesValueText),xlsxExactText(estimated?.valueText),xlsxExactText(trade?.brokerData?.accountMoneyDigits),
       xlsxText(trade?.brokerData?.quantityProjection?.unit),xlsxExactText(trade?.brokerData?.quantityProjection?.lots),xlsxExactText(trade?.brokerData?.quantityProjection?.baseUnits),xlsxExactText(trade?.brokerData?.quantityProjection?.value),
     ];
   });
 
-  const eventHeaders=['Close Date','Executed At (UTC)','Trade ID','External Trade Key','Position ID','Execution ID','Account','Symbol','Direction','Closed Volume Cents','Price','Gross P&L','Commission','Swap','Conversion Fee','Other Attributed Charges','Broker Net P&L','Estimated Gross','Currency','Financial Status','Ledger Fallback','Other Charge Attribution','Closed Volume Cents Exact Text','Price Exact Text','Gross Exact Text','Commission Exact Text','Swap Exact Text','Conversion Fee Exact Text','Broker Net Exact Text','Money Digits'];
+  const eventHeaders=['Close Date','Executed At (UTC)','Trade ID','External Trade Key','Position ID','Execution ID','Account','Symbol','Direction','Closed Volume Cents','Price','Gross P&L','Commission','Swap','Conversion Fee','Other Attributed Charges','Broker Net P&L','Estimated Gross','Estimated Fees & Charges','Estimated Net P&L','Currency','Financial Status','Ledger Fallback','Other Charge Attribution','Closed Volume Cents Exact Text','Price Exact Text','Gross Exact Text','Commission Exact Text','Swap Exact Text','Conversion Fee Exact Text','Broker Net Exact Text','Money Digits'];
   const ledger=financialPresentationLedgerForTrades(source);
   const eventRows=ledger.map(row=>{
     const event=row.realizedEvent||{},isEstimate=row.financialIsEstimate;
     return [xlsxDate(row.ledgerDate,true),xlsxDate(event.executedAt),xlsxExactText(row.id||row.recordId),xlsxExactText(row.externalTradeKey),xlsxExactText(row?.brokerData?.positionId||row.brokerTradeId),xlsxExactText(event.executionId),acctName(row.accountId||''),xlsxText(row.symbol),xlsxText(row.direction),xlsxNumber(event.closedVolumeCents),xlsxNumber(event.price),
       xlsxNumber(isEstimate?(event.grossPnl??row.ledgerPnl):event.grossProfit,'money'),xlsxNumber(isEstimate?null:event.commission,'money'),xlsxNumber(isEstimate?null:event.swap,'money'),xlsxNumber(isEstimate?null:event.pnlConversionFee,'money'),null,
-      isEstimate?null:xlsxNumber(row.ledgerPnl,'money'),isEstimate?xlsxNumber(row.ledgerPnl,'money'):null,tradePnlCurrency(row)||'',row.financialKind,event.ledgerFallback===true,'Not attributed by cTrader',
+      isEstimate?null:xlsxNumber(row.ledgerPnl,'money'),isEstimate?xlsxNumber(event.grossPnl??null,'money'):null,isEstimate?xlsxNumber(Number(row.ledgerPnl)-Number(event.grossPnl??row.ledgerPnl),'money'):null,isEstimate?xlsxNumber(row.ledgerPnl,'money'):null,tradePnlCurrency(row)||'',row.financialKind,event.ledgerFallback===true,'Not attributed by cTrader',
       xlsxExactText(event.closedVolumeCents),xlsxExactText(event.price),xlsxExactText(isEstimate?(event.grossPnl??row.ledgerPnl):event.grossProfit),xlsxExactText(isEstimate?'':event.commission),xlsxExactText(isEstimate?'':event.swap),xlsxExactText(isEstimate?'':event.pnlConversionFee),xlsxExactText(isEstimate?'':event.pnl??row.ledgerPnl),xlsxExactText(row?.brokerData?.accountMoneyDigits),
     ];
   });
@@ -9170,7 +9214,7 @@ function edgebookDetailedWorkbook(source,cashFlowExport){
   const addQuality=(severity,code,row,explanation,amount=null,status='')=>quality.push([severity,code,xlsxExactText(row?.trade?.id||row?.id||row?.balanceHistoryId),xlsxText(row?.trade?acctName(row.trade.accountId||''):row?.mappedAccountId),xlsxText(row?.trade?.symbol||row?.symbol),xlsxNumber(amount,'money'),xlsxText(row?.presentation?.currency||row?.currency),status||xlsxText(row?.presentation?.kind),explanation]);
   scope.manualExcluded.forEach(row=>addQuality('Warning','MANUAL_EXCLUDED_FROM_BROKER_TOTAL',row,'Journal-reported P&L is retained for review but excluded from broker Overall P&L until it is reconciled.',row.presentation.amount));
   scope.included.filter(row=>row.presentation.kind==='manual_reported').forEach(row=>addQuality('Info','MANUAL_REPORTED',row,'Manual-only account value; this is journal-reported, not broker-exact.',row.presentation.amount));
-  scope.estimated.forEach(row=>addQuality('Warning','ESTIMATED_GROSS',row,'Calculated price-movement gross is provisional and excludes commission, swap, conversion fees and account adjustments.',row.presentation.amount));
+  scope.estimated.forEach(row=>addQuality('Warning',row.presentation.kind==='estimated_net'?'ESTIMATED_NET':'ESTIMATED_GROSS',row,row.presentation.kind==='estimated_net'?'Net P&L is provisional: execution commissions are observed, while disclosed swap/conversion/other-charge assumptions remain estimated.':'Calculated price-movement gross is provisional and fees are unavailable.',row.presentation.amount));
   scope.unavailable.forEach(row=>addQuality('Warning','PNL_UNAVAILABLE',row,'Closed position has no accepted exact broker net or calculated gross.'));
   scope.included.filter(row=>row.presentation.isBrokerNet&&!row.presentation.breakdown).forEach(row=>addQuality('Warning','COMPONENT_BREAKDOWN_UNAVAILABLE',row,'Broker net is exact, but gross/commission/swap/conversion components are not all available.',row.presentation.amount));
   ledger.filter(row=>row.realizedEvent?.ledgerFallback).forEach(row=>addQuality('Warning','REALIZED_EVENT_FALLBACK',row,'Provider event rows did not reconcile to the canonical exact net; one canonical close-date ledger row was used.',row.ledgerPnl,row.financialKind));
@@ -9249,8 +9293,8 @@ function edgebookDetailedWorkbook(source,cashFlowExport){
 
   return {creator:'Edgebook',sheets:[
     {name:'Summary',rows:summaryRows,widths:[46,20,14,70,70],freezeRows:0},
-    {name:'Trades',rows:[[...tradeHeaders.map(xlsxHeader)],...tradeRows],widths:[13,20,20,12,20,28,18,20,20,20,12,12,10,13,13,12,14,13,14,14,14,14,18,16,18,16,10,20,22,30,34,20,18,10,14,42,42,18,18,18,18,18,18,20,20,22,22,18,20,22,25,26],freezeRows:1,autoFilter:true},
-    {name:'Realized Events',rows:[[...eventHeaders.map(xlsxHeader)],...eventRows],widths:[13,20,20,28,18,18,20,12,10,18,12,14,14,14,14,18,16,16,10,22,13,38,24,18,18,18,18,22,20,14],freezeRows:1,autoFilter:true},
+    {name:'Trades',rows:[[...tradeHeaders.map(xlsxHeader)],...tradeRows],widths:[13,20,20,12,20,28,18,20,20,20,12,12,10,13,13,12,14,13,14,14,14,14,18,16,18,16,24,20,10,20,22,30,34,20,18,10,14,42,42,18,18,18,18,18,18,20,20,22,22,18,18,18,20,22,25,26],freezeRows:1,autoFilter:true},
+    {name:'Realized Events',rows:[[...eventHeaders.map(xlsxHeader)],...eventRows],widths:[13,20,20,28,18,18,20,12,10,18,12,14,14,14,14,18,16,16,24,20,10,22,13,38,24,18,18,18,18,22,20,14],freezeRows:1,autoFilter:true},
     {name:'Account Adjustments',rows:[[...adjustmentHeaders.map(xlsxHeader)],...adjustmentRows],widths:[20,18,20,20,34,28,14,14,14,10,12,20,28,18,16,20,20,20,24,24,24,18,22],freezeRows:1,autoFilter:true},
     {name:'Data Quality',rows:[[...qualityHeaders.map(xlsxHeader)],...quality],widths:[12,34,24,22,14,14,10,24,70],freezeRows:1,autoFilter:true},
   ]};
@@ -9789,7 +9833,7 @@ function renderAnalyticsCharts(){
     const notes=[];
     if(view.degraded)notes.push(`Mixed provisional analytics are shown from one best-available value per visible trade. ${financialDisplayViewNotice(view)}`);
     if(coverage.disconnectedConnectionCount)notes.push(financialCoverageSnapshotText(coverage));
-    if(view.estimatedCount)notes.push(`${view.estimatedCount} calculated gross estimate${view.estimatedCount===1?' is':'s are'} included provisionally; commission, swap and conversion fees may change those outcomes.`);
+    if(view.estimatedCount)notes.push(`${view.estimatedCount} estimated net value${view.estimatedCount===1?' is':'s are'} included provisionally; disclosed fee assumptions may still change those outcomes.`);
     if(openRealizedTradeCount)notes.push(`${openRealizedTradeCount} still-open position${openRealizedTradeCount===1?' has':'s have'} exact realised partial-close P&L included in Overall/equity but excluded from these closed-position outcome statistics.`);
     if(isAll)notes.push('All-account money values use an estimated current-FX USD translation.');
     coverageEl.style.display=notes.length?'block':'none';coverageEl.textContent=notes.join(' ');
@@ -10755,7 +10799,7 @@ function renderCalStats(){
   const lossDays=days.filter(p=>p<0).length;
   document.getElementById('cal-stats-row').innerHTML=[
     {label:'Overall month P&L',val:coverage.overallComplete?signedMoney(provisional,cs):'—',cls:provisional>0?'pos':provisional<0?'neg':'',title:coverage.overallComplete?'Complete canonical realised scope for the displayed month; broker-tracked accounts use exact broker net, while manual-only accounts use journal-reported P&L.':financialCoverageIssueText(coverage)},
-    {label:'Est. gross',val:signedMoney(estimatedGross,cs),cls:estimatedGross>0?'pos':estimatedGross<0?'neg':'',title:'Calculated gross only; fees and swap are excluded.'},
+    {label:'Est. net',val:signedMoney(estimatedGross,cs),cls:estimatedGross>0?'pos':estimatedGross<0?'neg':'',title:'Estimated net using observed execution commissions and disclosed fee assumptions.'},
     {label:view.degraded?'Mixed provisional':'Overall realised',val:signedMoney(provisional,cs),cls:provisional>0?'pos':provisional<0?'neg':'',title:financialDisplayViewNotice(view)||'Canonical realised P&L.'},
     {label:'Win days',val:days.length?winDays:'—',cls:'pos',title:view.degraded?'Based on the mixed provisional ledger.':''},
     {label:'Loss days',val:days.length?lossDays:'—',cls:'neg',title:view.degraded?'Based on the mixed provisional ledger.':''},
@@ -10920,7 +10964,7 @@ function renderHeatmap(){
     {label:'Realized closes',val:src.length,cls:''},
     {label:view.degraded?'Provisional WR':'Closed-position WR',val:visibleOutcomes.length?wr+'%':'—',cls:visibleOutcomes.length?(wr>=50?'pos':'neg'):'',title:view.degraded?'Based on one best-available value per visible trade; estimated gross can change after fees.':''},
     {label:'Overall range P&L',val:coverage.overallComplete?signedMoney(provisional,cs):'—',cls:provisional>0?'pos':provisional<0?'neg':'',title:coverage.overallComplete?'Complete canonical realised scope for the active heatmap range; broker-tracked accounts use exact broker net, while manual-only accounts use journal-reported P&L.':financialCoverageIssueText(coverage)},
-    {label:'Est. gross',val:signedMoney(gross,cs),cls:gross>0?'pos':gross<0?'neg':'',title:'Calculated gross only; fees and swap are excluded.'},
+    {label:'Est. net',val:signedMoney(gross,cs),cls:gross>0?'pos':gross<0?'neg':'',title:'Estimated net using observed execution commissions and disclosed fee assumptions.'},
     {label:view.degraded?'Mixed provisional':'Overall realised',val:signedMoney(provisional,cs),cls:provisional>0?'pos':provisional<0?'neg':'',title:financialDisplayViewNotice(view)||'Canonical realised P&L.'},
   ].map(s=>`<div class="hm-stat"${s.title?` title="${s.title}"`:''}><div class="hm-stat-label">${s.label}</div><div class="hm-stat-val ${s.cls}">${s.val}</div></div>`).join('');
 
@@ -12127,7 +12171,7 @@ function renderDrawdown(){
     const notes=[];
     if(view.degraded)notes.push(`The visible drawdown is a mixed provisional P&L series, not exact broker equity drawdown. ${financialDisplayViewNotice(view)}`);
     if(coverage.disconnectedConnectionCount)notes.push(financialCoverageSnapshotText(coverage));
-    if(view.estimatedCount)notes.push(`${view.estimatedCount} calculated gross estimate${view.estimatedCount===1?' is':'s are'} included provisionally; fees, swap and conversion charges may change the final drawdown.`);
+    if(view.estimatedCount)notes.push(`${view.estimatedCount} estimated net value${view.estimatedCount===1?' is':'s are'} included provisionally; disclosed fee assumptions may change the final drawdown.`);
     notes.push(view.degraded
       ? (isAll?'Absolute mode shows mixed provisional P&L drawdown translated at estimated current FX. Percentage mode is disabled because no authoritative starting-equity bridge exists.':'Absolute mode shows mixed provisional P&L drawdown. Percentage mode is a journal estimate based on configured account size, not broker equity.')
       : (isAll?'Absolute mode shows canonical realised-P&L drawdown translated at estimated current FX. Percentage mode is disabled because no authoritative starting-equity bridge exists.':'Absolute mode shows canonical realised-P&L drawdown. Percentage mode is a journal estimate based on the configured account size, not broker equity.'));
@@ -12501,7 +12545,7 @@ function renderDjEntry(){
 
     <!-- P&L strip -->
     <div class="dj-pnl-strip">
-      <div class="dj-pnl-cell" title="${escapeHtml(stats.issue||`Estimated current-FX USD translation.${stats.snapshot?` ${stats.snapshot}`:''}`)}${stats.estimatedCount?' Includes calculated gross estimates; fees and swap are excluded.':''}"><div class="dj-pnl-label">${stats.degraded?'Mixed provisional':'Day total'} <span style="font-size:8px;opacity:.6">est. current-FX USD</span></div><div class="dj-pnl-val" style="color:${pnlColor}">${stats.count&&Number.isFinite(stats.net)?signedMoney(stats.net,'$',2):'—'}${stats.degraded&&stats.count?' <span class="pnl-estimate-badge">prov.</span>':stats.estimatedCount?' <span class="pnl-estimate-badge">est.</span>':''}</div></div>
+      <div class="dj-pnl-cell" title="${escapeHtml(stats.issue||`Estimated current-FX USD translation.${stats.snapshot?` ${stats.snapshot}`:''}`)}${stats.estimatedCount?' Includes estimated net values using observed commissions and disclosed assumptions.':''}"><div class="dj-pnl-label">${stats.degraded?'Mixed provisional':'Day total'} <span style="font-size:8px;opacity:.6">est. current-FX USD</span></div><div class="dj-pnl-val" style="color:${pnlColor}">${stats.count&&Number.isFinite(stats.net)?signedMoney(stats.net,'$',2):'—'}${stats.degraded&&stats.count?' <span class="pnl-estimate-badge">prov.</span>':stats.estimatedCount?' <span class="pnl-estimate-badge">est.</span>':''}</div></div>
       <div class="dj-pnl-cell"><div class="dj-pnl-label">Positions</div><div class="dj-pnl-val">${stats.count||'—'}</div></div>
       <div class="dj-pnl-cell"><div class="dj-pnl-label">${stats.degraded?'Provisional':'Realised-event'} win rate</div><div class="dj-pnl-val" style="color:${stats.wr===null?'var(--text3)':stats.wr>=50?'var(--green)':'var(--red)'}">${stats.wr!==null?stats.wr+'%':'—'}</div></div>
       <div class="dj-pnl-cell" title="${escapeHtml(bestAuthority)}"><div class="dj-pnl-label">Best ${stats.degraded?'provisional':'realised'} event</div><div class="dj-pnl-val" style="color:${bestColor}">${bestPnl!==null?escapeHtml(`${signedMoney(bestPnl,bestAc,2)} ${stats.best.symbol||''}`.trim())+bestBadge:'—'}</div></div>

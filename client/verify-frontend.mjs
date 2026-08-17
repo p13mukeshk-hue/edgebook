@@ -332,14 +332,14 @@ requireMatch(duplicateResolutionSource, /duplicateNumericClose\(existing\.entry,
 requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousCreateError\(error\)[\s\S]*?api\.get\([\s\S]*?encodeURIComponent\(trade\.id\)[\s\S]*?tradeCreateFingerprint\(current\) === tradeCreateFingerprint\(trade\)/, 'lost trade-create response reconciliation');
 requireMatch(dataAdapter, /tradeCreateFingerprint[\s\S]*?pnl:[\s\S]*?entryTime:[\s\S]*?psychology:[\s\S]*?brokerData:/, 'complete normalized trade-create recovery fingerprint');
 requireMatch(app, /function calFinancialForDay[\s\S]*?financialDisplayViewForTrades[\s\S]*?estimatedGross[\s\S]*?provisional/, 'calendar shared mixed-provisional financial aggregation');
-requireMatch(app, /function renderCalStats[\s\S]*?Overall month P&L[\s\S]*?Est\. gross[\s\S]*?Mixed provisional/, 'calendar explicit complete-versus-provisional provenance summary');
-requireMatch(app, /function hmFilteredTrades[\s\S]*?financialDisplayViewForTrades[\s\S]*?function renderHeatmap[\s\S]*?Overall range P&L[\s\S]*?Est\. gross[\s\S]*?Mixed provisional/, 'heatmap shared mixed-provisional realized-close ledger');
+requireMatch(app, /function renderCalStats[\s\S]*?Overall month P&L[\s\S]*?Est\. net[\s\S]*?Mixed provisional/, 'calendar explicit complete-versus-provisional provenance summary');
+requireMatch(app, /function hmFilteredTrades[\s\S]*?financialDisplayViewForTrades[\s\S]*?function renderHeatmap[\s\S]*?Overall range P&L[\s\S]*?Est\. net[\s\S]*?Mixed provisional/, 'heatmap shared mixed-provisional realized-close ledger');
 requireMatch(app, /function djDayStats[\s\S]*?financialDisplayViewForTrades[\s\S]*?verifiedNet[\s\S]*?estimatedGross/, 'daily journal shared mixed-provisional day-level aggregation');
-requireMatch(app, /function tradeJournalCsv[\s\S]*?P&L Status[\s\S]*?Calculated Gross[\s\S]*?Fees Included/, 'CSV financial provenance columns');
+requireMatch(app, /function tradeJournalCsv[\s\S]*?P&L Status[\s\S]*?Fees & Charges[\s\S]*?Fee Status[\s\S]*?Calculated Gross/, 'CSV financial provenance columns');
 requireMatch(app, /function tradeJournalCsv[\s\S]*?Duration Seconds/, 'CSV exact trade-duration columns');
 requireMatch(app, /const TABLE_HEADS[\s\S]*?Entry time[\s\S]*?Duration/, 'dashboard and journal trade-duration column');
 requireMatch(app, /Average hold:[\s\S]*?timed trade/, 'analytics average holding-duration metric');
-requireMatch(app, /analytics-pnl-coverage[\s\S]*?Mixed provisional analytics[\s\S]*?calculated gross estimate[\s\S]*?included provisionally/, 'mixed-provisional analytics estimate disclosure');
+requireMatch(app, /analytics-pnl-coverage[\s\S]*?Mixed provisional analytics[\s\S]*?estimated net value[\s\S]*?included provisionally/, 'mixed-provisional analytics estimate disclosure');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
 requireMatch(csvImportCommitSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite[\s\S]*?return;[\s\S]*?closeModal/, 'CSV import waits for persistence before closing');
@@ -1929,6 +1929,7 @@ try {
         }
         return trade?.brokerData?.calculatedGrossPnl ? { kind: 'estimated_gross', isEstimate: true, isBrokerNet: false } : null;
       },
+      tradeFeesAndChargesPresentation: () => null,
       tradeJournalDate: trade => String(trade?.date||'').slice(0,10),
     },
     '{tradeJournalCsv}',
@@ -1952,15 +1953,15 @@ try {
     brokerData: { accountCurrency: 'USD', calculatedGrossPnl: '-4.00' },
   }]);
   const journalRows = JSON.parse(JSON.stringify(parser.parseCSV(journalCsv)));
-  if (!journalCsv.includes('\r\n') || journalRows.length !== 4 || journalRows[1].length !== 31 || journalRows[1][5] !== "'=CMD()" ||
-      journalRows[1][14] !== '-2.00' || journalRows[1][15] !== 'USD' || journalRows[1][16] !== 'manual_reported' || journalRows[1][20] !== "'+SUM(1,1)" || journalRows[1][21] !== "'=HYPERLINK(\"bad\")" || journalRows[1][29] !== "'@Desk" || journalRows[1][30] !== 'line 1, "quoted"\nline 2') {
+  if (!journalCsv.includes('\r\n') || journalRows.length !== 4 || journalRows[1].length !== 32 || journalRows[1][5] !== "'=CMD()" ||
+      journalRows[1][14] !== '-2.00' || journalRows[1][15] !== 'USD' || journalRows[1][16] !== 'manual_reported' || journalRows[1][21] !== "'+SUM(1,1)" || journalRows[1][22] !== "'=HYPERLINK(\"bad\")" || journalRows[1][30] !== "'@Desk" || journalRows[1][31] !== 'line 1, "quoted"\nline 2') {
     failures.push('RFC 4180 journal export or spreadsheet-injection protection regressed');
   }
   if (journalRows[0][3] !== 'Duration' || journalRows[0][4] !== 'Duration Seconds' || journalRows[2][3] !== '37m' || journalRows[2][4] !== '2240' ||
-      journalRows[0][11] !== 'Size Unit' || journalRows[0][15] !== 'PnL Currency' || journalRows[2][10] !== '2' || journalRows[2][11] !== 'XAU base units' || journalRows[2][15] !== 'EUR' || journalRows[2][16] !== 'broker_exact_net') {
+      journalRows[0][11] !== 'Size Unit' || journalRows[0][15] !== 'P&L Currency' || journalRows[2][10] !== '2' || journalRows[2][11] !== 'XAU base units' || journalRows[2][15] !== 'EUR' || journalRows[2][16] !== 'broker_exact_net') {
     failures.push('Journal CSV export mislabeled a cTrader base-unit quantity as lots');
   }
-  if (journalRows[3][14] !== '' || journalRows[3][16] !== 'estimated_gross' || journalRows[3][17] !== '-4.00' || journalRows[3][18] !== 'USD' || journalRows[3][19] !== 'No') {
+  if (journalRows[3][14] !== '' || journalRows[3][16] !== 'estimated_gross' || journalRows[3][17] !== '' || journalRows[3][18] !== 'unavailable' || journalRows[3][19] !== '-4.00' || journalRows[3][20] !== 'USD') {
     failures.push('Journal CSV export mixed calculated gross into verified net or lost estimate provenance');
   }
 } catch (error) {
@@ -2315,21 +2316,26 @@ try {
     ...persistedTrade,
     id: 'ctrader-calculated-gross', source: 'ctrader', pnl: null, isOpen: false,
     brokerData: {
-      calculatedGrossPnl: '-20.5', calculatedGrossCurrency: 'USD',
+      accountCurrency: 'USD', calculatedGrossPnl: '-20.5', calculatedGrossCurrency: 'USD',
       calculatedGrossMethod: 'fill_price_base_units_identity_conversion_v1',
       calculatedGrossProvenance: { version: 1, feesIncluded: false, accountMoneyDigits: 2, quoteCurrency: 'USD', accountCurrency: 'USD', conversionRate: '1' },
+      estimatedCommission: '-0.18', estimatedSwap: '0', estimatedConversionFee: '0', estimatedOtherCharges: '0',
+      estimatedFeesAndCharges: '-0.18', estimatedNetPnl: '-20.68', estimatedNetCurrency: 'USD',
+      estimatedNetMethod: 'remote_mcp_execution_commission_same_currency_v1',
+      estimatedNetProvenance: { version: 1, exact: false, accountMoneyDigits: 2, accountCurrency: 'USD' },
     },
   };
   const calculatedGrossHtml = tradeRenderer.tradeRow(calculatedGrossTrade);
-  if (!/class="pnl-neg">−\$20\.50<\/span>/.test(calculatedGrossHtml)) failures.push('Calculated gross loss did not use the same red signed-money treatment as manual P&L');
+  if (!/class="pnl-neg"[^>]*>-\$0\.18<\/span>/.test(calculatedGrossHtml)) failures.push('Estimated combined fees were not rendered as a signed charge');
+  if (!/class="pnl-neg">-\$20\.68<\/span>/.test(calculatedGrossHtml)) failures.push('Estimated net loss did not use the same red signed-money treatment as manual P&L');
   if (/Calc\. gross|fa-calculator/.test(calculatedGrossHtml)) failures.push('Calculated gross row kept the noisy legacy label or calculator icon');
-  if (!/class="pnl-estimate-badge"[^>]*>est\.<\/span>/.test(calculatedGrossHtml) || !/fees and swap excluded/.test(calculatedGrossHtml)) failures.push('Calculated gross row lost its subtle estimate disclosure');
+  if ((calculatedGrossHtml.match(/class="pnl-estimate-badge"/g)||[]).length<2 || !/observed opening\/closing execution commissions/.test(calculatedGrossHtml)) failures.push('Estimated fees/net row lost its provenance disclosure');
   const calculatedGainHtml = tradeRenderer.tradeRow({
     ...calculatedGrossTrade,
     id: 'ctrader-calculated-gain',
-    brokerData: { ...calculatedGrossTrade.brokerData, calculatedGrossPnl: '28' },
+    brokerData: { ...calculatedGrossTrade.brokerData, calculatedGrossPnl: '28', estimatedNetPnl: '27.82' },
   });
-  if (!/class="pnl-pos">\+\$28\.00<\/span>/.test(calculatedGainHtml)) failures.push('Calculated gross gain did not use the same green signed-money treatment as manual P&L');
+  if (!/class="pnl-pos">\+\$27\.82<\/span>/.test(calculatedGainHtml)) failures.push('Estimated net gain did not use the same green signed-money treatment as manual P&L');
 } catch (error) {
   failures.push(`Trade-row XSS fixture failed: ${error.message}`);
 }
@@ -3698,6 +3704,10 @@ try {
       ...estimateOnly.brokerData,
       calculatedGrossPnl: gross.toFixed(2),
       calculatedGrossEvents: [{ executionId: `incident-close-${index + 1}`, executedAt: `2026-08-${String(index + 6).padStart(2, '0')}T06:00:00.000Z`, grossPnl: gross.toFixed(2) }],
+      estimatedCommission: '-0.18', estimatedSwap: '0', estimatedConversionFee: '0', estimatedOtherCharges: '0',
+      estimatedFeesAndCharges: '-0.18', estimatedNetPnl: (gross-0.18).toFixed(2), estimatedNetCurrency: 'USD',
+      estimatedNetMethod: 'remote_mcp_execution_commission_same_currency_v1',
+      estimatedNetProvenance: { version: 1, exact: false, accountMoneyDigits: 2, accountCurrency: 'USD' },
     },
   }));
   const incidentSource = [...incidentManual, ...incidentEstimates];
@@ -3711,11 +3721,11 @@ try {
   const incidentRowIds = new Set(incidentView.analysisRows.map(row => row.trade.id));
   const incidentLedgerIds = new Set(incidentView.analysisLedger.map(row => row.id));
   if (incidentCoverage.overallComplete || incidentCoverage.overallNet !== null) failures.push('Incident fixture relaxed exact Overall P&L authority');
-  if (incidentView.analysisLabel !== 'Mixed provisional P&L' || incidentView.analysisRows.length !== 13 || incidentView.analysisLedger.length !== 13 || incidentView.closedRows.length !== 13) failures.push(`Incident fixture did not expose all 13 visible trades once (${JSON.stringify({label:incidentView.analysisLabel,rows:incidentView.analysisRows.length,ledger:incidentView.analysisLedger.length,closed:incidentView.closedRows.length})})`);
+  if (incidentView.analysisLabel !== 'Mixed provisional net P&L' || incidentView.analysisRows.length !== 13 || incidentView.analysisLedger.length !== 13 || incidentView.closedRows.length !== 13) failures.push(`Incident fixture did not expose all 13 visible trades once (${JSON.stringify({label:incidentView.analysisLabel,rows:incidentView.analysisRows.length,ledger:incidentView.analysisLedger.length,closed:incidentView.closedRows.length})})`);
   if (incidentRowIds.size !== 13 || incidentLedgerIds.size !== 13) failures.push('Incident provisional view double-counted a visible trade');
-  if (Math.abs(incidentManualValues.reduce((sum, value) => sum + value, 0) - -52.5) > 1e-9 || Math.abs(incidentEstimateValues.reduce((sum, value) => sum + value, 0) - -48.34) > 1e-9 || Math.abs(incidentNet - -100.84) > 1e-9 || Math.abs(incidentLedgerNet - -100.84) > 1e-9) failures.push(`Incident provisional sums did not reconcile (${JSON.stringify({incidentNet,incidentLedgerNet})})`);
+  if (Math.abs(incidentManualValues.reduce((sum, value) => sum + value, 0) - -52.5) > 1e-9 || Math.abs(incidentEstimateValues.reduce((sum, value) => sum + value, 0) - -48.34) > 1e-9 || Math.abs(incidentNet - -102.28) > 1e-9 || Math.abs(incidentLedgerNet - -102.28) > 1e-9) failures.push(`Incident provisional sums did not reconcile (${JSON.stringify({incidentNet,incidentLedgerNet})})`);
   if (incidentWins !== 2 || incidentLosses !== 11 || incidentView.journalCount !== 5 || incidentView.estimatedCount !== 8) failures.push(`Incident provisional outcomes/provenance did not reconcile (${JSON.stringify({incidentWins,incidentLosses,journal:incidentView.journalCount,estimated:incidentView.estimatedCount})})`);
-  if (!/Exact broker Overall P&L remains withheld/.test(incidentNotice) || !/fees and swap excluded/.test(incidentNotice) || !/may overlap unresolved broker rows/.test(incidentNotice)) failures.push('Incident provisional notice omitted exact-authority, fee, or overlap disclosure');
+  if (!/Exact broker Overall P&L remains withheld/.test(incidentNotice) || !/observed execution commissions/.test(incidentNotice) || !/may overlap unresolved broker rows/.test(incidentNotice)) failures.push('Incident provisional notice omitted exact-authority, fee, or overlap disclosure');
 
   vpsState.connections = [];vpsState.statuses = new Map();vpsState.live = { reviews: new Map(), errors: new Map(), loading: new Set() };
   coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
@@ -3820,6 +3830,7 @@ try {
       tradeIsOpen: trade => trade.isOpen === true, getTradeSizeValue: trade => trade.size, getSizeLabel: () => 'base units',
       tradePnlCurrency: trade => trade._presentation?.currency || trade.brokerData?.accountCurrency || 'USD',
       cTraderCalculatedGross: trade => trade._presentation?.gross || null, acctName: () => 'Master',
+      cTraderEstimatedNet: trade => trade._presentation?.estimatedNet || null,
       ctraderCashFlowCategory: flow => flow.category || 'unknown', mappedAccountForCTraderConnection: connection => connection.mappedAccountId || '',
       ctraderCashFlowHasExactMoney: flow => flow?.scalingStatus === 'exact' && flow?.moneyDigitsSource === 'cash_flow' && Number.isSafeInteger(Number(flow?.moneyDigits)) && flow?.amount !== null && flow?.amount !== undefined && /^-?\d+(?:\.\d+)?$/.test(String(flow.amount)),
       isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
@@ -3843,7 +3854,7 @@ try {
   const tradeHeaders = definition.sheets[1].rows[0].map(valueOf);
   const adjustmentHeaders = definition.sheets[3].rows[0].map(valueOf);
   const qualityCodes = definition.sheets[4].rows.slice(1).map(row => valueOf(row[1]));
-  for (const header of ['Broker Net P&L', 'Gross Exact Text', 'Broker Net Exact Text', 'Quantity Base Units Exact Text']) if (!tradeHeaders.includes(header)) failures.push(`Detailed XLSX omitted trade audit column ${header}`);
+  for (const header of ['Broker Net P&L', 'Estimated Fees & Charges', 'Estimated Net P&L', 'Gross Exact Text', 'Broker Net Exact Text', 'Quantity Base Units Exact Text']) if (!tradeHeaders.includes(header)) failures.push(`Detailed XLSX omitted trade audit column ${header}`);
   for (const header of ['Opened At (UTC)', 'Closed At (UTC)']) if (!tradeHeaders.includes(header)) failures.push(`Detailed XLSX omitted timestamp timezone label ${header}`);
   if (!adjustmentHeaders.includes('Occurred At (UTC)')) failures.push('Detailed XLSX account-ledger timestamp did not disclose UTC');
   for (const header of ['Raw Amount Units', 'Raw Balance Units', 'Raw Equity Units', 'Balance Version']) if (!adjustmentHeaders.includes(header)) failures.push(`Detailed XLSX omitted account-ledger audit column ${header}`);
@@ -3909,7 +3920,7 @@ try {
   if (!allSheetXml.includes('2490112340000000001') || !allSheetXml.includes('200000000000000001')) failures.push('Detailed XLSX lost exact raw integer audit values to floating-point conversion');
   if (adjustmentsXml.includes('<c r="G3"') || !adjustmentsXml.includes('-100000000000000002')) failures.push('Detailed XLSX serialized an unscaled cash-flow amount as typed money/zero or omitted its raw audit units');
   if (!stylesXml.includes('numFmtId="49"') || !tradesXml.includes('<c r="E2" s="10" t="inlineStr">') || !allSheetXml.includes('s="10" t="inlineStr"')) failures.push('Detailed XLSX exact identifiers/raw values lost their explicit Excel text format');
-  if (!tradesXml.includes('<autoFilter ref="A1:AZ2"')) failures.push('Detailed XLSX filter no longer starts on the actual Trades header row');
+  if (!tradesXml.includes('<autoFilter ref="A1:BD2"')) failures.push('Detailed XLSX filter no longer starts on the actual Trades header row');
 
   const namedBytes = xlsxExport.buildXlsx({ sheets: [{ name: 'Invalid/very*long?sheet:name[one] 1234567890', rows: [['A']] }, { name: 'Invalid/very*long?sheet:name[one] 1234567890', rows: [['B']] }] });
   const namedWorkbookXml = new TextDecoder().decode(readStoredZipEntries(namedBytes).get('xl/workbook.xml'));

@@ -1517,11 +1517,13 @@ describe("CTraderMcpSyncEngine", () => {
       deal({
         dealId: "6678962", positionId: "4556640", tradeSide: "SELL", dealType: undefined,
         symbolName: "XAUUSD", filledVolume: "200", executionPrice: 4_401.84,
+        commission: -9,
         executionTimestamp: new Date("2026-08-12T04:49:17.842Z").getTime(),
       }),
       deal({
         dealId: "6679278", positionId: "4556640", tradeSide: "BUY", dealType: undefined,
         symbolName: "XAUUSD", filledVolume: "200", executionPrice: 4_391.51,
+        commission: -9,
         executionTimestamp: new Date("2026-08-12T05:30:01.003Z").getTime(),
       }),
     ], {
@@ -1545,6 +1547,20 @@ describe("CTraderMcpSyncEngine", () => {
       calculatedGrossPnl: "20.66",
       calculatedGrossCurrency: "USD",
       calculatedGrossMethod: "fill_price_base_units_identity_conversion_v1",
+      estimatedCommission: "-0.18",
+      estimatedSwap: "0",
+      estimatedConversionFee: "0",
+      estimatedOtherCharges: "0",
+      estimatedFeesAndCharges: "-0.18",
+      estimatedNetPnl: "20.48",
+      estimatedNetCurrency: "USD",
+      estimatedNetMethod: "remote_mcp_execution_commission_same_currency_v1",
+      estimatedNetProvenance: {
+        exact: false,
+        commission: { executionCount: 2, rawUnitsAssumedAtAccountMoneyDigits: true },
+        swap: { assumedZero: true, source: "same_provider_calendar_day_assumption" },
+        analyticsTreatment: "provisional_net_only",
+      },
       calculatedGrossProvenance: {
         feesIncluded: false,
         analyticsTreatment: "excluded_from_net_pnl",
@@ -1599,6 +1615,71 @@ describe("CTraderMcpSyncEngine", () => {
         baseAssetId: "17", quoteAssetId: "15", depositAssetId: "15",
         symbolSpec: { baseUnitsPerLot: null, quantityLotsConversionAvailable: false },
       },
+    });
+  });
+
+  it("includes observed deal swap with opening and closing commissions in estimated net", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal({ commission: -9, swap: 0 }),
+      deal({
+        dealId: "1002", orderId: "8002", tradeSide: "SELL", dealType: "EXIT",
+        commission: -9, swap: -5, executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-10T11:00:00.000Z").getTime(),
+      }),
+    ], {
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "17", name: "XAU" }],
+      symbolsResponse: [{
+        id: "41", name: "XAU/USD", baseAssetId: "17", quoteAssetId: "15",
+        lotSize: 100, lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(tradeInsert?.values[13]).toBeNull();
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      calculatedGrossPnl: "100",
+      estimatedCommission: "-0.18",
+      estimatedSwap: "-0.05",
+      estimatedFeesAndCharges: "-0.23",
+      estimatedNetPnl: "99.77",
+      estimatedNetProvenance: {
+        swap: { source: "sum_of_deal_swap", assumedZero: false },
+      },
+    });
+  });
+
+  it("withholds estimated net for an overnight trade when swap is not observed", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { engine, clientQueries } = harness([
+      deal({ commission: -9, executionTimestamp: new Date("2026-08-10T10:00:00.000Z").getTime() }),
+      deal({
+        dealId: "1002", orderId: "8002", tradeSide: "SELL", dealType: "EXIT",
+        commission: -9, executionPrice: 2_010,
+        executionTimestamp: new Date("2026-08-11T11:00:00.000Z").getTime(),
+      }),
+    ], {
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "17", name: "XAU" }],
+      symbolsResponse: [{
+        id: "41", name: "XAU/USD", baseAssetId: "17", quoteAssetId: "15",
+        lotSize: 100, lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      calculatedGrossPnl: "100",
+      estimatedFeesAndCharges: null,
+      estimatedNetPnl: null,
+      estimatedNetMethod: null,
     });
   });
 
