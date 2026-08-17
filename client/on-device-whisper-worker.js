@@ -169,7 +169,6 @@ async function drainQueue() {
       return_timestamps: false,
       chunk_length_s: 20,
       stride_length_s: 2,
-      task: 'transcribe',
       do_sample: false,
       condition_on_prev_tokens: false,
     });

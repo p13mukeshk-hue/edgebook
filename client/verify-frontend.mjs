@@ -773,7 +773,8 @@ requireMatch(whisperWorkerSource,/dtype:\s*'q4'/,'efficient quantized inference'
 requireMatch(whisperWorkerSource,/preferredDevice\s*!==\s*'webgpu'[\s\S]{0,160}?createPipeline\('wasm'\)/,'automatic WebGPU initialization fallback');
 requireMatch(whisperWorkerSource,/resampleTo16Khz/,'deterministic Whisper input resampling');
 requireMatch(whisperWorkerSource,/prepareWhisperAudio[\s\S]{0,1200}?requestHasSpeech/,'Whisper audio centering, bounded gain, and worker-side speech gate');
-requireMatch(whisperWorkerSource,/task:\s*['"]transcribe['"][\s\S]{0,140}?do_sample:\s*false[\s\S]{0,140}?condition_on_prev_tokens:\s*false/,'deterministic English-only Whisper transcription settings');
+requireMatch(whisperWorkerSource,/do_sample:\s*false[\s\S]{0,140}?condition_on_prev_tokens:\s*false/,'deterministic English-only Whisper transcription settings');
+rejectMatch(whisperWorkerSource,/task:\s*['"]transcribe['"]|language:\s*['"]english['"]/,'invalid language/task generation options on the English-only Whisper model');
 requireMatch(dictationControllerSource,/MIN_AUTO_SPEECH_MS\s*=\s*300[\s\S]{0,180}?MIN_MANUAL_CAPTURE_MS\s*=\s*350/,'adaptive live speech detection and minimum manual recording gate');
 requireMatch(dictationControllerSource,/current\.chunks\.push\(chunk\)[\s\S]{0,500}?current\.energySquaredSum\s*\+=\s*sum/,'full microphone utterance is retained even when local voice detection is uncertain');
 requireMatch(dictationControllerSource,/submitSegment\(current,\s*true,\s*true\)/,'manual stop always submits a sufficiently long captured utterance');
