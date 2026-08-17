@@ -63,12 +63,19 @@ jobs:
           rendered="$(mktemp)"
           trap 'rm -f -- "$rendered"' EXIT
           docker compose \
+            --profile writer \
+            --profile tools \
             --env-file deploy/vps/env/rehearsal-compose.env.example \
             -f deploy/vps/docker-compose.yml \
             config --format json >"$rendered"
           node - "$rendered" <<'NODE'
           const { readFileSync } = require('node:fs');
           const model = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const renderedServices = Object.keys(model.services).sort();
+          const expectedServices = ['api', 'migrate', 'postgres', 'worker'];
+          if (JSON.stringify(renderedServices) !== JSON.stringify(expectedServices)) {
+            throw new Error(`unexpected rendered rehearsal services: ${renderedServices.join(', ')}`);
+          }
           const unprofiled = Object.entries(model.services)
             .filter(([, service]) => !Array.isArray(service.profiles) || service.profiles.length === 0)
             .map(([name]) => name)

@@ -209,6 +209,8 @@ requireText(deployReadme, /verify-rollback-candidate\.sh[\s\S]*--candidate/, 'do
 requireText(deployReadme, /5039ae4/, 'known incompatible rollback release warning');
 const ci = read('.github/workflows/edgebook-ci.yml');
 requireText(ci, /Exercise release compatibility gates[\s\S]*build-public\.sh[\s\S]*verify-rollback-candidate\.sh[\s\S]*tradeQuantityCompatibility/, 'CI exercises the built public compatibility marker and rollback verifier');
+requireText(ci, /Render credentialless rehearsal Compose model[\s\S]*--profile writer[\s\S]*--profile tools[\s\S]*config --format json/, 'CI renders targeted writer and tools profiles for credentialless checks');
+requireText(ci, /expectedServices\s*=\s*\[['"]api['"],\s*['"]migrate['"],\s*['"]postgres['"],\s*['"]worker['"]\]/, 'CI fails clearly when targeted rehearsal services are omitted');
 
 for (const page of ['app.html', 'index.html', 'landing.html']) {
   rejectText(read(page), /enableFirebaseFallback|firebase-fallback|www\.gstatic\.com\/firebasejs/, `${page} Firebase runtime dependency`);
