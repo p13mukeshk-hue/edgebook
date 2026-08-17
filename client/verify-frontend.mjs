@@ -2326,7 +2326,8 @@ try {
     },
   };
   const calculatedGrossHtml = tradeRenderer.tradeRow(calculatedGrossTrade);
-  if (!/class="pnl-neg"[^>]*>-\$0\.18<\/span>/.test(calculatedGrossHtml)) failures.push('Estimated combined fees were not rendered as a signed charge');
+  if (!/class="fees-charges-neutral"[^>]*>-\$0\.18<\/span>/.test(calculatedGrossHtml)) failures.push('Estimated combined fees were not rendered as a neutral signed charge');
+  if (/class="pnl-(?:pos|neg)"[^>]*>-\$0\.18<\/span>/.test(calculatedGrossHtml)) failures.push('Fees and charges incorrectly reused P&L red/green styling');
   if (!/class="pnl-neg">-\$20\.68<\/span>/.test(calculatedGrossHtml)) failures.push('Estimated net loss did not use the same red signed-money treatment as manual P&L');
   if (/Calc\. gross|fa-calculator/.test(calculatedGrossHtml)) failures.push('Calculated gross row kept the noisy legacy label or calculator icon');
   if ((calculatedGrossHtml.match(/class="pnl-estimate-badge"/g)||[]).length<2 || !/observed opening\/closing execution commissions/.test(calculatedGrossHtml)) failures.push('Estimated fees/net row lost its provenance disclosure');

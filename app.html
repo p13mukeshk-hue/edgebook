@@ -428,6 +428,7 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .badge-cm{background:rgba(245,166,35,0.12);color:#e8954a}
 .pnl-pos{color:var(--green);font-family:var(--font-mono);font-size:12px;font-weight:500}
 .pnl-neg{color:var(--red);font-family:var(--font-mono);font-size:12px;font-weight:500}
+.fees-charges-neutral{color:var(--text2);font-family:var(--font-mono);font-size:12px;font-weight:500}
 .pnl-neu{color:var(--text2);font-family:var(--font-mono);font-size:12px}
 .pnl-gross-estimate{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .pnl-estimate-badge{display:inline-flex;align-items:center;padding:1px 4px;border:1px solid var(--border);border-radius:999px;color:var(--text3);background:var(--bg3);font-family:var(--font-body);font-size:8px;font-weight:700;line-height:1.25;letter-spacing:.04em;text-transform:uppercase}
@@ -8511,7 +8512,7 @@ function tradeRow(t){
       ? '<span style="color:var(--text3)" title="Gross price movement is available, but fees are incomplete; net P&L is withheld.">Net pending</span>'
       : `${pnlStr}${authorityBadge}`;
   const feesStr=feesPresentation
-    ? `<span class="${feesPresentation.amount>0?'pnl-pos':feesPresentation.amount<0?'pnl-neg':'pnl-neu'}" title="${feesPresentation.isEstimate?'Estimated combined opening/closing commission, swap, conversion fee and other attributable charges.':'Exact combined commission, swap and conversion fee from cTrader close details.'}">${feesPresentation.amount>0?'+':feesPresentation.amount<0?'-':''}${escapeHtml(calculatedGrossCurrencyPrefix(feesPresentation.currency))}${Math.abs(feesPresentation.amount).toFixed(2)}</span>${feesPresentation.isEstimate?'<span class="pnl-estimate-badge" aria-label="Estimated fees and charges">est.</span>':''}`
+    ? `<span class="fees-charges-neutral" title="${feesPresentation.isEstimate?'Estimated combined opening/closing commission, swap, conversion fee and other attributable charges.':'Exact combined commission, swap and conversion fee from cTrader close details.'}">${feesPresentation.amount>0?'+':feesPresentation.amount<0?'-':''}${escapeHtml(calculatedGrossCurrencyPrefix(feesPresentation.currency))}${Math.abs(feesPresentation.amount).toFixed(2)}</span>${feesPresentation.isEstimate?'<span class="pnl-estimate-badge" aria-label="Estimated fees and charges">est.</span>':''}`
     : '<span style="color:var(--text3)" title="Combined fees and charges are unavailable for this row.">—</span>';
 
   const symCell = isOpen
