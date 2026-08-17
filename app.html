@@ -431,14 +431,6 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .pnl-neu{color:var(--text2);font-family:var(--font-mono);font-size:12px}
 .pnl-gross-estimate{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .pnl-estimate-badge{display:inline-flex;align-items:center;padding:1px 4px;border:1px solid var(--border);border-radius:999px;color:var(--text3);background:var(--bg3);font-family:var(--font-body);font-size:8px;font-weight:700;line-height:1.25;letter-spacing:.04em;text-transform:uppercase}
-.financial-summary-strip{display:grid;grid-template-columns:repeat(6,minmax(110px,1fr));gap:1px;margin:0 0 16px;background:var(--border);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
-.financial-summary-item{min-width:0;padding:10px 12px;background:var(--bg2)}
-.financial-summary-label{font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);white-space:nowrap}
-.financial-summary-value{margin-top:4px;font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.financial-summary-value.pos{color:var(--green)}.financial-summary-value.neg{color:var(--red)}
-.financial-summary-note{grid-column:1/-1;padding:8px 12px;background:var(--bg3);font-size:10px;line-height:1.45;color:var(--text3)}
-@media(max-width:900px){.financial-summary-strip{grid-template-columns:repeat(3,minmax(105px,1fr))}}
-@media(max-width:520px){.financial-summary-strip{grid-template-columns:repeat(2,minmax(105px,1fr))}}
 .action-btn{background:none;border:none;color:var(--text3);cursor:pointer;padding:4px 6px;border-radius:6px;font-size:12px;transition:.15s}
 .action-btn:hover{color:var(--text);background:var(--bg4)}
 .action-btn.del:hover{color:var(--red)}
@@ -1369,7 +1361,6 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
           <div class="metric-card" id="widget-avgloss"><div class="mc-label">Avg Loss</div><div class="mc-value neg" id="m-avgl">—</div><div class="mc-change">per losing trade</div></div>
           <div class="metric-card" id="widget-pf"><div class="mc-label">Profit Factor</div><div class="mc-value neu" id="m-pf">—</div><div class="mc-change">gross win / gross loss</div></div>
         </div>
-        <div class="financial-summary-strip" id="dashboard-financial-summary" aria-label="Profit and loss cost breakdown"></div>
         <div class="charts-row">
           <div class="chart-card" id="widget-equity">
             <div class="chart-header equity-chart-header">
@@ -4708,7 +4699,6 @@ async function refreshVpsCtraderCashFlowCache(){
   if(tasks.length)await Promise.allSettled(tasks);
   const connectionIds=new Set((vpsCtraderState.connections||[]).map(connection=>String(connection.id)));
   [...cache.entries.keys()].filter(id=>!connectionIds.has(id)).forEach(id=>cache.entries.delete(id));
-  if(document.getElementById('dashboard-financial-summary'))updateMetrics();
 }
 function loadedAccountCashFlows(accountId='all'){
   const requested=String(accountId||'all');
@@ -8321,46 +8311,6 @@ function refreshAll(){
   if(activePage!=='mood') renderMoodHistory();
 }
 
-function renderDashboardFinancialSummary(coverage,{currency,accountId,isAll,view}){
-  const element=document.getElementById('dashboard-financial-summary');if(!element)return;
-  const adjustments=loadedAccountCashFlows(accountId),tradeAdjustments=adjustments.rows.filter(flow=>flow.category==='trading_related_adjustment');
-  const convertedAdjustments=tradeAdjustments.map(flow=>{
-    if(!ctraderCashFlowHasExactMoney(flow))return null;
-    const amount=Number(flow?.amount),flowCurrency=normalizeFxCurrency(flow?.currency);
-    if(!Number.isFinite(amount)||!flowCurrency)return null;
-    if(isAll)return FxRates.toUSD(amount,flowCurrency);
-    return flowCurrency===normalizeFxCurrency(acctCur(accountId))?amount:null;
-  });
-  const adjustmentValues=convertedAdjustments.filter(Number.isFinite),adjustmentUnavailableCount=convertedAdjustments.length-adjustmentValues.length;
-  const adjustmentTotal=adjustmentValues.reduce((sum,value)=>sum+value,0);
-  const adjustmentSubtotalAvailable=adjustments.complete&&!adjustmentUnavailableCount;
-  const hasComponents=coverage.overallComplete&&coverage.providerExactCount>0&&coverage.manualReportedCount===0&&coverage.componentExactCount===coverage.providerExactCount&&coverage.componentConversionComplete;
-  const items=[
-    {label:'Overall P&L',value:coverage.overallComplete?signedMoney(coverage.overallNet,currency,coverage.moneyDigits):'—',amount:coverage.overallComplete?coverage.overallNet:null},
-    ...(view?.degraded?[{label:view.analysisLabel,value:Number.isFinite(view.analysisNet)?signedMoney(view.analysisNet,currency,coverage.moneyDigits):'—',amount:Number.isFinite(view.analysisNet)?view.analysisNet:null}]:[]),
-    {label:'Gross P&L',value:hasComponents?signedMoney(coverage.grossProfit,currency,coverage.moneyDigits):'—',amount:hasComponents?coverage.grossProfit:null},
-    {label:'Commission',value:hasComponents?signedMoney(coverage.commission,currency,coverage.moneyDigits):'—',amount:hasComponents?coverage.commission:null},
-    {label:'Swap',value:hasComponents?signedMoney(coverage.swap,currency,coverage.moneyDigits):'—',amount:hasComponents?coverage.swap:null},
-    {label:'Conversion fees',value:hasComponents?signedMoney(-coverage.conversionFee,currency,coverage.moneyDigits):'—',amount:hasComponents?-coverage.conversionFee:null},
-    {label:'Trade-related acct. adj.',value:adjustmentSubtotalAvailable?signedMoney(adjustmentTotal,currency,coverage.moneyDigits):'—',amount:adjustmentSubtotalAvailable?adjustmentTotal:null},
-  ];
-  const manualNote=coverage.excludedManualCount?`${coverage.excludedManualCount} manual/unreconciled value${coverage.excludedManualCount===1?' is':'s are'} kept visible in the journal but excluded from broker Overall P&L${coverage.excludedManualConversionUnavailableCount?' (amount cannot be converted safely).':` (${signedMoney(coverage.excludedManualNet,currency,2)}).`}`:'';
-  const estimateNote=coverage.estimatedCount?`${coverage.estimatedCount} calculated gross estimate${coverage.estimatedCount===1?' is':'s are'} provisional and excluded from exact broker Overall P&L${coverage.estimatedConversionUnavailableCount?' (amount cannot be converted safely).':` (${signedMoney(coverage.estimatedGross,currency,2)}); they remain included in the labelled mixed provisional view.`}`:'';
-  const componentNote=!hasComponents&&coverage.providerExactCount?`Full component reconciliation is unavailable: ${coverage.componentExactCount} of ${coverage.providerExactCount} broker-exact net trade${coverage.providerExactCount===1?' has':'s have'} complete gross/fee components. Component cards stay blank rather than implying they reconcile to Overall P&L.`:'';
-  const conversionNote=coverage.conversionUnavailableCount?`${coverage.conversionUnavailableCount} included value${coverage.conversionUnavailableCount===1?' has':'s have'} unsupported or mismatched currency, so no partial Overall P&L is shown.`:'';
-  const incompleteNote=!coverage.overallComplete?financialDisplayViewNotice(view):'';
-  const snapshotNote=financialCoverageSnapshotText(coverage);
-  const overallScopeNote=coverage.brokerTrackedAccountCount
-    ? coverage.manualReportedCount
-      ? 'Overall P&L combines realized broker trade net for broker-tracked accounts with journal-reported realized P&L from manual-only accounts; it excludes open/unrealized P&L, funding and account adjustments, and it is not live broker equity.'
-      : 'Overall P&L is realized broker trade net only, including realized partial closes; it excludes open/unrealized P&L, funding and account adjustments, and it is not live broker equity.'
-    : 'Overall P&L is journal-reported realized P&L for this manual-only scope; it excludes open/unrealized P&L, funding and account adjustments, and it is not live broker equity.';
-  const unknownCount=adjustments.rows.filter(flow=>flow.category==='unknown').length;
-  const adjustmentNote=adjustments.connectionCount?`Account adjustments are separate from trade P&L and may overlap broker costs; ${adjustments.complete?`the full stored provider-history ledger is loaded through ${adjustments.coverageThrough?.join('; ')||'the verified checkpoint'} (${adjustments.rows.length} row${adjustments.rows.length===1?'':'s'})`:`the subtotal is withheld because full stored/provider coverage is not verified${adjustments.reasons?.length?`: ${adjustments.reasons.join(' ')}`:''}`}.${adjustments.warnings?.length?` ${adjustments.warnings.join(' ')}`:''}${adjustmentUnavailableCount?` ${adjustmentUnavailableCount} adjustment${adjustmentUnavailableCount===1?' cannot':'s cannot'} be converted safely, so no partial subtotal is shown.`:''}${unknownCount?` ${unknownCount} unknown adjustment${unknownCount===1?' needs':'s need'} review.`:''}`:'';
-  element.innerHTML=items.map(item=>`<div class="financial-summary-item"><div class="financial-summary-label">${escapeHtml(item.label)}</div><div class="financial-summary-value ${Number(item.amount)>0?'pos':Number(item.amount)<0?'neg':''}">${escapeHtml(item.value)}</div></div>`).join('')+
-    `<div class="financial-summary-note">${escapeHtml([overallScopeNote,incompleteNote,snapshotNote,manualNote,estimateNote,componentNote,conversionNote,adjustmentNote,isAll?'All-account USD values are estimates translated at the current browser FX rate.':'',hasComponents?'Gross P&L + swap + commission − conversion fees reconciles exactly to Overall P&L for this scope.':''].filter(Boolean).join(' ')||'Account-level adjustments remain separate from trade P&L.')}</div>`;
-}
-
 function updateMetrics(){
   const src=tradesForContext('dashboard');
   const pid=activePageAcct['dashboard']||'all';
@@ -8402,7 +8352,6 @@ function updateMetrics(){
   const ctx=activePageAcct['dashboard'];
   const equityNote = isAll ? 'All accounts · est. current-FX USD' : `P&L — ${acctName(ctx)}`;
   document.getElementById('equity-sub').textContent=equityNote;
-  renderDashboardFinancialSummary(coverage,{currency:c,accountId:pid,isAll,view});
 }
 
 function acctTagCell(t){

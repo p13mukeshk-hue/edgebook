@@ -544,7 +544,7 @@ rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T
 
 const dashboardMetricsSource = sourceBetween('function updateMetrics', 'function acctTagCell');
 requireMatch(dashboardMetricsSource, /pnlEl\.textContent=Number\.isFinite\(net\)\?signedMoney\(net,c,coverage\.moneyDigits\):['"]—['"][\s\S]*?pnlLabel\.textContent=view\.analysisLabel/, 'dashboard KPI uses the authority-labelled best-available financial view');
-requireMatch(app, /label:['"]Overall P&L['"],value:coverage\.overallComplete\?signedMoney\(coverage\.overallNet/, 'dashboard keeps exact Overall P&L separately gated');
+rejectMatch(app, /dashboard-financial-summary|renderDashboardFinancialSummary|financial-summary-(?:strip|item|label|value|note)/, 'removed dashboard financial-breakdown strip');
 rejectMatch(dashboardMetricsSource, /pnlEl\.textContent=\(net>=0\?['"]\+['"]:['"]['"]\)\+c\+Math\.abs\(net\)/, 'dashboard Net P&L KPI sign-dropping formatter');
 try {
   const signedMoneyContext = {};
@@ -3757,7 +3757,7 @@ try {
   if (!stats.incomplete || stats.unavailableCount < 1 || stats.net !== 10 || stats.wr !== 100 || stats.best?.id !== 'usd' || stats.count !== 2 || !/Exact broker Overall P&L remains withheld/.test(stats.issue)) failures.push('Daily Journal did not expose a labelled available subtotal while preserving conversion incompleteness');
   requireMatch(app, /renderDashboardInsights\(equityRows,closed,displayC,palette,view\)/, 'dashboard insight charts consume the shared provisional ledger');
   requireMatch(app, /const completedPnlVals = completed\.map\(pnlInDisplay\)\.filter\(Number\.isFinite\)/, 'dashboard outcome cards consume valued provisional outcomes');
-  requireMatch(app, /label:['"]Overall P&L['"],value:coverage\.overallComplete\?/, 'exact Overall P&L remains fail-closed while provisional views render');
+  rejectMatch(app, /dashboard-financial-summary|renderDashboardFinancialSummary/, 'dashboard financial-breakdown strip remains removed while provisional views render');
 } catch (error) {
   failures.push(`Financial conversion fail-closed fixture failed: ${error.message}`);
 }
@@ -3856,7 +3856,7 @@ try {
   if (!/Account cash-flow ledger \| PARTIAL \/ UNKNOWN/.test(summaryText)) failures.push('Detailed XLSX claimed complete monetary account-adjustment coverage while an unscaled row remained');
   if (!/Overall P&L scope \| Realized broker trade net only[\s\S]*excludes open\/unrealized P&L[\s\S]*not live broker equity/.test(summaryText)) failures.push('Detailed XLSX did not distinguish realized trade net from live broker equity/unrealized P&L');
   if (!/Balance, not equity/.test(summaryText)) failures.push('Detailed XLSX mislabeled the broker balance control as live equity');
-  requireMatch(app, /Overall P&L is realized broker trade net only[\s\S]*excludes open\/unrealized P&L[\s\S]*not live broker equity/, 'dashboard realized-P&L versus live-equity scope disclosure');
+  requireMatch(app, /Exact broker Overall P&L remains withheld:[\s\S]*not exact broker net or live equity/, 'dashboard provisional-P&L versus live-equity scope disclosure');
   const partialAdjustmentSummaryRows = definition.sheets[0].rows.filter(row => ['Funding cash flows','Trading-related adjustments','Non-trading economics','Bonus / protection','Unknown adjustments'].includes(valueOf(row[0])));
   if (partialAdjustmentSummaryRows.length !== 5 || partialAdjustmentSummaryRows.some(row => row[1] !== null || !/Withheld:/.test(valueOf(row[3])))) failures.push('Detailed XLSX emitted partial account-adjustment category formulas while monetary scale coverage was incomplete');
   if (!definition.sheets[0].rows.flat().some(cell => cell?.type === 'formula_money')) failures.push('Detailed XLSX Summary lost its reconciliation formulas');
