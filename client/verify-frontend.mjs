@@ -305,6 +305,7 @@ try {
     version: 3,
     date: '2026-08-13',
     sl: 4390,
+    tp: 4370,
     notes: 'Waited for confirmation',
     psychology: { review: 'patient' },
     custom: { setup: 'breakout' },
@@ -316,11 +317,24 @@ try {
   });
   const keys = Object.keys(payload).sort();
   if (keys.some(key => ['legacyFirebaseDocId','brokerData','entryAt','sourceSystem','screenshots'].includes(key))
-    || payload.version !== 3 || payload.date !== '2026-08-13' || payload.notes !== 'Waited for confirmation') {
+    || payload.version !== 3 || payload.date !== '2026-08-13' || payload.sl !== 4390 || payload.tp !== 4370 || payload.notes !== 'Waited for confirmation') {
     failures.push('cTrader journal PATCH leaked canonical provider/server fields or omitted editable fields');
   }
 } catch (error) {
   failures.push(`cTrader journal PATCH fixture failed: ${error.message}`);
+}
+requireMatch(app, /id=["']t-sl["'][^>]*oninput=["']refreshTradeRiskRewardPreview\(\)["'][\s\S]{0,300}?id=["']t-tp["'][^>]*oninput=["']refreshTradeRiskRewardPreview\(\)["']/, 'trade stop and target update the live R:R preview');
+requireMatch(tradeSaveSource, /const sl=optionalPositivePrice\(document\.getElementById\(['"]t-sl['"]\)\)/, 'trade save reads a validated stop price');
+requireMatch(tradeSaveSource, /const tp=optionalPositivePrice\(document\.getElementById\(['"]t-tp['"]\)\)/, 'trade save reads a validated target price');
+requireMatch(tradeSaveSource, /direction:dir, entry, exit, size,\s*\n\s*sl,\s*\n\s*tp,/, 'manual and cTrader journal saves persist stop and target prices');
+try {
+  const rrContext = {};
+  vm.runInNewContext(`${sourceBetween('function plannedRiskReward', 'function tradeRow')}globalThis.rr={plannedRiskReward,formatPlannedRiskReward};`, rrContext);
+  if (rrContext.rr.plannedRiskReward(100, 95, 110, 'Long') !== 2 || rrContext.rr.plannedRiskReward(100, 105, 90, 'Short') !== 2 || rrContext.rr.plannedRiskReward(100, 105, 110, 'Long') !== null || rrContext.rr.formatPlannedRiskReward({ entry: 100, sl: 95, tp: 110, direction: 'Long' }) !== '1:2.0') {
+    failures.push('Direction-aware planned R:R calculation accepted invalid geometry or returned the wrong ratio');
+  }
+} catch (error) {
+  failures.push(`Planned R:R fixture failed: ${error.message}`);
 }
 requireMatch(tradeSaveSource, /const synced=await DataStore\.saveTrade\((?:trades\[i\]|trade)\);[\s\S]*?if\(!synced\)[\s\S]*?return;[\s\S]*?showToast\(/, 'manual trade success waits for targeted persistence');
 rejectMatch(newTradeScreenshotPersistenceSource, /if\(!synced\)[\s\S]{0,500}?reloadCommittedTradeKeepingScreenshotDraft/, 'unsafe same-ID recovery after failed trade create');
@@ -520,8 +534,11 @@ requireMatch(app, /function scheduleThemeChartRedraw\(\)[\s\S]{0,500}?activePage
 requireMatch(app, /chart\.canvas\.closest\?\.\(['"]\.page-content['"]\)[\s\S]{0,120}?chartPage&&!chartPage\.classList\.contains\(['"]active['"]\)/, 'theme redraw skips charts mounted in inactive pages');
 requireMatch(app, /function applyTheme\([^)]*\)[\s\S]{0,700}?scheduleThemeChartRedraw\(\)/, 'theme application schedules safe chart recoloring');
 requireMatch(app, /setEquityAxisMode\(['"]date['"]\)[\s\S]{0,260}?By date/, 'date-based equity axis control');
-requireMatch(app, /setEquityAxisMode\(['"]trade['"]\)[\s\S]{0,260}?By trade #/, 'explicit trade-number equity axis control');
-requireMatch(app, /class=["']equity-axis-btn["'] id=["']equity-axis-date["'] aria-pressed=["']false["'][^>]*>By date<\/button>[\s\S]{0,180}?class=["']equity-axis-btn active["'] id=["']equity-axis-trade["'] aria-pressed=["']true["'][^>]*>By trade #<\/button>/, 'trade-number equity axis is active in the initial dashboard markup');
+requireMatch(app, /setEquityAxisMode\(['"]trade['"]\)[\s\S]{0,260}?By trade/, 'explicit trade-number equity axis control');
+requireMatch(app, /class=["']equity-axis-btn["'] id=["']equity-axis-date["'] aria-pressed=["']false["'][^>]*>By date<\/button>[\s\S]{0,180}?class=["']equity-axis-btn active["'] id=["']equity-axis-trade["'] aria-pressed=["']true["'][^>]*>By trade<\/button>/, 'trade-number equity axis is active in the initial dashboard markup');
+for (const range of ['day','week','month','all','custom']) requireMatch(app, new RegExp(`id=["']equity-range-${range}["']`), `equity ${range} range control`);
+requireMatch(app, /id=["']equity-range-all["'][^>]*aria-pressed=["']true["']/, 'all-time equity range is initially active');
+requireMatch(app, /id=["']equity-date-from["'][^>]*type=["']date["'][\s\S]{0,180}?id=["']equity-date-to["'][^>]*type=["']date["']/, 'inclusive custom equity From and To controls');
 requireMatch(app, /tradeGrouping:['"]fifo['"],equityAxisMode:['"]trade['"]/, 'trade-number equity axis default preference');
 requireMatch(app, /function applySettings\(\)[\s\S]{0,180}?applyEquityAxisPreference\(S\.prefs\?\.equityAxisMode\)/, 'persisted equity axis preference is applied during settings hydration');
 requireMatch(app, /let _equityAxisMutationChain=Promise\.resolve\(\)[\s\S]*?function setEquityAxisMode[\s\S]{0,700}?commitSettings\(previous\)[\s\S]{0,260}?_equityAxisMutationChain\.then\(mutation,mutation\)/, 'equity axis persistence is serialized and uses settings rollback');
@@ -529,7 +546,11 @@ requireMatch(app, /function equityTradeTimestamp\b/, 'equity close timestamp pro
 requireMatch(app, /cubicInterpolationMode:['"]monotone['"]/, 'monotone equity line interpolation');
 requireMatch(app, /pointRadius:context=>context\.raw\?\.synthetic\?0:\(displayedEquityPoints\.length===1\?4:0\)[\s\S]{0,220}?pointHoverRadius:4/, 'visible first equity point with decluttered multi-point curve');
 requireMatch(app, /maxTicksLimit:7[\s\S]{0,180}?equityDateTick/, 'bounded date ticks on equity curve');
-requireMatch(app, /Cumulative \$\{view\.degraded\?['"]provisional ['"]:['"]['"]\}P&L:\s*\$\{signedMoney\(point\.y/, 'authority-aware cumulative P&L equity tooltip');
+requireMatch(app, /Running total:\s*\$\{signedMoney\(point\.y/, 'meaningful running-total equity tooltip');
+requireMatch(app, /equityDateOnlyTooltip\(point\?\.timestamp\):\[`Trade \$\{point\?\.tradeNumber/, 'trade tooltip title identifies the selected trade');
+requireMatch(app, /`Closed: \$\{equityDateTooltip\(point\.timestamp\)\}`/, 'trade tooltip reports the actual close time');
+requireMatch(app, /Entry → exit:\s*\$\{Number\(trade\.entry\)\} → \$\{Number\(trade\.exit\)\}/, 'trade tooltip explains the entry-to-exit price path');
+rejectMatch(app, /Realised close #/, 'opaque realized-close tooltip wording');
 requireMatch(app, /aggregateEquityDaily\(rawEquityPoints\)/, 'daily-close smoothing for date equity view');
 requireMatch(app, /ensureEquityStartAnchor\(displayedEquityPoints,chartAxisMode\)/, 'zero baseline anchor for the first equity close');
 requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,160}?equityAxisDomain\(visibleEquityValues\)/, 'dynamic equity Y-domain from visible points');
@@ -612,6 +633,37 @@ try {
   }
 } catch (error) {
   failures.push(`Equity axis preference fixture failed: ${error.message}`);
+}
+try {
+  const rangeSource = sourceBetween('function equityLocalIsoDate', 'function tradeChronologyKey');
+  const rangeContext = {
+    Date,
+    document: { getElementById: () => null },
+    renderCharts() {},
+    isRealIsoDate(value) {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+      if (!match) return false;
+      const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+      return date.getFullYear() === Number(match[1]) && date.getMonth() === Number(match[2]) - 1 && date.getDate() === Number(match[3]);
+    },
+    equityTradeTimestamp: row => row.timestamp,
+  };
+  vm.runInNewContext(`
+    let equityRangeMode='all',equityCustomFrom='',equityCustomTo='';
+    function normalizeEquityRangeMode(mode){return ['day','week','month','all','custom'].includes(mode)?mode:'all';}
+    ${rangeSource}
+    const anchor=new Date(2026,7,17,12,0,0);
+    equityCustomFrom='2026-08-10';equityCustomTo='2026-08-14';
+    globalThis.ranges={day:equityRangeBounds('day',anchor),week:equityRangeBounds('week',anchor),month:equityRangeBounds('month',anchor),custom:equityRangeBounds('custom',anchor)};
+    globalThis.filtered=equityRowsInRange([{id:1,timestamp:new Date(2026,7,9,12).getTime()},{id:2,timestamp:new Date(2026,7,10,12).getTime()},{id:3,timestamp:new Date(2026,7,14,23,59).getTime()},{id:4,timestamp:new Date(2026,7,15,0).getTime()}],globalThis.ranges.custom).map(row=>row.id);
+  `, rangeContext);
+  const { day, week, month, custom } = rangeContext.ranges || {};
+  if (new Date(day?.start).getDate() !== 17 || new Date(day?.end).getDate() !== 17 || new Date(week?.start).getDate() !== 17 || new Date(week?.end).getDate() !== 23 || new Date(month?.start).getDate() !== 1 || new Date(month?.end).getDate() !== 31 || custom?.label !== '2026-08-10 to 2026-08-14') {
+    failures.push('Equity Day/Week/Month/Custom ranges are not inclusive local-calendar periods');
+  }
+  if (rangeContext.filtered?.join(',') !== '2,3') failures.push('Custom equity From–To filter is not inclusive or leaks adjacent dates');
+} catch (error) {
+  failures.push(`Equity range fixture failed: ${error.message}`);
 }
 for (const insightCanvas of ['symbol-chart', 'outcome-chart', 'direction-chart', 'day-chart']) {
   requireMatch(app, new RegExp(`id=["']${insightCanvas}["']`), `dashboard insight canvas ${insightCanvas}`);
@@ -720,10 +772,31 @@ requireMatch(whisperWorkerSource,/navigator\?\.gpu\s*\?\s*'webgpu'\s*:\s*'wasm'/
 requireMatch(whisperWorkerSource,/dtype:\s*'q4'/,'efficient quantized inference');
 requireMatch(whisperWorkerSource,/preferredDevice\s*!==\s*'webgpu'[\s\S]{0,160}?createPipeline\('wasm'\)/,'automatic WebGPU initialization fallback');
 requireMatch(whisperWorkerSource,/resampleTo16Khz/,'deterministic Whisper input resampling');
-requireMatch(whisperWorkerSource,/const finalRequests\s*=\s*\[\][\s\S]{0,4000}?finalRequests\.shift\(\)\s*\|\|\s*latestInterimRequest/,'ordered final transcript queue with coalesced interim inference');
+requireMatch(whisperWorkerSource,/prepareWhisperAudio[\s\S]{0,1200}?requestHasSpeech/,'Whisper audio centering, bounded gain, and worker-side speech gate');
+requireMatch(whisperWorkerSource,/task:\s*['"]transcribe['"][\s\S]{0,140}?do_sample:\s*false[\s\S]{0,140}?condition_on_prev_tokens:\s*false/,'deterministic English-only Whisper transcription settings');
+requireMatch(dictationControllerSource,/MIN_FINAL_SPEECH_MS\s*=\s*640[\s\S]{0,180}?MIN_INTERIM_SPEECH_MS\s*=\s*900/,'short noise is withheld from final and live Whisper requests');
+requireMatch(dictationControllerSource,/silence\s*>=\s*SILENCE_MS\s*&&\s*current\.speechMs\s*<\s*MIN_FINAL_SPEECH_MS[\s\S]{0,100}?resetSegment\(current\)/,'short noise burst resets without transcription');
+requireMatch(dictationControllerSource,/function isLikelySilenceHallucination[\s\S]{0,900}?SILENCE_HALLUCINATIONS\.has/,'known silence hallucinations are rejected only with conflicting audio evidence');
+requireMatch(whisperWorkerSource,/const finalRequests\s*=\s*\[\][\s\S]{0,7000}?finalRequests\.shift\(\)\s*\|\|\s*latestInterimRequest/,'ordered final transcript queue with coalesced interim inference');
 requireMatch(whisperWorkerSource,/if\s*\(next\.final\)\s*finalRequests\.push\(next\)[\s\S]{0,100}?latestInterimRequest\s*=\s*next/,'final transcript segments cannot be displaced by newer interim audio');
 rejectMatch(`${app}\n${dictationControllerSource}`,/SpeechRecognition|webkitSpeechRecognition|processLocally|private English speech pack/,'unreliable browser speech service dependency');
 rejectMatch(dictationControllerSource,/saveTrade\s*\(|djSaveForm\s*\(|saveMoodEntry\s*\(|hmSaveNote\s*\(/,'automatic persistence from dictation');
+try {
+  const workerAudioContext = { Float32Array, ArrayBuffer, Number, Math };
+  const workerAudioStart = whisperWorkerSource.indexOf('function normalizeAudio');
+  const workerAudioEnd = whisperWorkerSource.indexOf('async function drainQueue', workerAudioStart);
+  if (workerAudioStart < 0 || workerAudioEnd < 0) throw new Error('worker audio helpers not found');
+  vm.runInNewContext(`${whisperWorkerSource.slice(workerAudioStart, workerAudioEnd)}globalThis.voiceAudio={prepareWhisperAudio,requestHasSpeech};`, workerAudioContext);
+  const waveform = Float32Array.from({ length: 3200 }, (_, index) => Math.sin(index / 7) * .08 + .02);
+  const prepared = workerAudioContext.voiceAudio.prepareWhisperAudio(waveform);
+  const silent = workerAudioContext.voiceAudio.prepareWhisperAudio(new Float32Array(3200).fill(.02));
+  const peak = Math.max(...prepared.map(Math.abs));
+  if (prepared.length !== waveform.length || silent.length !== 0 || peak < .25 || peak > 1 || !workerAudioContext.voiceAudio.requestHasSpeech({ speechMs: 900, peakRms: .04, voicedRatio: .5 }) || workerAudioContext.voiceAudio.requestHasSpeech({ speechMs: 300, peakRms: .04, voicedRatio: .5 })) {
+    failures.push('Whisper worker audio normalization or independent speech gate is ineffective');
+  }
+} catch (error) {
+  failures.push(`Whisper worker audio fixture failed: ${error.message}`);
+}
 for (const [start,end,readMarker,label] of [
   ['async function saveTrade','/* ═══ END TRADE FORM',"document.getElementById('t-sym-select')",'trade save'],
   ['async function saveMoodEntry','async function saveModalMood','moodEmoji','mood-page save'],
@@ -2849,19 +2922,28 @@ try {
   worker.emit({type:'model-ready',model:'onnx-community/whisper-tiny.en'});
   await new Promise(resolve=>setImmediate(resolve));
   if(microphoneCalls!==1||!processor?.onaudioprocess||voiceButton.attributes['aria-pressed']!=='true'||autosaveCancels!==1)failures.push('On-device dictation did not start one microphone stream after the cached model became ready');
-  const loud=new Float32Array(4096).fill(.08);
+  const loud=Float32Array.from({length:4096},(_,index)=>Math.sin(index/8)*.08);
+  const quiet=new Float32Array(4096);
+  const beforeNoise=worker.messages.length;
   clock=260;processor.onaudioprocess({inputBuffer:{getChannelData:()=>loud}});
-  clock=520;processor.onaudioprocess({inputBuffer:{getChannelData:()=>loud}});
+  clock=1300;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quiet}});
+  if(worker.messages.slice(beforeNoise).some(message=>message.type==='transcribe'))failures.push('A short microphone noise burst was submitted to Whisper');
+  for(const nextClock of [1600,1860,2120,2380]){clock=nextClock;processor.onaudioprocess({inputBuffer:{getChannelData:()=>loud}});}
   const interimRequest=worker.messages.findLast(message=>message.type==='transcribe'&&!message.final);
   if(!interimRequest)failures.push('Live microphone audio was not submitted for an interim on-device transcript');
   else worker.emit({type:'transcript',sessionId:interimRequest.sessionId,requestId:interimRequest.requestId,segmentId:interimRequest.segmentId,final:false,text:'Waited for'});
   if(voiceNotes.value!=='Existing note.\nWaited for'||!voiceBars.some(bar=>Number.parseInt(bar.style.height,10)>2))failures.push('On-device Whisper did not render the live transcript or audio-level waveform');
-  const quiet=new Float32Array(4096);
-  clock=1600;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quiet}});
+  clock=3400;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quiet}});
   const finalRequest=worker.messages.findLast(message=>message.type==='transcribe'&&message.final);
   if(!finalRequest)failures.push('Silence did not commit the current on-device utterance');
-  else worker.emit({type:'transcript',sessionId:finalRequest.sessionId,requestId:finalRequest.requestId,segmentId:finalRequest.segmentId,final:true,text:'Waited for confirmation'});
+  else worker.emit({type:'transcript',sessionId:finalRequest.sessionId,requestId:finalRequest.requestId,segmentId:finalRequest.segmentId,final:true,text:'Waited for confirmation',speechMs:finalRequest.speechMs,peakRms:finalRequest.peakRms,voicedRatio:finalRequest.voicedRatio});
   if(voiceNotes.value!=='Existing note.\nWaited for confirmation')failures.push('Final on-device transcript did not replace its interim text without duplication');
+  for(const nextClock of [3700,3960,4220,4480,4740,5000]){clock=nextClock;processor.onaudioprocess({inputBuffer:{getChannelData:()=>loud}});}
+  clock=6100;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quiet}});
+  const hallucinationRequest=worker.messages.findLast(message=>message.type==='transcribe'&&message.final&&message.requestId!==finalRequest?.requestId);
+  if(!hallucinationRequest)failures.push('Long speech fixture did not create a second final segment');
+  else worker.emit({type:'transcript',sessionId:hallucinationRequest.sessionId,requestId:hallucinationRequest.requestId,segmentId:hallucinationRequest.segmentId,final:true,text:'You',speechMs:hallucinationRequest.speechMs,peakRms:hallucinationRequest.peakRms,voicedRatio:hallucinationRequest.voicedRatio});
+  if(voiceNotes.value!=='Existing note.\nWaited for confirmation')failures.push('Implausible repeated “you” silence hallucination was written into the journal field');
   controller.stop({immediate:true});
   if(!trackStopped||activeSession!==null||voiceButton.attributes['aria-pressed']!=='false'||!/review it.*saving/i.test(voiceStatus.textContent))failures.push('On-device dictation did not stop microphone capture and return to review-before-save');
   voiceNotes.value='Manual edit';
@@ -3767,7 +3849,7 @@ try {
   );
   const stats = djStats.djDayStats('2026-08-17');
   if (!stats.incomplete || stats.unavailableCount < 1 || stats.net !== 10 || stats.wr !== 100 || stats.best?.id !== 'usd' || stats.count !== 2 || !/Exact broker Overall P&L remains withheld/.test(stats.issue)) failures.push('Daily Journal did not expose a labelled available subtotal while preserving conversion incompleteness');
-  requireMatch(app, /renderDashboardInsights\(equityRows,closed,displayC,palette,view\)/, 'dashboard insight charts consume the shared provisional ledger');
+  requireMatch(app, /renderDashboardInsights\(allEquityRows,closed,displayC,palette,view\)/, 'dashboard insight charts consume the full shared provisional ledger independently of the equity range');
   requireMatch(app, /const completedPnlVals = completed\.map\(pnlInDisplay\)\.filter\(Number\.isFinite\)/, 'dashboard outcome cards consume valued provisional outcomes');
   rejectMatch(app, /dashboard-financial-summary|renderDashboardFinancialSummary/, 'dashboard financial-breakdown strip remains removed while provisional views render');
 } catch (error) {

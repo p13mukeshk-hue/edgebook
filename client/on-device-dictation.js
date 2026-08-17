@@ -15,10 +15,12 @@
     ['mm-notes', { label: 'mood check-in notes', context: 'mood' }],
   ]);
 
-  const INTERIM_INTERVAL_MS = 1700;
+  const INTERIM_INTERVAL_MS = 1900;
   const SILENCE_MS = 900;
   const MAX_SEGMENT_MS = 18000;
-  const MIN_SPEECH_MS = 360;
+  const MIN_FINAL_SPEECH_MS = 640;
+  const MIN_INTERIM_SPEECH_MS = 900;
+  const SILENCE_HALLUCINATIONS = new Set(['you', 'thank you', 'thanks for watching', 'bye', 'goodbye']);
 
   function createController(options = {}) {
     const root = options.root || global;
@@ -203,13 +205,24 @@
       current.lastInterimAt = 0;
       current.preRoll = [];
       current.interimText = '';
+      current.peakRms = 0;
+      current.voicedChunks = 0;
+      current.totalChunks = 0;
     }
 
     function submitSegment(current, final = false) {
-      if (session !== current || !current.sampleCount || (!current.speechStarted && current.speechMs < MIN_SPEECH_MS)) return false;
+      const minimumSpeech = final ? MIN_FINAL_SPEECH_MS : MIN_INTERIM_SPEECH_MS;
+      if (session !== current || !current.sampleCount || !current.speechStarted || current.speechMs < minimumSpeech) return false;
       const audio = concatenateAudio(current.chunks, current.sampleCount);
       const segmentId = current.segmentId;
       const requestId = ++workerRequest;
+      const audioDurationMs = current.sampleCount / current.sampleRate * 1000;
+      const activity = {
+        speechMs: Math.round(current.speechMs),
+        audioDurationMs: Math.round(audioDurationMs),
+        peakRms: current.peakRms,
+        voicedRatio: current.totalChunks ? current.voicedChunks / current.totalChunks : 0,
+      };
       if (final) {
         current.pendingFinals += 1;
         resetSegment(current);
@@ -217,8 +230,24 @@
         current.latestInterimRequest = requestId;
         current.lastInterimAt = Date.now();
       }
-      worker?.postMessage({ type: 'transcribe', sessionId: current.id, requestId, segmentId, final, sampleRate: current.sampleRate, audio: audio.buffer }, [audio.buffer]);
+      worker?.postMessage({ type: 'transcribe', sessionId: current.id, requestId, segmentId, final, sampleRate: current.sampleRate, ...activity, audio: audio.buffer }, [audio.buffer]);
       return true;
+    }
+
+    function normalizeCandidateText(value) {
+      return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isLikelySilenceHallucination(text, message = {}) {
+      const normalized = normalizeCandidateText(text).toLowerCase().replace(/[^a-z0-9' ]+/g, '').trim();
+      if (!normalized) return false;
+      const words = normalized.split(/\s+/).filter(Boolean);
+      const speechMs = Number(message.speechMs) || 0;
+      const voicedRatio = Number(message.voicedRatio) || 0;
+      const peakRms = Number(message.peakRms) || 0;
+      const weakAudio = speechMs < MIN_FINAL_SPEECH_MS || voicedRatio < .1 || peakRms < .014;
+      const implausiblySparse = speechMs >= 1500 && words.length === 1;
+      return SILENCE_HALLUCINATIONS.has(normalized) && (weakAudio || implausiblySparse);
     }
 
     function ingestAudio(current, input) {
@@ -245,15 +274,23 @@
         current.chunks.push(chunk);
         current.sampleCount += chunk.length;
       }
+      current.totalChunks += 1;
+      current.peakRms = Math.max(current.peakRms, rms);
       if (speaking) {
         current.lastVoiceAt = now;
         current.speechMs += chunkMs;
+        current.voicedChunks += 1;
         setStatus(current.target, 'Speech detected — transcribing privately on this device…', 'is-listening');
       }
       const elapsed = now - current.segmentStartedAt;
       const silence = current.lastVoiceAt ? now - current.lastVoiceAt : 0;
-      if (current.speechMs >= MIN_SPEECH_MS && Date.now() - current.lastInterimAt >= INTERIM_INTERVAL_MS) submitSegment(current, false);
-      if (current.speechMs >= MIN_SPEECH_MS && (silence >= SILENCE_MS || elapsed >= MAX_SEGMENT_MS)) submitSegment(current, true);
+      if (silence >= SILENCE_MS && current.speechMs < MIN_FINAL_SPEECH_MS) {
+        resetSegment(current);
+        setStatus(current.target, 'Listening on this device ··· speak naturally.', 'is-listening');
+        return;
+      }
+      if (current.speechMs >= MIN_INTERIM_SPEECH_MS && Date.now() - current.lastInterimAt >= INTERIM_INTERVAL_MS) submitSegment(current, false);
+      if (current.speechMs >= MIN_FINAL_SPEECH_MS && (silence >= SILENCE_MS || elapsed >= MAX_SEGMENT_MS)) submitSegment(current, true);
     }
 
     async function startCapture(current) {
@@ -331,10 +368,13 @@
         return;
       }
       if (message.type !== 'transcript') return;
-      const text = String(message.text || '').trim();
+      const rawText = normalizeCandidateText(message.text);
+      const rejectedHallucination = isLikelySilenceHallucination(rawText, message);
+      const text = rejectedHallucination ? '' : rawText;
       if (message.final) {
         current.pendingFinals = Math.max(0, current.pendingFinals - 1);
         if (text) current.finalText = `${current.finalText} ${text}`.trim();
+        if (rejectedHallucination) setStatus(current.target, 'Unclear audio was ignored — keep speaking naturally.', 'is-listening');
         if (message.segmentId !== current.segmentId) current.interimText = '';
         renderTranscript(current);
         if (current.stopRequested && current.pendingFinals === 0) {
@@ -453,6 +493,9 @@
         segmentStartedAt: 0,
         preRoll: [],
         noiseFloor: .003,
+        peakRms: 0,
+        voicedChunks: 0,
+        totalChunks: 0,
         pendingFinals: 0,
         latestInterimRequest: 0,
         latestRenderedRequest: 0,

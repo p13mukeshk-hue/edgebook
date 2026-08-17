@@ -27,6 +27,7 @@ describe("cTrader journal-date ownership", () => {
       version: 3,
       date: "2026-08-13",
       sl: 4390,
+      tp: 4370,
       notes: "Waited for confirmation",
       psychology: { review: "Good patience" },
       legacyFirebaseDocId: null,
@@ -37,6 +38,7 @@ describe("cTrader journal-date ownership", () => {
       version: 3,
       date: "2026-08-13",
       sl: 4390,
+      tp: 4370,
       notes: "Waited for confirmation",
       psychology: { review: "Good patience" },
     });
@@ -76,12 +78,16 @@ describe("cTrader journal-date ownership", () => {
     const merged = tradePatchInputForNormalization(existing, {
       version: 3,
       date: "2026-08-13",
+      sl: 4410,
+      tp: 4375,
       notes: "Dictated review",
       psychology: { review: "Waited for confirmation" },
     }, null);
 
     expect(() => normalizeTrade(merged)).not.toThrow();
     expect(merged.legacyFirebaseDocId).toBeUndefined();
+    expect(merged.sl).toBe(4410);
+    expect(merged.tp).toBe(4375);
   });
 
   it("initializes the official projection date but never overwrites an existing journal date", async () => {

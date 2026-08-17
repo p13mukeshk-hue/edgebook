@@ -103,6 +103,32 @@ function resampleTo16Khz(input, inputRate) {
   return output;
 }
 
+function prepareWhisperAudio(input) {
+  if (!input.length) return input;
+  let mean = 0;
+  for (let index = 0; index < input.length; index += 1) mean += input[index];
+  mean /= input.length;
+  let peak = 0;
+  const centered = new Float32Array(input.length);
+  for (let index = 0; index < input.length; index += 1) {
+    const value = input[index] - mean;
+    centered[index] = value;
+    peak = Math.max(peak, Math.abs(value));
+  }
+  if (peak < .004) return new Float32Array(0);
+  const gain = peak < .35 ? Math.min(4, .35 / peak) : 1;
+  if (gain === 1) return centered;
+  for (let index = 0; index < centered.length; index += 1) centered[index] = Math.max(-1, Math.min(1, centered[index] * gain));
+  return centered;
+}
+
+function requestHasSpeech(request) {
+  const speechMs = Number(request.speechMs) || 0;
+  const peakRms = Number(request.peakRms) || 0;
+  const voicedRatio = Number(request.voicedRatio) || 0;
+  return speechMs >= 640 && peakRms >= .012 && voicedRatio >= .08;
+}
+
 async function drainQueue() {
   if (inferenceRunning) return;
   const request = finalRequests.shift() || latestInterimRequest;
@@ -112,8 +138,8 @@ async function drainQueue() {
   try {
     const transcriber = await loadTranscriber();
     if (request.sessionId !== activeSessionId) return;
-    const audio = resampleTo16Khz(normalizeAudio(request.audio), request.sampleRate);
-    if (audio.length < 1600) {
+    const audio = prepareWhisperAudio(resampleTo16Khz(normalizeAudio(request.audio), request.sampleRate));
+    if (!requestHasSpeech(request) || audio.length < 4800) {
       post('transcript', { ...request, text: '' });
       return;
     }
@@ -121,6 +147,9 @@ async function drainQueue() {
       return_timestamps: false,
       chunk_length_s: 20,
       stride_length_s: 2,
+      task: 'transcribe',
+      do_sample: false,
+      condition_on_prev_tokens: false,
     });
     if (request.sessionId === activeSessionId) {
       post('transcript', { ...request, audio: undefined, text: String(result?.text || '').replace(/\s+/g, ' ').trim() });
@@ -159,6 +188,10 @@ globalThis.addEventListener('message', event => {
     segmentId: Number(message.segmentId) || 0,
     final: message.final === true,
     sampleRate: Number(message.sampleRate) || 16000,
+    speechMs: Number(message.speechMs) || 0,
+    audioDurationMs: Number(message.audioDurationMs) || 0,
+    peakRms: Number(message.peakRms) || 0,
+    voicedRatio: Number(message.voicedRatio) || 0,
     audio: message.audio,
   };
   // Preserve every final segment in order while coalescing only disposable
