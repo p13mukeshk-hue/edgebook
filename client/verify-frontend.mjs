@@ -543,7 +543,8 @@ requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
 
 const dashboardMetricsSource = sourceBetween('function updateMetrics', 'function acctTagCell');
-requireMatch(dashboardMetricsSource, /pnlEl\.textContent=Number\.isFinite\(net\)\?signedMoney\(net,c,coverage\.moneyDigits\):['"]—['"][\s\S]*?pnlLabel\.textContent=view\.analysisLabel/, 'dashboard KPI uses the authority-labelled best-available financial view');
+requireMatch(app, /id=["']widget-netpnl["'][^>]*tabindex=["']0["'][\s\S]{0,180}?id=["']m-pnl-label["']>Net P&amp;L<[\s\S]{0,180}?id=["']m-pnl-change["'][^>]*hidden/, 'dashboard Net P&L card has a clean accessible tooltip target and no visible provenance subtitle');
+requireMatch(dashboardMetricsSource, /pnlEl\.textContent=Number\.isFinite\(net\)\?signedMoney\(net,c,coverage\.moneyDigits\):['"]—['"][\s\S]*?pnlLabel\.textContent=['"]Net P&L['"][\s\S]*?financialDisplayViewNotice\(view\)[\s\S]*?pnlCard\.title=pnlTooltip[\s\S]*?pnlChange\.textContent=['"]['"];pnlChange\.hidden=true/, 'dashboard KPI stays labelled Net P&L and moves provenance disclosure into its tooltip');
 rejectMatch(app, /dashboard-financial-summary|renderDashboardFinancialSummary|financial-summary-(?:strip|item|label|value|note)/, 'removed dashboard financial-breakdown strip');
 rejectMatch(dashboardMetricsSource, /pnlEl\.textContent=\(net>=0\?['"]\+['"]:['"]['"]\)\+c\+Math\.abs\(net\)/, 'dashboard Net P&L KPI sign-dropping formatter');
 try {

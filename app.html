@@ -1355,7 +1355,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
       <div id="page-dashboard" class="page-content active">
         <div id="dash-acct-tabs" class="acct-tabs"></div>
         <div class="metrics-row">
-          <div class="metric-card accent" id="widget-netpnl"><div class="mc-label" id="m-pnl-label">Overall P&amp;L</div><div class="mc-value neu" id="m-pnl">$0</div><div class="mc-change" id="m-pnl-change">No trades yet</div></div>
+          <div class="metric-card accent" id="widget-netpnl" tabindex="0"><div class="mc-label" id="m-pnl-label">Net P&amp;L</div><div class="mc-value neu" id="m-pnl">$0</div><div class="mc-change" id="m-pnl-change" hidden></div></div>
           <div class="metric-card" id="widget-winrate"><div class="mc-label">Win Rate</div><div class="mc-value neu" id="m-wr">—</div><div class="mc-change" id="m-wr-sub">closed trades</div></div>
           <div class="metric-card" id="widget-total"><div class="mc-label">Total Trades</div><div class="mc-value neu" id="m-total">0</div><div class="mc-change" id="m-open-sub">0 open</div></div>
           <div class="metric-card" id="widget-avgwin"><div class="mc-label">Avg Win</div><div class="mc-value pos" id="m-avgw">—</div><div class="mc-change">per winning trade</div></div>
@@ -8373,14 +8373,14 @@ function updateMetrics(){
   const pnlEl=document.getElementById('m-pnl');
   pnlEl.textContent=Number.isFinite(net)?signedMoney(net,c,coverage.moneyDigits):'—';
   pnlEl.className='mc-value '+(!Number.isFinite(net)?'neu':net>0?'pos':net<0?'neg':'neu');
-  const pnlLabel=document.getElementById('m-pnl-label');if(pnlLabel)pnlLabel.textContent=view.analysisLabel;
-  const rateNote = isAll ? ' · est. current-FX USD' : '';
-  const exactNote=view.brokerExactCount?`${view.brokerExactCount} broker-exact trade${view.brokerExactCount===1?'':'s'}`:'';
-  const manualOnlyNote=view.journalCount?`${view.journalCount} journal-reported trade${view.journalCount===1?'':'s'}`:'';
-  const estimateNote=view.estimatedCount?` · ${view.estimatedCount} calculated-gross trade${view.estimatedCount===1?'':'s'} included provisionally (fees excluded)`:'';
-  const incompleteNote=view.degraded?` · exact Overall withheld · mixed provisional view`:'';
-  const snapshotNote=coverage.disconnectedConnectionCount?` · historical snapshot: ${coverage.disconnectedConnectionCount} broker connection${coverage.disconnectedConnectionCount===1?'':'s'} disconnected`:'';
-  document.getElementById('m-pnl-change').textContent=([exactNote,manualOnlyNote].filter(Boolean).join(' + ')||'No exact or journal-reported P&L yet')+rateNote+estimateNote+incompleteNote+snapshotNote;
+  const pnlLabel=document.getElementById('m-pnl-label');if(pnlLabel)pnlLabel.textContent='Net P&L';
+  const pnlTooltip=view.degraded
+    ? financialDisplayViewNotice(view)
+    : financialCoverageSnapshotText(coverage)||'Realized net P&L for the selected account scope.';
+  const pnlCard=document.getElementById('widget-netpnl');
+  if(pnlCard){pnlCard.title=pnlTooltip;pnlCard.setAttribute('aria-label',`Net P&L ${Number.isFinite(net)?signedMoney(net,c,coverage.moneyDigits):'unavailable'}. ${pnlTooltip}`);}
+  pnlEl.title=pnlTooltip;
+  const pnlChange=document.getElementById('m-pnl-change');if(pnlChange){pnlChange.textContent='';pnlChange.hidden=true;}
   document.getElementById('m-wr').textContent=completedPnlVals.length?Math.round(wins.length/completedPnlVals.length*100)+'%':'—';
   document.getElementById('m-wr-sub').textContent=completedPnlVals.length?`${wins.length} W / ${losses.length} L${view.degraded?' · mixed provisional outcomes':''}`:view.degraded?'No valued provisional outcomes':'closed-position outcomes';
   document.getElementById('m-total').textContent=src.length;
