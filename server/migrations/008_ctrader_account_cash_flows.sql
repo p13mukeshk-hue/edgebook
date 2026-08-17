@@ -48,10 +48,10 @@ CREATE TABLE ctrader_account_cash_flows (
   CHECK (operation_name ~ '^BALANCE_[A-Z0-9_]{1,100}$'),
   CHECK (length(currency_code) BETWEEN 1 AND 100),
   CHECK (money_digits IS NULL OR money_digits BETWEEN 0 AND 18),
-  CHECK (money_digits_source IN ('cash_flow', 'account', 'unavailable')),
+  CHECK (money_digits_source IN ('cash_flow', 'unavailable')),
   CHECK (
     (money_digits IS NULL AND money_digits_source = 'unavailable')
-    OR (money_digits IS NOT NULL AND money_digits_source IN ('cash_flow', 'account'))
+    OR (money_digits IS NOT NULL AND money_digits_source = 'cash_flow')
   ),
   CHECK (
     (money_digits IS NULL AND amount IS NULL AND balance IS NULL AND equity IS NULL)
@@ -72,10 +72,10 @@ CREATE INDEX ctrader_account_cash_flows_feed_idx
   ON ctrader_account_cash_flows (user_id, broker_connection_id, occurred_at DESC, external_cash_flow_id DESC);
 
 COMMENT ON TABLE ctrader_account_cash_flows IS
-  'Provider-exact cTrader account cash-flow ledger. Entries are not attributed to positions because ProtoOADepositWithdraw supplies no position/deal linkage.';
+  'Lossless cTrader account cash-flow ledger. Typed currency values are exact only when ProtoOADepositWithdraw supplies row moneyDigits; entries have no position/deal linkage.';
 COMMENT ON COLUMN ctrader_account_cash_flows.amount IS
-  'Exact ProtoOADepositWithdraw.delta scaled by its moneyDigits (or the account moneyDigits when omitted).';
+  'Exact ProtoOADepositWithdraw.delta scaled by its row message moneyDigits; migration 009 removes the former unsafe account fallback.';
 COMMENT ON COLUMN ctrader_account_cash_flows.raw_delta IS
-  'Lossless signed int64 ProtoOADepositWithdraw.delta retained even when neither the row nor account supplies moneyDigits; never present raw units as account currency.';
+  'Lossless signed int64 ProtoOADepositWithdraw.delta retained when row moneyDigits is unavailable; never present raw units as account currency.';
 COMMENT ON COLUMN ctrader_account_cash_flows.external_cash_flow_id IS
   'Immutable cTrader ProtoOADepositWithdraw.balanceHistoryId within the connected account.';

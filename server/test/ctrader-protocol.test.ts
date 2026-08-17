@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { CTraderPayload, parseAuthorizedAccounts, parseCashFlows, parseDeals, parseLightSymbols } from "../src/ctrader/protocol.js";
+import {
+  CTraderPayload,
+  parseAuthorizedAccounts,
+  parseCashFlows,
+  parseDeals,
+  parseLightSymbols,
+  parseTraderMetadata,
+} from "../src/ctrader/protocol.js";
 
 describe("cTrader proto3 JSON defaults", () => {
   it("uses Spotware's official cash-flow payload identifiers", () => {
@@ -46,6 +53,22 @@ describe("cTrader proto3 JSON defaults", () => {
       expect.objectContaining({ symbolId: "1", symbolName: "EURUSD", symbolCategoryId: "7" }),
       expect.objectContaining({ symbolId: "2", symbolName: "OLD.CFD", symbolCategoryId: null }),
     ]));
+  });
+
+  it("retains the official current balance and balance revision losslessly", () => {
+    expect(parseTraderMetadata({
+      trader: {
+        registrationTimestamp: "1770000000000",
+        depositAssetId: "1",
+        balance: "2489291",
+        balanceVersion: "77",
+        moneyDigits: 2,
+      },
+    })).toMatchObject({
+      balance: 2489291n,
+      balanceVersion: 77n,
+      moneyDigits: 2,
+    });
   });
 
   it("parses exact signed account cash flows and preserves future operation names", () => {

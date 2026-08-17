@@ -2032,6 +2032,28 @@ function projectMcpPosition(
           : completeExplicitCents
             ? "provider_explicit_net_cents"
             : "provider_mixed_exact_money",
+      // Only the explicitly vetted exact-money paths above may become the
+      // canonical journal net. Generic Remote MCP commission/P&L aliases never
+      // reach totalPnl and therefore remain provider_unavailable.
+      pnlAuthority: totalPnl === null ? "provider_unavailable" : "provider",
+      reconciledManualPnlPreserved: false,
+      pnlComponentsCoverage: {
+        version: 1,
+        source: completeAuthoritativeCloseMoney
+          ? "ProtoOAClosePositionDetail"
+          : totalPnl === null ? "unavailable" : "RemoteMcpVettedExactNet",
+        scope: "realized_closing_deals",
+        tradeLevelExact: totalPnl !== null,
+        grossProfit: completeAuthoritativeCloseMoney,
+        brokerCommission: completeAuthoritativeCloseMoney,
+        swap: completeAuthoritativeCloseMoney,
+        pnlConversionFee: completeAuthoritativeCloseMoney,
+        formula: completeAuthoritativeCloseMoney
+          ? "grossProfit + swap + commission - pnlConversionFee"
+          : totalPnl === null ? null : "provider_exact_net",
+        otherAccountCashFlowsIncluded: false,
+        otherAccountCashFlowsAttribution: "not_provided_by_position",
+      },
       grossProfit: completeAuthoritativeCloseMoney ? sumScaledMoney(closing.map((deal) => ({
         value: deal.grossProfitScaled ?? 0n,
         digits: deal.moneyDigits ?? 0,
@@ -4437,13 +4459,24 @@ export class CTraderMcpSyncEngine {
            legacy_entry_time=$14, legacy_exit_time=COALESCE($15::time,legacy_exit_time),
            broker_data=CASE
              WHEN $16::jsonb->>'pnlMethod'='unavailable'
+               AND pnl IS NOT NULL
+               AND COALESCE(broker_data->>'pnlMethod','') NOT IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+               THEN (broker_data || ($16::jsonb
+                 - 'pnlAuthority' - 'reconciledManualPnlPreserved'))
+                 || jsonb_build_object(
+                   'pnlAuthority','preserved_reconciled_manual',
+                   'reconciledManualPnlPreserved',true
+                 )
+             WHEN $16::jsonb->>'pnlMethod'='unavailable'
                AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
                AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
                AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
                  = $16::jsonb #>> '{providerExecutionLineage,fingerprintSha256}'
                THEN broker_data || ($16::jsonb
                  - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
-                 - 'pnlConversionFee' - 'realizedEvents')
+                 - 'pnlConversionFee' - 'realizedEvents'
+                 - 'pnlAuthority' - 'pnlComponentsCoverage'
+                 - 'reconciledManualPnlPreserved')
              ELSE broker_data || $16::jsonb
            END,
            calculation_version=2,
@@ -4482,13 +4515,24 @@ export class CTraderMcpSyncEngine {
              OR legacy_exit_time IS DISTINCT FROM COALESCE($15::time,legacy_exit_time)
              OR broker_data IS DISTINCT FROM CASE
                WHEN $16::jsonb->>'pnlMethod'='unavailable'
+                 AND pnl IS NOT NULL
+                 AND COALESCE(broker_data->>'pnlMethod','') NOT IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
+                 THEN (broker_data || ($16::jsonb
+                   - 'pnlAuthority' - 'reconciledManualPnlPreserved'))
+                   || jsonb_build_object(
+                     'pnlAuthority','preserved_reconciled_manual',
+                     'reconciledManualPnlPreserved',true
+                   )
+               WHEN $16::jsonb->>'pnlMethod'='unavailable'
                  AND broker_data->>'pnlMethod' IN ('provider_close_detail_money_digits','provider_explicit_net_cents','provider_mixed_exact_money')
                  AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}' IS NOT NULL
                  AND broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
                    = $16::jsonb #>> '{providerExecutionLineage,fingerprintSha256}'
                  THEN broker_data || ($16::jsonb
                    - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
-                   - 'pnlConversionFee' - 'realizedEvents')
+                   - 'pnlConversionFee' - 'realizedEvents'
+                   - 'pnlAuthority' - 'pnlComponentsCoverage'
+                   - 'reconciledManualPnlPreserved')
                ELSE broker_data || $16::jsonb
              END
              OR calculation_version IS DISTINCT FROM 2
@@ -4616,7 +4660,9 @@ export class CTraderMcpSyncEngine {
                = EXCLUDED.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
              THEN trades.broker_data || (EXCLUDED.broker_data
                - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
-               - 'pnlConversionFee' - 'realizedEvents')
+               - 'pnlConversionFee' - 'realizedEvents'
+               - 'pnlAuthority' - 'pnlComponentsCoverage'
+               - 'reconciledManualPnlPreserved')
            ELSE EXCLUDED.broker_data
          END,
          calculation_version=EXCLUDED.calculation_version,
@@ -4663,7 +4709,9 @@ export class CTraderMcpSyncEngine {
              = EXCLUDED.broker_data #>> '{providerExecutionLineage,fingerprintSha256}'
            THEN trades.broker_data || (EXCLUDED.broker_data
              - 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'
-             - 'pnlConversionFee' - 'realizedEvents')
+             - 'pnlConversionFee' - 'realizedEvents'
+             - 'pnlAuthority' - 'pnlComponentsCoverage'
+             - 'reconciledManualPnlPreserved')
          ELSE EXCLUDED.broker_data
        END
        )

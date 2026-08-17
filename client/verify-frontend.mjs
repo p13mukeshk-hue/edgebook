@@ -1,9 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { createVpsDataAdapter } from './data-adapter.js';
 import { createAuthAdapter } from './auth-adapter.js';
+
+const require = createRequire(import.meta.url);
+const xlsxExport = require('./xlsx-export.js');
 
 const clientDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.dirname(clientDir);
@@ -18,7 +22,8 @@ const authAdapter = read('client/auth-adapter.js');
 const dataAdapter = read('client/data-adapter.js');
 const dictationControllerSource = read('client/on-device-dictation.js');
 const whisperWorkerSource = read('client/on-device-whisper-worker.js');
-const allBrowserSource = `${app}\n${marketing}\n${apiClient}\n${authAdapter}\n${dataAdapter}\n${dictationControllerSource}\n${whisperWorkerSource}`;
+const xlsxExportSource = read('client/xlsx-export.js');
+const allBrowserSource = `${app}\n${marketing}\n${apiClient}\n${authAdapter}\n${dataAdapter}\n${dictationControllerSource}\n${whisperWorkerSource}\n${xlsxExportSource}`;
 
 const failures = [];
 const requireMatch = (text, pattern, label) => {
@@ -327,14 +332,14 @@ requireMatch(duplicateResolutionSource, /duplicateNumericClose\(existing\.entry,
 requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousCreateError\(error\)[\s\S]*?api\.get\([\s\S]*?encodeURIComponent\(trade\.id\)[\s\S]*?tradeCreateFingerprint\(current\) === tradeCreateFingerprint\(trade\)/, 'lost trade-create response reconciliation');
 requireMatch(dataAdapter, /tradeCreateFingerprint[\s\S]*?pnl:[\s\S]*?entryTime:[\s\S]*?psychology:[\s\S]*?brokerData:/, 'complete normalized trade-create recovery fingerprint');
 requireMatch(app, /function calFinancialForDay[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?estimatedGross[\s\S]*?provisional/, 'calendar shared verified-net and estimated-gross aggregation');
-requireMatch(app, /function renderCalStats[\s\S]*?Verified net[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'calendar financial provenance summary');
-requireMatch(app, /function renderHeatmap[\s\S]*?tradeFinancialPresentation[\s\S]*?Verified net[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'heatmap shared financial presentation');
+requireMatch(app, /function renderCalStats[\s\S]*?Overall realised[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'calendar financial provenance summary');
+requireMatch(app, /function hmFilteredTrades[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?function renderHeatmap[\s\S]*?Overall P&L[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'heatmap shared realized-close financial ledger');
 requireMatch(app, /function djDayStats[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?verifiedNet[\s\S]*?estimatedGross/, 'daily journal shared day-level financial aggregation');
 requireMatch(app, /function tradeJournalCsv[\s\S]*?P&L Status[\s\S]*?Calculated Gross[\s\S]*?Fees Included/, 'CSV financial provenance columns');
 requireMatch(app, /function tradeJournalCsv[\s\S]*?Duration Seconds/, 'CSV exact trade-duration columns');
 requireMatch(app, /const TABLE_HEADS[\s\S]*?Entry time[\s\S]*?Duration/, 'dashboard and journal trade-duration column');
 requireMatch(app, /Average hold:[\s\S]*?timed trade/, 'analytics average holding-duration metric');
-requireMatch(app, /analytics-pnl-coverage[\s\S]*?calculated gross P&L[\s\S]*?excluded from win rate, profit factor, equity, drawdown and coaching/, 'verified-only analytics estimate disclosure');
+requireMatch(app, /analytics-pnl-coverage[\s\S]*?calculated gross P&L[\s\S]*?Estimates remain excluded from outcome analytics/, 'verified-only analytics estimate disclosure');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
 requireMatch(csvImportCommitSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite[\s\S]*?return;[\s\S]*?closeModal/, 'CSV import waits for persistence before closing');
@@ -516,6 +521,10 @@ requireMatch(app, /chart\.canvas\.closest\?\.\(['"]\.page-content['"]\)[\s\S]{0,
 requireMatch(app, /function applyTheme\([^)]*\)[\s\S]{0,700}?scheduleThemeChartRedraw\(\)/, 'theme application schedules safe chart recoloring');
 requireMatch(app, /setEquityAxisMode\(['"]date['"]\)[\s\S]{0,260}?By date/, 'date-based equity axis control');
 requireMatch(app, /setEquityAxisMode\(['"]trade['"]\)[\s\S]{0,260}?By trade #/, 'explicit trade-number equity axis control');
+requireMatch(app, /class=["']equity-axis-btn["'] id=["']equity-axis-date["'] aria-pressed=["']false["'][^>]*>By date<\/button>[\s\S]{0,180}?class=["']equity-axis-btn active["'] id=["']equity-axis-trade["'] aria-pressed=["']true["'][^>]*>By trade #<\/button>/, 'trade-number equity axis is active in the initial dashboard markup');
+requireMatch(app, /tradeGrouping:['"]fifo['"],equityAxisMode:['"]trade['"]/, 'trade-number equity axis default preference');
+requireMatch(app, /function applySettings\(\)[\s\S]{0,180}?applyEquityAxisPreference\(S\.prefs\?\.equityAxisMode\)/, 'persisted equity axis preference is applied during settings hydration');
+requireMatch(app, /let _equityAxisMutationChain=Promise\.resolve\(\)[\s\S]*?function setEquityAxisMode[\s\S]{0,700}?commitSettings\(previous\)[\s\S]{0,260}?_equityAxisMutationChain\.then\(mutation,mutation\)/, 'equity axis persistence is serialized and uses settings rollback');
 requireMatch(app, /function equityTradeTimestamp\b/, 'equity close timestamp projection');
 requireMatch(app, /cubicInterpolationMode:['"]monotone['"]/, 'monotone equity line interpolation');
 requireMatch(app, /pointRadius:context=>context\.raw\?\.synthetic\?0:\(displayedEquityPoints\.length===1\?4:0\)[\s\S]{0,220}?pointHoverRadius:4/, 'visible first equity point with decluttered multi-point curve');
@@ -532,6 +541,76 @@ requireMatch(app, /pointBackgroundColor:context=>equityPointDirectionColor\(cont
 rejectMatch(app, /\(context\.p0\.parsed\.y\+context\.p1\.parsed\.y\)\/2/, 'above-or-below-zero equity segment colors');
 requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 'empty equity curve guidance');
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
+
+const dashboardMetricsSource = sourceBetween('function updateMetrics', 'function acctTagCell');
+requireMatch(dashboardMetricsSource, /pnlEl\.textContent=coverage\.overallComplete\?signedMoney\(net,c,coverage\.moneyDigits\):['"]—['"]/, 'dashboard Overall P&L KPI uses provider precision and fails closed for incomplete currency conversion');
+rejectMatch(dashboardMetricsSource, /pnlEl\.textContent=\(net>=0\?['"]\+['"]:['"]['"]\)\+c\+Math\.abs\(net\)/, 'dashboard Net P&L KPI sign-dropping formatter');
+try {
+  const signedMoneyContext = {};
+  vm.runInNewContext(`${sourceBetween('function signedMoney', 'function analyticsWeekKey')}globalThis.signedMoney=signedMoney;`, signedMoneyContext);
+  if (signedMoneyContext.signedMoney(-53, '$', 0) !== '-$53' || signedMoneyContext.signedMoney(53, '$', 0) !== '+$53' || signedMoneyContext.signedMoney(0, '$', 0) !== '$0' || signedMoneyContext.signedMoney(null, '$', 2) !== '—') {
+    failures.push('Dashboard Net P&L formatter did not preserve negative, positive, and zero signs');
+  }
+} catch (error) {
+  failures.push(`Dashboard Net P&L sign fixture failed: ${error.message}`);
+}
+
+const equityAxisPreferenceSource = sourceBetween('function normalizeEquityAxisMode', 'function equityDayKey');
+try {
+  const makeAxisButton = () => {
+    const button = { active: false, disabled: false, title: '', attributes: {} };
+    button.classList = { toggle(name, state) { if (name === 'active') button.active = Boolean(state); } };
+    button.setAttribute = (name, value) => { button.attributes[name] = String(value); };
+    return button;
+  };
+  const dateButton = makeAxisButton();
+  const tradeButton = makeAxisButton();
+  const equityAxisContext = {
+    console,
+    Promise,
+    document: { getElementById: id => id === 'equity-axis-date' ? dateButton : id === 'equity-axis-trade' ? tradeButton : null },
+  };
+  vm.runInNewContext(`
+    let S={prefs:{}};
+    let renderCount=0;
+    const commits=[];
+    const outcomes=[true,false];
+    function settingsSnapshot(){return JSON.parse(JSON.stringify(S));}
+    function renderCharts(){renderCount+=1;}
+    async function commitSettings(previous){
+      commits.push(S.prefs.equityAxisMode);
+      const saved=outcomes.shift();
+      if(!saved){S=previous;applyEquityAxisPreference(S.prefs?.equityAxisMode);renderCharts();}
+      return saved;
+    }
+    ${equityAxisPreferenceSource}
+    globalThis.axisApi={
+      initialize:value=>applyEquityAxisPreference(value),
+      set:setEquityAxisMode,
+      snapshot:()=>({mode:equityAxisMode,pref:S.prefs.equityAxisMode,commits:[...commits],renderCount}),
+    };
+  `, equityAxisContext);
+  const axisApi = equityAxisContext.axisApi;
+  if (axisApi.initialize(undefined) !== 'trade' || !tradeButton.active || dateButton.active || tradeButton.attributes['aria-pressed'] !== 'true') {
+    failures.push('Equity axis did not initialize to By trade for a missing/legacy preference');
+  }
+  const dateSaved = await axisApi.set('date');
+  let axisState = axisApi.snapshot();
+  if (dateSaved !== true || axisState.mode !== 'date' || axisState.pref !== 'date' || axisState.commits.join(',') !== 'date' || !dateButton.active || tradeButton.active) {
+    failures.push('Equity date-axis selection was not persisted and reflected in the controls');
+  }
+  const tradeSaved = await axisApi.set('trade');
+  axisState = axisApi.snapshot();
+  if (tradeSaved !== false || axisState.mode !== 'date' || axisState.pref !== 'date' || axisState.commits.join(',') !== 'date,trade' || !dateButton.active || tradeButton.active) {
+    failures.push('Failed equity-axis persistence did not roll back to the last saved selection');
+  }
+  const commitsBeforeInvalid = axisState.commits.length;
+  if (await axisApi.set('invalid') !== false || axisApi.snapshot().commits.length !== commitsBeforeInvalid) {
+    failures.push('Invalid equity-axis selection reached persistence');
+  }
+} catch (error) {
+  failures.push(`Equity axis preference fixture failed: ${error.message}`);
+}
 for (const insightCanvas of ['symbol-chart', 'outcome-chart', 'direction-chart', 'day-chart']) {
   requireMatch(app, new RegExp(`id=["']${insightCanvas}["']`), `dashboard insight canvas ${insightCanvas}`);
 }
@@ -1224,17 +1303,39 @@ try {
     escapeCtraderText: value => String(value ?? ''),
     formatCtraderWhen: () => 'now',
     ctraderAccountCashFlowLedger: () => '',
+    ctraderCashFlowScaleCoverage: (connection, status) => {
+      const pendingRetries = Math.max(0, Number(status?.accountCashFlowPendingScaleRetries || status?.latestSyncRun?.counters?.pendingCashFlowMoneyRetries || 0));
+      return { complete: status?.accountCashFlowMonetaryScaleComplete === true && pendingRetries === 0, scaledRows: status?.accountCashFlowScaledRows ?? 0, unscaledRows: status?.accountCashFlowUnscaledRows ?? 0, pendingRetries };
+    },
   };
   const rendered = vm.runInNewContext(`
     ${ctraderCardSource}
     ctraderConnectionCard(
       {id:'mcp-1',connected:true,authMode:'remote_mcp',environment:'live',ctidTraderAccountId:'42'},
-      {latestSyncRun:{status:'succeeded',counters:{inserted:0,updated:0,positionsAwaitingReview:2}}}
+      {accountCashFlowMonetaryScaleComplete:true,accountCashFlowScaledRows:0,accountCashFlowUnscaledRows:0,accountCashFlowPendingScaleRetries:0,latestSyncRun:{status:'succeeded',counters:{inserted:0,updated:0,positionsAwaitingReview:2}}}
     );
   `, context, { timeout: 500 });
   if (!/Review needed/.test(rendered) || !/2 awaiting review/.test(rendered) || !/safely retained as broker executions/.test(rendered) || !/excluded from the journal and analytics/.test(rendered)) {
     failures.push('cTrader execution quarantine was not surfaced as an amber review state with a safe explanation');
   }
+  const recoveryRendered = vm.runInNewContext(`
+    ${ctraderCardSource}
+    ctraderConnectionCard(
+      {id:'oauth-1',connected:true,authMode:'oauth',environment:'live',ctidTraderAccountId:'43'},
+      {accountCashFlowMonetaryScaleComplete:true,accountCashFlowScaledRows:0,accountCashFlowUnscaledRows:0,accountCashFlowPendingScaleRetries:0,latestSyncRun:{status:'succeeded',counters:{inserted:0,updated:0,pendingExactMoneyRetries:3}}}
+    );
+  `, context, { timeout: 500 });
+  if (!/P&amp;L recovery pending|P&L recovery pending/.test(recoveryRendered) || !/3 exact P&amp;L retries|3 exact P&L retries/.test(recoveryRendered) || !/automatic retries are active/.test(recoveryRendered) || !/No manual entry is needed/.test(recoveryRendered)) {
+    failures.push('Pending exact-money recovery did not render as an amber self-healing state with its retry count');
+  }
+  const adjustmentRecoveryRendered = vm.runInNewContext(`
+    ${ctraderCardSource}
+    ctraderConnectionCard(
+      {id:'oauth-2',connected:true,authMode:'oauth',environment:'live',ctidTraderAccountId:'44'},
+      {accountCashFlowMonetaryScaleComplete:true,accountCashFlowTotalRows:2,accountCashFlowScaledRows:2,accountCashFlowUnscaledRows:0,accountCashFlowPendingScaleRetries:1,latestSyncRun:{status:'succeeded',counters:{inserted:0,updated:0,pendingCashFlowMoneyRetries:1}}}
+    );
+  `, context, { timeout: 500 });
+  if (!/Adjustment recovery pending/.test(adjustmentRecoveryRendered) || !/1 adjustment-scale retry/.test(adjustmentRecoveryRendered) || !/subtotals and Excel monetary reconciliation are withheld/.test(adjustmentRecoveryRendered) || !/No manual entry is needed/.test(adjustmentRecoveryRendered)) failures.push('Pending cash-flow scale recovery did not render as an amber self-healing state with its retry count and withheld-subtotal boundary');
 } catch (error) {
   failures.push(`cTrader execution-quarantine card fixture failed: ${error.message}`);
 }
@@ -1459,7 +1560,7 @@ try {
     },
   });
   if (liveButtons(unknownCard).length || liveButtons(unversionedCard).length) failures.push('Unknown or unversioned live cTrader candidate exposed a mutation control');
-  if (liveButtons(deletedCard).join('|') !== 'Suppress broker copy|Dismiss match') failures.push('Deleted-manual live match exposed an unsafe action');
+  if (liveButtons(deletedCard).join('|') !== 'Keep both|Suppress broker copy') failures.push('Deleted-manual live match exposed an unsafe action');
   if (liveButtons(pairedCard).join('|') !== 'Merge + preserve manual journal|Dismiss match') failures.push('Broker-first existing pair exposed keep-both or suppression after broker publication');
   const baseUnitText=collectLive(baseUnitCard,element=>typeof element?.textContent==='string').map(element=>element.textContent).join('\n');
   if (!baseUnitText.includes('Size (base units)') || !baseUnitText.includes('2') || baseUnitText.includes('Size (lots)')) failures.push('Live cTrader review mislabeled a base-unit quantity');
@@ -1493,6 +1594,10 @@ try {
     reviewSource,
     {
       stableJson: reviewStableJson,
+      normalizeFxCurrency: value => String(value||'').replace(/[^A-Za-z]/g,'').slice(0,3).toUpperCase()||null,
+      acctCur: () => '$',
+      vpsCtraderState: { connections: [] },
+      mappedAccountForCTraderConnection: () => '',
       tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
       tradeHasPnl: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
       tradeRealizedEvents: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)) ? [{ executionId: `trade:${trade.id || ''}`, date: trade.date, pnl: Number(trade.pnl) }] : [],
@@ -1553,7 +1658,7 @@ try {
   review.setTradeBrokerOwnedMode(calculated);
   if (!/Calculated gross: \+\$20\.66 USD[\s\S]*outside Net P&L and analytics/.test(reviewElements.get('broker-calculated-gross').textContent)) failures.push('cTrader calculated-gross detail did not disclose fee and analytics exclusions');
   const exact = { source: 'ctrader', pnl: '114.5', brokerData: {
-    pnlMethod: 'provider_close_detail_money_digits', accountCurrency: 'USDT',
+    pnlMethod: 'provider_close_detail_money_digits', pnlAuthority: 'provider', accountCurrency: 'USDT',
     grossProfit: '120', swap: '-1', commission: '-4', pnlConversionFee: '0.5',
     pnlComponentsCoverage: {
       version: 1, source: 'ProtoOAClosePositionDetail', tradeLevelExact: true,
@@ -1588,8 +1693,66 @@ try {
   }] }, false);
   if (/<(?:img|svg|script)\b/i.test(ledgerHtml) || context.__edgebookXss) failures.push('Account cash-flow ledger rendered untrusted provider fields as executable HTML');
   if (!/does not assign them to a trade[\s\S]*not assume an absent charge is zero/.test(ledgerHtml)) failures.push('Account cash-flow ledger omitted its non-attribution and unknown-charge boundary');
+  if (!/recent-row preview only/.test(ledgerHtml) || !/incomplete or has not yet been verified/.test(ledgerHtml)) failures.push('Account cash-flow card did not identify its recent-row and provider-coverage limits');
+  const completeLedgerHtml = ledger.ctraderAccountCashFlowLedger({ accountCashFlowHistoryComplete: true, accountCashFlowSyncedThroughTimestamp: 1786943100000, latestSyncRun: { status: 'failed' }, accountCashFlows: [] }, false);
+  if (!/complete through 1786943100000/.test(completeLedgerHtml) || !/latest sync failed[\s\S]*newer coverage is not guaranteed/.test(completeLedgerHtml)) failures.push('Account cash-flow history did not expose its exact through-timestamp and later-sync caveat');
 } catch (error) {
   failures.push(`cTrader account cash-flow ledger fixture failed: ${error.message}`);
+}
+
+try {
+  const cashFlowCacheSource = sourceBetween('function ctraderCashFlowHasExactMoney', 'function ctraderCashFlowAmount');
+  const connection = { id: 'connection-1', label: '25K Master', mappedAccountId: 'account-1', accountCashFlowHistoryComplete: true, accountCashFlowSyncedThroughTimestamp: 1786943100000 };
+  const status = { accountCashFlowHistoryComplete: true, accountCashFlowSyncedThroughTimestamp: 1786943100000, accountCashFlowMonetaryScaleComplete: true, accountCashFlowTotalRows: 60, accountCashFlowScaledRows: 60, accountCashFlowUnscaledRows: 0, accountCashFlowPendingScaleRetries: 0, latestSyncRun: { id: 'sync-1', status: 'succeeded', finishedAt: '2026-08-17T05:05:00.000Z', counters: { pendingCashFlowMoneyRetries: 0 } } };
+  const vpsState = { connections: [connection], statuses: new Map([['connection-1', status]]), cashFlows: { entries: new Map(), loading: new Map(), generations: new Map() } };
+  let pageCalls = 0;
+  const rows = Array.from({ length: 60 }, (_, index) => ({ balanceHistoryId: String(1000 + index), amount: index % 2 ? '-0.01' : '0.02', currency: 'USD', moneyDigits: 2, moneyDigitsSource: 'cash_flow', scalingStatus: 'exact', category: 'trading_related_adjustment' }));
+  const windowStub = { _vpsData: { ctrader: { accountCashFlows: async (id, options) => {
+    pageCalls += 1;
+    if (id !== 'connection-1') throw new Error('wrong connection');
+    return options.cursor === null ? { accountCashFlows: rows.slice(0, 50), nextCursor: 'page-2' } : { accountCashFlows: rows.slice(50), nextCursor: null };
+  } } } };
+  const { exports: cache } = evaluateSecurityFixture(
+    cashFlowCacheSource,
+    {
+      window: windowStub, vpsCtraderState: vpsState, S: { brokerAccountMap: {} },
+      mappedAccountForCTraderConnection: item => String(item?.mappedAccountId || ''),
+      ctraderCashFlowCategory: flow => flow.category || 'unknown',
+      document: { getElementById: () => null }, updateMetrics() {},
+    },
+    '{ctraderCashFlowHasExactMoney,fetchCompleteVpsCtraderCashFlows,refreshVpsCtraderCashFlowCache,invalidateVpsCtraderCashFlowCache,loadedAccountCashFlows}',
+  );
+  const fetched = await cache.fetchCompleteVpsCtraderCashFlows(connection, status);
+  if (!fetched.complete || !fetched.dbComplete || fetched.rows.length !== 60 || pageCalls !== 2) failures.push('Dashboard cash-flow cache did not paginate beyond the status LIMIT-50 preview');
+  vpsState.cashFlows.entries.set('connection-1', { ...fetched, statusKey: 'fixture' });
+  const loaded = cache.loadedAccountCashFlows('account-1');
+  if (!loaded.complete || loaded.rows.length !== 60) failures.push('Dashboard adjustment subtotal did not require/use the fully paginated provider-history ledger');
+  cache.invalidateVpsCtraderCashFlowCache('connection-1');
+  if (vpsState.cashFlows.entries.has('connection-1') || vpsState.cashFlows.generations.get('connection-1') !== 1) failures.push('cTrader sync invalidation did not discard the dashboard cash-flow cache');
+
+  const partial = await cache.fetchCompleteVpsCtraderCashFlows(connection, { ...status, accountCashFlowHistoryComplete: false });
+  if (partial.complete || !partial.dbComplete || !/incomplete/.test(partial.error)) failures.push('Fully paginated stored rows were mislabeled complete without provider-history coverage');
+
+  const scalePartial = await cache.fetchCompleteVpsCtraderCashFlows(connection, { ...status, accountCashFlowMonetaryScaleComplete: false, accountCashFlowScaledRows: 59, accountCashFlowUnscaledRows: 1, accountCashFlowPendingScaleRetries: 1 });
+  if (scalePartial.complete || !scalePartial.dbComplete || !/money scaling is incomplete/.test(scalePartial.error)) failures.push('Fully paginated cash-flow rows were mislabeled monetarily complete without row-authoritative scale coverage');
+  if (cache.ctraderCashFlowHasExactMoney({ amount: null, moneyDigits: 2, moneyDigitsSource: 'cash_flow', scalingStatus: 'exact' }) || cache.ctraderCashFlowHasExactMoney({ amount: '-1.00', moneyDigits: 2, moneyDigitsSource: 'account', scalingStatus: 'exact' }) || cache.ctraderCashFlowHasExactMoney({ amount: '0.001', moneyDigits: 2, moneyDigitsSource: 'cash_flow', scalingStatus: 'exact' })) failures.push('Null, account-inferred, or precision-inconsistent cash-flow money was accepted as exact');
+
+  windowStub._vpsData.ctrader.accountCashFlows = async () => ({ accountCashFlows: [{ balanceHistoryId: 'raw-only', amount: null, rawAmountUnits: '-100', moneyDigits: null, moneyDigitsSource: 'unavailable', scalingStatus: 'money_digits_unavailable' }], nextCursor: null });
+  const visibleUnscaled = await cache.fetchCompleteVpsCtraderCashFlows(connection, { ...status, accountCashFlowTotalRows: 1, accountCashFlowScaledRows: 1 });
+  if (visibleUnscaled.complete || visibleUnscaled.visibleUnscaledRows !== 1 || visibleUnscaled.rows[0]?.rawAmountUnits !== '-100') failures.push('Visible unscaled cash-flow row did not withhold monetary completeness while retaining raw audit units');
+
+  let repeatedCalls = 0;
+  windowStub._vpsData.ctrader.accountCashFlows = async () => ({ accountCashFlows: [{ balanceHistoryId: String(++repeatedCalls) }], nextCursor: 'repeat' });
+  const repeated = await cache.fetchCompleteVpsCtraderCashFlows(connection, status);
+  if (repeated.complete || repeated.dbComplete || !/repeated a pagination cursor/.test(repeated.error)) failures.push('Repeated cash-flow cursor did not fail closed');
+
+  windowStub._vpsData.ctrader.accountCashFlows = async () => { throw new Error('ledger unavailable'); };
+  const failed = await cache.fetchCompleteVpsCtraderCashFlows(connection, status);
+  if (failed.complete || failed.dbComplete || !/ledger unavailable/.test(failed.error)) failures.push('Cash-flow pagination error did not fail closed');
+  requireMatch(app, /type\.includes\('ctrader'\)\|\|type\.includes\('sync'\)\)\{invalidateVpsCtraderCashFlowCache\(\)/, 'real-time cTrader sync invalidates full dashboard cash-flow cache');
+  requireMatch(app, /invalidateVpsCtraderCashFlowCache\(id\);[\s\S]*?_vpsData\.ctrader\.sync\(id\)/, 'manual cTrader sync invalidates its full dashboard cash-flow cache');
+} catch (error) {
+  failures.push(`Dashboard full cash-flow cache fixture failed: ${error.message}`);
 }
 
 // Coaching reports are deterministic and private. Browser code must never
@@ -1755,6 +1918,16 @@ try {
       acctCur: () => '$',
       normalizeFxCurrency: value => value === '$' ? 'USD' : /^[A-Z]{3}$/.test(String(value)) ? String(value) : null,
       cTraderCalculatedGross: trade => trade?.brokerData?.calculatedGrossPnl ? { valueText: String(trade.brokerData.calculatedGrossPnl), currency: 'USD' } : null,
+      tradeFinancialPresentation: trade => {
+        const hasPnl = trade?.pnl !== null && trade?.pnl !== undefined && trade?.pnl !== '';
+        const amount = Number(trade?.pnl);
+        if (hasPnl && Number.isFinite(amount)) {
+          const exact = String(trade?.source || '').toLowerCase() === 'ctrader' && trade?.brokerData?.pnlAuthority === 'provider' &&
+            ['provider_close_detail_money_digits', 'provider_explicit_net_cents', 'provider_mixed_exact_money'].includes(String(trade?.brokerData?.pnlMethod || ''));
+          return { kind: exact ? 'broker_exact_net' : 'manual_reported', amount, isEstimate: false, isBrokerNet: exact, breakdown: null };
+        }
+        return trade?.brokerData?.calculatedGrossPnl ? { kind: 'estimated_gross', isEstimate: true, isBrokerNet: false } : null;
+      },
       tradeJournalDate: trade => String(trade?.date||'').slice(0,10),
     },
     '{tradeJournalCsv}',
@@ -1771,7 +1944,7 @@ try {
     date: '2026-01-02', symbol: 'XAUUSD', asset: 'cm', direction: 'Long', entry: 2000, exit: 2001, size: 0.02,
     entryTime:'10:00',exitTime:'10:37',entryAt:'2026-01-02T04:30:00.000Z',exitAt:'2026-01-02T05:07:20.000Z',durationSeconds:2240,
     pnl: 2, strategy: 'System', custom: { playbook: {} }, emotion: 'Calm', accountId: 'acct-a', notes: '', isOpen: false, source: 'ctrader',
-    brokerData: { accountCurrency: 'EUR', quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
+    brokerData: { accountCurrency: 'EUR', pnlAuthority: 'provider', pnlMethod: 'provider_explicit_net_cents', quantityProjection: { version: 1, value: '2', unit: 'base_units', volumeScale: 'unit_cents', source: 'provider_filled_volume', baseAssetName: 'XAU' } },
   }, {
     date: '2026-01-03', symbol: 'XAUUSD', asset: 'cm', direction: 'Short', entry: 2000, exit: 2002, size: 0.02,
     pnl: null, strategy: 'System', custom: { playbook: {} }, emotion: 'Calm', accountId: 'acct-a', notes: '', isOpen: false, source: 'ctrader',
@@ -1779,11 +1952,11 @@ try {
   }]);
   const journalRows = JSON.parse(JSON.stringify(parser.parseCSV(journalCsv)));
   if (!journalCsv.includes('\r\n') || journalRows.length !== 4 || journalRows[1].length !== 31 || journalRows[1][5] !== "'=CMD()" ||
-      journalRows[1][14] !== '-2.00' || journalRows[1][15] !== 'USD' || journalRows[1][16] !== 'verified_net' || journalRows[1][20] !== "'+SUM(1,1)" || journalRows[1][21] !== "'=HYPERLINK(\"bad\")" || journalRows[1][29] !== "'@Desk" || journalRows[1][30] !== 'line 1, "quoted"\nline 2') {
+      journalRows[1][14] !== '-2.00' || journalRows[1][15] !== 'USD' || journalRows[1][16] !== 'manual_reported' || journalRows[1][20] !== "'+SUM(1,1)" || journalRows[1][21] !== "'=HYPERLINK(\"bad\")" || journalRows[1][29] !== "'@Desk" || journalRows[1][30] !== 'line 1, "quoted"\nline 2') {
     failures.push('RFC 4180 journal export or spreadsheet-injection protection regressed');
   }
   if (journalRows[0][3] !== 'Duration' || journalRows[0][4] !== 'Duration Seconds' || journalRows[2][3] !== '37m' || journalRows[2][4] !== '2240' ||
-      journalRows[0][11] !== 'Size Unit' || journalRows[0][15] !== 'PnL Currency' || journalRows[2][10] !== '2' || journalRows[2][11] !== 'XAU base units' || journalRows[2][15] !== 'EUR') {
+      journalRows[0][11] !== 'Size Unit' || journalRows[0][15] !== 'PnL Currency' || journalRows[2][10] !== '2' || journalRows[2][11] !== 'XAU base units' || journalRows[2][15] !== 'EUR' || journalRows[2][16] !== 'broker_exact_net') {
     failures.push('Journal CSV export mislabeled a cTrader base-unit quantity as lots');
   }
   if (journalRows[3][14] !== '' || journalRows[3][16] !== 'estimated_gross' || journalRows[3][17] !== '-4.00' || journalRows[3][18] !== 'USD' || journalRows[3][19] !== 'No') {
@@ -1846,7 +2019,7 @@ try {
   failures.push(`Calendar navigation fixture failed: ${error.message}`);
 }
 
-requireMatch(app, /const closed=src\.filter\(tradeIsClosedWithPnl\)[^;]*?\.sort\(compareTradeChronology\)/, 'explicit analytics trade chronology sort');
+requireMatch(app, /const closed=financialIncomplete\?\[\]:financialScopeForTrades\(src\)\.included[^;]*?\.sort\(compareTradeChronology\)/, 'explicit canonical analytics trade chronology sort');
 requireMatch(app, /deterministic bootstrap/i, 'deterministic bootstrap analytics label');
 rejectMatch(app, /Your real edge|Revenge trading|60[–-]70%|trades to 95%/i, 'fabricated analytics claim');
 
@@ -1892,7 +2065,13 @@ try {
 try {
   const { exports: semantics } = evaluateSecurityFixture(
     positionSemanticsSource,
-    { isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)) },
+    {
+      isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
+      tradeFinancialPresentation: trade => Number.isFinite(Number(trade?.pnl)) ? { amount:Number(trade.pnl), isEstimate:false, includeInAnalytics:true } : null,
+      financialPresentationDate: (instant,_zone,fallback) => fallback || String(instant||'').slice(0,10),
+      tradeJournalDate: trade => trade?.date||'',
+      financialPresentationLedgerForTrades: source => source.flatMap(trade => (trade?.brokerData?.realizedEvents||[]).map(event => ({...trade,ledgerDate:event.date,ledgerPnl:Number(event.pnl),realizedEvent:event,financialIsEstimate:false}))),
+    },
     '{tradeIsOpen,tradeHasPnl,tradeIsClosedWithPnl,tradeRealizedEvents,realizedLedgerForTrades}',
   );
   const partial = {
@@ -2017,6 +2196,8 @@ try {
       window: securityWindow,
       S: { accounts: [account] },
       trades: [],
+      financialCoverageForTrades: () => ({ overallNet: null }),
+      financialCoverageIssueText: () => maliciousMarkup,
       activeAcctId: account.id,
       ACCT_COLORS: ['#6c63ff'],
     },
@@ -2035,6 +2216,7 @@ try {
   if (document.getElementById('dd-accounts-list').innerHTML.includes('background-image')) {
     failures.push('Account switcher retained an unsafe persisted color');
   }
+  if (!/P&L:[\s\S]*— \(incomplete\)/.test(document.getElementById('acct-list-el').innerHTML)) failures.push('Account settings did not render incomplete financial coverage safely');
 } catch (error) {
   failures.push(`Account XSS fixture failed: ${error.message}`);
 }
@@ -2073,6 +2255,7 @@ try {
       acctCur: () => maliciousMarkup,
       normalizeFxCurrency: () => null,
       pnlBreakdown: () => maliciousMarkup,
+      cTraderExactPnlBreakdown: () => null,
       cTraderTradeNeedsReview: () => false,
       FUTURES_SPECS: {},
       ASSET_LABELS: { eq: 'Equity', cx: 'Crypto', fx: 'Forex', cm: 'Commodity', ix: 'Index' },
@@ -2484,7 +2667,7 @@ try {
   const groupDocument = makeFakeDocument();
   groupDocument.getElementById('hm-acct').value = 'all';
   const heatmapGroupSource = sourceBetween('function renderHeatmap', 'function buildHmGridWithInsert');
-  const maliciousHeatmapTrade = { strategy: maliciousMarkup, pnl: 10, accountId: null };
+  const maliciousHeatmapTrade = { strategy: maliciousMarkup, pnl: 10, ledgerPnl:10, financialIsEstimate:false, accountId: null };
   const { exports: heatmapGroup } = evaluateSecurityFixture(
     `${securityHelperSource}\n${positionSemanticsSource}\n${heatmapGroupSource}`,
     {
@@ -2492,6 +2675,7 @@ try {
       window: securityWindow,
       hmGroup: 'strategy',
       hmSelected: null,
+      trades: [maliciousHeatmapTrade],
       buildHmAcctFilter() {},
       stopDictation() {},
       hmFilteredTrades: () => [maliciousHeatmapTrade],
@@ -2500,6 +2684,11 @@ try {
       tradeMoneyPrefix: () => '$',
       tradeFinancialPresentation: trade => Number.isFinite(Number(trade?.pnl)) ? { amount: Number(trade.pnl), isEstimate: false } : null,
       tradePnlToUSD: (trade, value = trade?.pnl) => Number(value),
+      tradePnlInAccountCurrency: (trade, value = trade?.pnl) => Number(value),
+      financialScopeForTrades: source => ({ included: source.map(trade => ({trade,presentation:{amount:Number(trade.pnl)}})) }),
+      financialCoverageForTrades: () => ({ overallComplete: true, overallIncompleteCount: 0, disconnectedConnectionCount: 0 }),
+      financialCoverageIssueText: () => '',
+      financialCoverageSnapshotText: () => '',
       FxRates: { toUSD: value => value },
       ASSET_LABELS: {},
       signedMoney: (value, symbol) => `${Number(value) < 0 ? '-' : Number(value) > 0 ? '+' : ''}${symbol}${Math.abs(Number(value)).toFixed(0)}`,
@@ -2722,6 +2911,9 @@ if (!coachingFunctions) {
     tradeIsOpen: trade => trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null),
     tradeHasPnl: trade => trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
     tradeIsClosedWithPnl: trade => !(trade?.isOpen === true || (trade?.isOpen == null && trade?.exit == null && trade?.pnl == null)) && trade?.pnl !== null && trade?.pnl !== undefined && Number.isFinite(Number(trade.pnl)),
+    financialCoverageForTrades: () => ({ overallComplete: true, conversionUnavailableCount: 0 }),
+    financialCoverageIssueText: coverage => coverage.overallComplete ? '' : 'one broker value is unavailable',
+    financialScopeForTrades: source => ({ included: source.map(trade => ({ trade, presentation: { amount:Number(trade.pnl) } })) }),
   };
   vm.createContext(coachingContext);
   try {
@@ -2734,6 +2926,9 @@ if (!coachingFunctions) {
     if (coachingContext.reports[0] !== coachingContext.repeatReport) {
       failures.push('Local coaching report generation is not deterministic');
     }
+    coachingContext.financialCoverageForTrades = () => ({ overallComplete: false, conversionUnavailableCount: 1 });
+    vm.runInContext(`globalThis.incompleteReport=buildLocalCoachingReport('edge');`, coachingContext);
+    if (!/withheld[\s\S]*partial sample/i.test(coachingContext.incompleteReport)) failures.push('Local coaching report calculated a partial sample with an unavailable currency conversion');
   } catch (error) {
     failures.push(`Local coaching report runtime failed: ${error.message}`);
   }
@@ -3353,6 +3548,334 @@ const recoveredJournal = await recoveredJournals.journals.put('2026-08-09', { no
 const laterJournal = await recoveredJournals.journals.put('2026-08-09', { notes: 'later edit' });
 if (recoveredJournal?.notes !== 'committed despite lost response' || laterJournal?.notes !== 'later edit' || journalRecoveryReads !== 1 || journalRecoveryPuts[1]?.body?.version !== 2) {
   failures.push('Lost journal response was not reconciled before a later edit');
+}
+
+try {
+  const exactBreakdownSource = sourceBetween('function cTraderExactPnlBreakdown', 'function cTraderProviderMoney');
+  const vpsState = { connections: [], statuses: new Map(), live: { reviews: new Map(), errors: new Map(), loading: new Set() } };
+  const { exports: financial } = evaluateSecurityFixture(
+    `${positionSemanticsSource}\n${quantityProjectionSource}\n${calculatedGrossPresentationSource}\n${exactBreakdownSource}`,
+    {
+      vpsCtraderState: vpsState,
+      S: { brokerAccountMap: {} },
+      mappedAccountForCTraderConnection: connection => String(connection?.mappedAccountId || ''),
+      acctCur: () => '$',
+      normalizeFxCurrency: value => value === '$' || value === 'USD' ? 'USD' : /^[A-Z]{3}$/.test(String(value)) ? String(value) : null,
+      FxRates: { toUSD: (amount, currency) => currency === 'USD' ? Number(amount) : Number.NaN },
+      isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
+      tradeJournalDate: trade => String(trade?.date || '').slice(0, 10),
+    },
+    '{tradeFinancialPresentation,financialScopeForTrades,financialPresentationLedgerForTrades,financialCoverageForTrades,financialCoverageIssueText,cTraderExactPnlBreakdown}',
+  );
+  const baseExact = {
+    id: 'provider-exact', accountId: 'broker-account', source: 'ctrader', symbol: 'XAUUSD', pnl: 12.5, isOpen: false,
+    date: '2026-08-17', exitAt: '2026-08-17T05:00:00.000Z', exact: { pnl: '12.50' },
+    brokerData: { accountCurrency: 'USD', accountMoneyDigits: 2, pnlAuthority: 'provider', pnlMethod: 'provider_close_detail_money_digits', grossProfit: '14.00', commission: '-1.00', swap: '-0.25', pnlConversionFee: '0.25', pnlComponentsCoverage: { version: 1, source: 'ProtoOAClosePositionDetail', tradeLevelExact: true, grossProfit: true, brokerCommission: true, swap: true, pnlConversionFee: true, otherAccountCashFlowsIncluded: false, otherAccountCashFlowsAttribution: 'not_provided_by_position' }, realizedEvents: [{ executionId: 'close-a', executedAt: '2026-08-17T04:45:00.000Z', date: '2026-08-17', pnl: '5.00' }, { executionId: 'close-b', executedAt: '2026-08-17T05:00:00.000Z', date: '2026-08-17', pnl: '7.50' }] },
+  };
+  const exactPresentation = financial.tradeFinancialPresentation(baseExact);
+  if (exactPresentation?.kind !== 'broker_exact_net' || !exactPresentation?.breakdown || exactPresentation.breakdown.net !== '12.50') failures.push('Complete provider close-detail net/breakdown was not accepted canonically');
+  for (const method of ['provider_explicit_net_cents', 'provider_mixed_exact_money']) {
+    const trade = { ...baseExact, id: method, brokerData: { ...baseExact.brokerData, pnlMethod: method, pnlComponentsCoverage: {}, grossProfit: null, commission: null, swap: null, pnlConversionFee: null } };
+    const presentation = financial.tradeFinancialPresentation(trade);
+    if (presentation?.kind !== 'broker_exact_net' || presentation.breakdown !== null) failures.push(`Provider exact-net-only method ${method} lost authority or fabricated components`);
+  }
+  const unavailableProvider = { ...baseExact, id: 'provider-unavailable', brokerData: { ...baseExact.brokerData, pnlAuthority: 'provider_unavailable' } };
+  if (financial.tradeFinancialPresentation(unavailableProvider)?.kind !== 'manual_reported') failures.push('Provider-unavailable value was mislabeled broker-exact');
+  const manual = { id: 'manual-1', accountId: 'broker-account', source: 'manual', pnl: -3, isOpen: false, date: '2026-08-17', exitAt: '2026-08-17T06:00:00.000Z', brokerData: { realizedEvents: [{ executionId: 'untrusted', date: '2020-01-01', pnl: -3 }] } };
+  vpsState.connections = [{ id: 'connection-1', mappedAccountId: 'broker-account' }];
+  let scope = financial.financialScopeForTrades([manual]);
+  if (scope.included.length || scope.manualExcluded.length !== 1) failures.push('Mapped account with only withheld/manual rows leaked journal P&L into broker Overall');
+  vpsState.connections = [];
+  scope = financial.financialScopeForTrades([manual]);
+  if (scope.included.length !== 1 || scope.included[0].presentation.kind !== 'manual_reported') failures.push('Manual-only journal account lost its journal-reported P&L');
+  const manualLedger = financial.financialPresentationLedgerForTrades([manual]);
+  if (manualLedger.length !== 1 || manualLedger[0].ledgerDate !== '2026-08-17' || manualLedger[0].realizedEvent?.ledgerFallback !== true) failures.push('Untrusted manual realized-event timing moved canonical journal P&L');
+  const setHealthyConnection = () => {
+    const connection = { id: 'connection-1', mappedAccountId: 'broker-account', connected: true, tradeHistoryComplete: true, tradeHistoryStartTimestamp: 1786930000000, tradeHistorySyncedThroughTimestamp: 1786943100000, lastSyncStatus: 'succeeded' };
+    vpsState.connections = [connection];
+    vpsState.statuses = new Map([['connection-1', { connection, tradeHistoryComplete: true, tradeHistoryStartTimestamp: 1786930000000, tradeHistorySyncedThroughTimestamp: 1786943100000, latestSyncRun: { status: 'succeeded', counters: {} } }]]);
+    vpsState.live = { reviews: new Map([['connection-1', { candidates: [] }]]), errors: new Map(), loading: new Set() };
+  };
+  setHealthyConnection();
+  const openPartial = { ...baseExact, id: 'open-partial', isOpen: true };
+  const openLedger = financial.financialPresentationLedgerForTrades([openPartial]);
+  const openCoverage = financial.financialCoverageForTrades([openPartial], { allAccounts: true });
+  if (openLedger.length !== 2 || openLedger.reduce((sum, row) => sum + row.ledgerPnl, 0) !== 12.5 || openCoverage.overallNet !== 12.5) failures.push(`Open position partial closes do not tie between realized ledger and Overall P&L (${JSON.stringify({overall:openCoverage.overallNet,pending:openCoverage.pending})})`);
+  const mismatched = { ...baseExact, id: 'mismatch', brokerData: { ...baseExact.brokerData, realizedEvents: [{ executionId: 'bad', date: '2026-08-16', pnl: '1.00' }] } };
+  const mismatchLedger = financial.financialPresentationLedgerForTrades([mismatched]);
+  if (mismatchLedger.length !== 1 || mismatchLedger[0].realizedEvent?.ledgerFallback !== true || mismatchLedger[0].ledgerPnl !== 12.5) failures.push('Non-reconciling provider events did not fall back to canonical exact net');
+  const unsupported = { ...baseExact, id: 'unsupported-currency', brokerData: { ...baseExact.brokerData, accountCurrency: 'XYZ' } };
+  const unsupportedCoverage = financial.financialCoverageForTrades([unsupported], { allAccounts: true });
+  if (unsupportedCoverage.overallNet !== null || unsupportedCoverage.overallComplete || unsupportedCoverage.conversionUnavailableCount !== 1) failures.push('Unsupported currency silently disappeared into a partial/zero Overall P&L');
+
+  const unavailable = { ...baseExact, id: 'missing-exact', pnl: null, exact: { ...baseExact.exact, pnl: null }, brokerData: { ...baseExact.brokerData, pnlAuthority: 'provider_unavailable' } };
+  let coverage = financial.financialCoverageForTrades([baseExact, unavailable], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.overallNet !== null || coverage.unavailableCount !== 1 || !/no accepted broker or journal P&L/.test(financial.financialCoverageIssueText(coverage))) failures.push('Mixed exact and unavailable broker rows produced a known-only Overall P&L');
+  coverage = financial.financialCoverageForTrades([unavailable], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.overallNet !== null || coverage.unavailableCount !== 1) failures.push('All-unavailable broker rows masqueraded as zero Overall P&L');
+
+  coverage = financial.financialCoverageForTrades([baseExact, manual], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.excludedManualCount !== 1) failures.push('Manual/unreconciled broker-account row did not withhold Overall P&L');
+
+  const healthyStatus = vpsState.statuses.get('connection-1');
+  healthyStatus.latestSyncRun.counters.pendingExactMoneyRetries = 1;
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.pendingExactMoneyRetries !== 1) failures.push(`Pending exact-money recovery did not withhold Overall P&L (${JSON.stringify({complete:coverage.overallComplete,pending:coverage.pending})})`);
+  healthyStatus.latestSyncRun.counters.pendingExactMoneyRetries = 0;
+  healthyStatus.latestSyncRun.counters.positionsAwaitingReview = 2;
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.pendingPositionReviewCount !== 2) failures.push('Broker positions awaiting verified-data review did not withhold Overall P&L');
+  healthyStatus.latestSyncRun.counters.positionsAwaitingReview = 0;
+  healthyStatus.historicalImport = { status: 'review', counters: { pending: 1 } };
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.pendingHistoricalReviewCount !== 1) failures.push('Pending historical reconciliation did not withhold Overall P&L');
+  healthyStatus.historicalImport = { status: 'cancelled', counters: { pending: 9, awaitingReview: 9 } };
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (!coverage.overallComplete || coverage.pendingHistoricalReviewCount !== 0) failures.push('Cancelled historical import retained stale actionable-pending counters and withheld a complete official scope');
+  healthyStatus.historicalImport = null;
+  healthyStatus.tradeHistoryComplete = false;
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.tradeHistoryIncompleteCount !== 1) failures.push(`Incomplete provider trade history did not withhold Overall P&L (${JSON.stringify({complete:coverage.overallComplete,pending:coverage.pending})})`);
+  healthyStatus.tradeHistoryComplete = true;
+
+  vpsState.live.reviews.set('connection-1', { candidates: [{ id: 'live-1', status: 'pending' }] });
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.pendingLiveReconciliationCount !== 1) failures.push(`Pending live reconciliation did not withhold Overall P&L (${JSON.stringify({complete:coverage.overallComplete,pending:coverage.pending})})`);
+  vpsState.live.reviews.delete('connection-1');
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.liveReviewUnavailableCount !== 1) failures.push('Missing live-reconciliation payload was treated as zero pending candidates');
+  vpsState.live.errors.set('connection-1', 'review endpoint unavailable');
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.liveReviewUnavailableCount !== 1) failures.push('Failed live-reconciliation load did not fail closed');
+  vpsState.live.errors.clear();vpsState.live.reviews.set('connection-1', { candidates: [] });vpsState.live.loading.add('connection-1');
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.liveReviewUnavailableCount !== 1) failures.push('Loading live-reconciliation state was treated as zero pending candidates');
+  vpsState.live.loading.clear();
+  healthyStatus.latestSyncRun.status = 'failed';
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.syncIncompleteCount !== 1) failures.push('Failed latest broker sync was mislabeled currently complete');
+  healthyStatus.latestSyncRun.status = 'succeeded';
+
+  const estimateOnly = { ...baseExact, id: 'estimate-only', pnl: null, exact: { ...baseExact.exact, pnl: null }, brokerData: { ...baseExact.brokerData, pnlAuthority: 'provider_unavailable', calculatedGrossPnl: '3.00', calculatedGrossCurrency: 'USD', calculatedGrossMethod: 'fill_price_base_units_identity_conversion_v1', calculatedGrossProvenance: { version: 1, accountMoneyDigits: 2, feesIncluded: false, quoteCurrency: 'USD', accountCurrency: 'USD', conversionRate: '1' }, calculatedGrossEvents: [{ executionId: 'estimate-close', executedAt: '2026-08-17T05:00:00.000Z', grossPnl: '3.00' }] } };
+  coverage = financial.financialCoverageForTrades([baseExact, estimateOnly], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.estimatedCount !== 1) failures.push('Mixed exact and estimate-only broker rows presented Overall P&L as complete');
+  coverage = financial.financialCoverageForTrades([estimateOnly], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.overallNet !== null || coverage.estimatedCount !== 1) failures.push('All-estimate broker rows masqueraded as zero Overall P&L');
+
+  vpsState.connections = [];vpsState.statuses = new Map();vpsState.live = { reviews: new Map(), errors: new Map(), loading: new Set() };
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.accountStatusUnknownCount !== 1) failures.push('Existing broker row with unloaded connection/status state presented Overall P&L as complete');
+  vpsState.connections = [{ id: 'connection-1', mappedAccountId: 'broker-account', connected: false, tradeHistoryComplete: true, tradeHistorySyncedThroughTimestamp: 1786943100000 }];
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.overallNet !== null || coverage.disconnectedConnectionCount !== 1 || !/unresolved candidates or exact-money recovery cannot be proven clear/.test(financial.financialCoverageIssueText(coverage))) failures.push('Disconnected mapped account exposed a potentially partial stored snapshot as Overall P&L');
+  vpsState.connections = [{ id: 'connection-1', mappedAccountId: 'broker-account', connected: false, tradeHistoryComplete: false, tradeHistorySyncedThroughTimestamp: null }];
+  coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
+  if (coverage.overallComplete || coverage.tradeHistoryIncompleteCount !== 1) failures.push('Never-completed disconnected broker history was mislabeled a complete historical snapshot');
+} catch (error) {
+  failures.push(`Canonical financial-scope fixture failed: ${error.message}`);
+}
+
+try {
+  const djStatsSource = sourceBetween('function djDayStats', '/* Format date nicely */');
+  const { exports: djStats } = evaluateSecurityFixture(
+    djStatsSource,
+    {
+      trades: [],
+      financialPresentationLedgerForTrades: () => [
+        { id: 'usd', ledgerDate: '2026-08-17', ledgerPnl: 10, financialIsEstimate: false, currency: 'USD' },
+        { id: 'unsupported', ledgerDate: '2026-08-17', ledgerPnl: -4, financialIsEstimate: false, currency: 'XYZ' },
+      ],
+      financialPresentationDate: (instant, timeZone, fallback) => fallback || null,
+      tradeJournalDate: trade => trade?.date || '',
+      financialCoverageForTrades: () => ({ overallComplete: true, overallIncompleteCount: 0 }),
+      financialCoverageIssueText: () => '',
+      financialCoverageSnapshotText: () => '',
+      tradePnlToUSD: trade => trade.currency === 'USD' ? trade.pnl : Number.NaN,
+    },
+    '{djDayStats}',
+  );
+  const stats = djStats.djDayStats('2026-08-17');
+  if (!stats.incomplete || stats.unavailableCount !== 1 || stats.net !== null || stats.wr !== null || stats.best !== null || stats.count !== 2) failures.push('Daily Journal reported a partial current-FX day total/outcome sample');
+  requireMatch(app, /renderDashboardInsights\(financialIncomplete\?\[\]:src,closed/, 'dashboard insight charts fail closed on incomplete financial coverage');
+  requireMatch(app, /completedPnlVals = coverage\.overallComplete\?/, 'dashboard outcome cards fail closed on unavailable currency conversion');
+} catch (error) {
+  failures.push(`Financial conversion fail-closed fixture failed: ${error.message}`);
+}
+
+// The production XLSX writer and the actual detailed-workbook builder are
+// exercised together. This catches ZIP/OOXML regressions, unsafe spreadsheet
+// text, precision-loss audit gaps, and schema drift without depending on Excel.
+const readStoredZipEntries = bytes => {
+  const entries = new Map();
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+  while (offset + 30 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
+    const method = view.getUint16(offset + 8, true);
+    const compressedSize = view.getUint32(offset + 18, true);
+    const nameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    if (method !== 0) throw new Error('production writer emitted an unexpected compressed ZIP entry');
+    const nameStart = offset + 30;
+    const dataStart = nameStart + nameLength + extraLength;
+    const name = new TextDecoder().decode(bytes.slice(nameStart, nameStart + nameLength));
+    entries.set(name, bytes.slice(dataStart, dataStart + compressedSize));
+    offset = dataStart + compressedSize;
+  }
+  return entries;
+};
+try {
+  requireMatch(app, /<script src=["']\.\/client\/xlsx-export\.js["']><\/script>/, 'production XLSX writer script');
+  requireMatch(read('deploy/vps/scripts/build-public.sh'), /client\/xlsx-export\.js/, 'XLSX writer copied into production artifact');
+  requireMatch(read('deploy/vps/verify-deployment.mjs'), /xlsx-export\.js/, 'XLSX writer deployment contract');
+
+  const xlsxHelpersSource = sourceBetween('function xlsxCell', 'async function fetchAllAccountCashFlowsForExport');
+  const workbookBuilderSource = sourceBetween('function edgebookDetailedWorkbook', 'let _excelExportInFlight');
+  const exactTrade = {
+    id: 'trade-1', recordId: 'record-1', externalTradeKey: 'ctrader:position:9001', brokerTradeId: '9001', brokerConnectionId: 'connection-1',
+    accountId: 'account-1', source: 'ctrader', sourceSystem: 'ctrader', symbol: 'XAUUSD', direction: 'Long', entry: 2320.1, exit: 2321.4, size: 0.02,
+    exact: { entry: '2320.100000000000001', exit: '2321.400000000000001', size: '0.020000000000000001', pnl: '12.3400' },
+    date: '2026-08-17', entryAt: '2026-08-17T04:30:00.000Z', exitAt: '2026-08-17T05:00:00.000Z', durationSeconds: 1800, pnl: 12.34,
+    notes: '=HYPERLINK("https://bad.example") & ₹ <tag>', strategy: 'Breakout', emotion: 'Calm', custom: { playbook: { setup: 'Opening range', grade: 'A' } },
+    brokerData: {
+      positionId: '9001', accountCurrency: 'USD', accountMoneyDigits: 4, pnlAuthority: 'provider', pnlMethod: 'provider_close_detail_money_digits',
+      quantityProjection: { unit: 'base_units', value: '2.000000000000000001', lots: null, baseUnits: '2.000000000000000001' },
+    },
+  };
+  exactTrade._presentation = { kind: 'broker_exact_net', amount: 12.34, currency: 'USD', isEstimate: false, isBrokerNet: true, authority: 'provider', breakdown: { net: '12.3400', gross: '14.0000', commission: '-1.2500', swap: '-0.3100', conversionFee: '0.1000', currency: 'USD' } };
+  exactTrade._ledger = [{ ...exactTrade, ledgerDate: '2026-08-17', ledgerPnl: 12.34, financialKind: 'broker_exact_net', financialIsEstimate: false, realizedEvent: { executionId: 'close-1', executedAt: '2026-08-17T05:00:00.000Z', closedVolumeCents: '200000000000000001', price: '2321.400000000000001', pnl: '12.3400', grossProfit: '14.0000', commission: '-1.2500', swap: '-0.3100', pnlConversionFee: '0.1000' } }];
+  const scopeFor = source => ({
+    brokerAccounts: new Set(['account-1']),
+    included: source.filter(trade => !trade._scopeKind).map(trade => ({ trade, presentation: trade._presentation, brokerTracked: true })),
+    estimated: source.filter(trade => trade._scopeKind === 'estimated').map(trade => ({ trade, presentation: trade._presentation, brokerTracked: true })),
+    manualExcluded: source.filter(trade => trade._scopeKind === 'manualExcluded').map(trade => ({ trade, presentation: trade._presentation, brokerTracked: true })),
+    unavailable: source.filter(trade => trade._scopeKind === 'unavailable').map(trade => ({ trade, presentation: null, brokerTracked: true })),
+  });
+  const { exports: workbookBuilder } = evaluateSecurityFixture(
+    `${xlsxHelpersSource}\n${workbookBuilderSource}`,
+    {
+      activePageAcct: { journal: 'all' }, S: { accounts: [{ id: 'account-1', name: 'Master' }] },
+      financialPresentationLedgerForTrades: source => source.flatMap(trade => trade._ledger || []),
+      financialScopeForTrades: scopeFor, tradeFinancialPresentation: trade => trade._presentation || null,
+      tradeJournalDate: trade => trade.date, tradeDurationSeconds: trade => trade.durationSeconds,
+      tradeIsOpen: trade => trade.isOpen === true, getTradeSizeValue: trade => trade.size, getSizeLabel: () => 'base units',
+      tradePnlCurrency: trade => trade._presentation?.currency || trade.brokerData?.accountCurrency || 'USD',
+      cTraderCalculatedGross: trade => trade._presentation?.gross || null, acctName: () => 'Master',
+      ctraderCashFlowCategory: flow => flow.category || 'unknown', mappedAccountForCTraderConnection: connection => connection.mappedAccountId || '',
+      ctraderCashFlowHasExactMoney: flow => flow?.scalingStatus === 'exact' && flow?.moneyDigitsSource === 'cash_flow' && Number.isSafeInteger(Number(flow?.moneyDigits)) && flow?.amount !== null && flow?.amount !== undefined && /^-?\d+(?:\.\d+)?$/.test(String(flow.amount)),
+      isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
+    },
+    '{edgebookDetailedWorkbook}',
+  );
+  const cashFlowExport = {
+    complete: false,
+    errors: ['All stored rows exported; provider historical completeness is unverified.'],
+    financialPending: { connectionCount: 2, connectedConnectionCount: 1, disconnectedConnectionCount: 1, accountStatusUnknownCount: 1, pendingExactMoneyRetries: 1, pendingPositionReviewCount: 2, pendingLiveReconciliationCount: 1, pendingHistoricalReviewCount: 1, pendingReconciliationCount: 4, liveReviewUnavailableCount: 1, tradeHistoryIncompleteCount: 1, syncIncompleteCount: 1, historyThrough: [{ connectionId: 'connection-1', accountId: 'account-1', timestamp: 1786943100000, connected: true }] },
+    connections: [{ id: 'connection-1', label: '25K Master', mappedAccountId: 'account-1', connected: true, accountBalance: '24901.1234', accountBalanceRawUnits: '2490112340000000001', accountBalanceMoneyDigits: 4, accountBalanceVersion: 'v2', accountBalanceScalingStatus: 'exact', accountCurrency: 'USD', accountBalanceAsOf: '2026-08-17T05:05:00Z', accountBalanceSource: 'ProtoOATrader', accountCashFlowHistoryComplete: false, accountCashFlowMonetaryScaleComplete: false, accountCashFlowTotalRows: 2, accountCashFlowScaledRows: 1, accountCashFlowUnscaledRows: 1, accountCashFlowPendingScaleRetries: 1, tradeHistoryComplete: false, tradeHistoryStartTimestamp: null, tradeHistorySyncedThroughTimestamp: null }],
+    rows: [
+      { occurredAt: '2026-08-17T05:02:00Z', balanceHistoryId: '9223372036854775807', connectionId: 'connection-1', mappedAccountId: 'account-1', operationName: 'BALANCE_FEE', category: 'unknown', amount: '-0.0100', balance: '24901.1234', equity: '24905.9999', currency: 'USD', moneyDigits: 4, scalingStatus: 'exact', positionAttribution: 'not_available_from_ctrader', rawAmountUnits: '-100000000000000001', rawBalanceUnits: '2490112340000000001', rawEquityUnits: '2490599990000000001', balanceVersion: 'v2', moneyDigitsSource: 'cash_flow' },
+      { occurredAt: '2026-08-17T05:03:00Z', balanceHistoryId: '9223372036854775808', connectionId: 'connection-1', mappedAccountId: 'account-1', operationName: 'BALANCE_FEE', category: 'trading_related_adjustment', amount: null, balance: null, equity: null, currency: 'USD', moneyDigits: null, scalingStatus: 'money_digits_unavailable', positionAttribution: 'not_available_from_ctrader', rawAmountUnits: '-100000000000000002', rawBalanceUnits: '2490112340000000002', rawEquityUnits: '2490599990000000002', balanceVersion: 'v2', moneyDigitsSource: 'unavailable' },
+    ],
+  };
+  const definition = workbookBuilder.edgebookDetailedWorkbook([exactTrade], cashFlowExport);
+  const sheetNames = definition.sheets.map(sheet => sheet.name);
+  if (sheetNames.join('|') !== 'Summary|Trades|Realized Events|Account Adjustments|Data Quality') failures.push('Detailed XLSX sheet topology regressed');
+  const valueOf = cell => cell && typeof cell === 'object' && 'value' in cell ? cell.value : cell;
+  const tradeHeaders = definition.sheets[1].rows[0].map(valueOf);
+  const adjustmentHeaders = definition.sheets[3].rows[0].map(valueOf);
+  const qualityCodes = definition.sheets[4].rows.slice(1).map(row => valueOf(row[1]));
+  for (const header of ['Broker Net P&L', 'Gross Exact Text', 'Broker Net Exact Text', 'Quantity Base Units Exact Text']) if (!tradeHeaders.includes(header)) failures.push(`Detailed XLSX omitted trade audit column ${header}`);
+  for (const header of ['Opened At (UTC)', 'Closed At (UTC)']) if (!tradeHeaders.includes(header)) failures.push(`Detailed XLSX omitted timestamp timezone label ${header}`);
+  if (!adjustmentHeaders.includes('Occurred At (UTC)')) failures.push('Detailed XLSX account-ledger timestamp did not disclose UTC');
+  for (const header of ['Raw Amount Units', 'Raw Balance Units', 'Raw Equity Units', 'Balance Version']) if (!adjustmentHeaders.includes(header)) failures.push(`Detailed XLSX omitted account-ledger audit column ${header}`);
+  if (!qualityCodes.includes('ACCOUNT_LEDGER_PARTIAL') || !qualityCodes.includes('UNKNOWN_ACCOUNT_ADJUSTMENT')) failures.push('Detailed XLSX did not disclose partial/unknown account ledger quality');
+  for (const code of ['ACCOUNT_ADJUSTMENT_SCALE_UNAVAILABLE','ACCOUNT_ADJUSTMENT_SCALE_RECOVERY_PENDING','ACCOUNT_ADJUSTMENT_SCALE_COVERAGE_INCOMPLETE']) if (!qualityCodes.includes(code)) failures.push(`Detailed XLSX omitted cash-flow scale quality row ${code}`);
+  if (definition.sheets[3].rows[2][6] !== null || valueOf(definition.sheets[3].rows[2][18]) !== '-100000000000000002') failures.push('Detailed XLSX typed an unscaled adjustment as zero/money or lost its raw provider units');
+  for (const code of ['BROKER_ACCOUNT_STATUS_UNKNOWN','BROKER_EXACT_MONEY_RECOVERY_PENDING','BROKER_POSITION_REVIEW_PENDING','LIVE_RECONCILIATION_PENDING','LIVE_RECONCILIATION_UNVERIFIED','HISTORICAL_RECONCILIATION_PENDING','BROKER_TRADE_HISTORY_INCOMPLETE','BROKER_SYNC_NOT_CURRENT','BROKER_CONNECTION_DISCONNECTED_SNAPSHOT']) if (!qualityCodes.includes(code)) failures.push(`Detailed XLSX omitted broker coverage quality row ${code}`);
+  const summaryText = definition.sheets[0].rows.flat().map(valueOf).join(' | ');
+  if (!/Overall P&L status \| WITHHELD/.test(summaryText) || !/Known broker trade net \(subtotal\)/.test(summaryText)) failures.push('Detailed XLSX presented accepted broker rows as a complete Overall P&L while coverage was pending');
+  if (!/Account cash-flow ledger \| PARTIAL \/ UNKNOWN/.test(summaryText)) failures.push('Detailed XLSX claimed complete monetary account-adjustment coverage while an unscaled row remained');
+  if (!/Overall P&L scope \| Realized broker trade net only[\s\S]*excludes open\/unrealized P&L[\s\S]*not live broker equity/.test(summaryText)) failures.push('Detailed XLSX did not distinguish realized trade net from live broker equity/unrealized P&L');
+  if (!/Balance, not equity/.test(summaryText)) failures.push('Detailed XLSX mislabeled the broker balance control as live equity');
+  requireMatch(app, /Overall P&L is realized broker trade net only[\s\S]*excludes open\/unrealized P&L[\s\S]*not live broker equity/, 'dashboard realized-P&L versus live-equity scope disclosure');
+  const partialAdjustmentSummaryRows = definition.sheets[0].rows.filter(row => ['Funding cash flows','Trading-related adjustments','Non-trading economics','Bonus / protection','Unknown adjustments'].includes(valueOf(row[0])));
+  if (partialAdjustmentSummaryRows.length !== 5 || partialAdjustmentSummaryRows.some(row => row[1] !== null || !/Withheld:/.test(valueOf(row[3])))) failures.push('Detailed XLSX emitted partial account-adjustment category formulas while monetary scale coverage was incomplete');
+  if (!definition.sheets[0].rows.flat().some(cell => cell?.type === 'formula_money')) failures.push('Detailed XLSX Summary lost its reconciliation formulas');
+
+  const unavailableTrade = { ...exactTrade, id: 'unavailable-row', recordId: 'unavailable-row', pnl: null, _presentation: null, _ledger: [], _scopeKind: 'unavailable' };
+  const manualTrade = { ...exactTrade, id: 'manual-row', recordId: 'manual-row', source: 'manual', sourceSystem: 'manual', pnl: -2, _presentation: { kind: 'manual_reported', amount: -2, currency: 'USD', isEstimate: false, isBrokerNet: false }, _ledger: [], _scopeKind: 'manualExcluded' };
+  const estimateTrade = { ...exactTrade, id: 'estimate-row', recordId: 'estimate-row', pnl: null, _presentation: { kind: 'estimated_gross', amount: 3, currency: 'USD', isEstimate: true, isBrokerNet: false, gross: { valueText: '3.00' } }, _ledger: [], _scopeKind: 'estimated' };
+  const issueDefinition = workbookBuilder.edgebookDetailedWorkbook([exactTrade, unavailableTrade, manualTrade, estimateTrade], cashFlowExport);
+  const issueCodes = issueDefinition.sheets[4].rows.slice(1).map(row => valueOf(row[1]));
+  for (const code of ['PNL_UNAVAILABLE','MANUAL_EXCLUDED_FROM_BROKER_TOTAL','ESTIMATED_GROSS']) if (!issueCodes.includes(code)) failures.push(`Detailed XLSX omitted visible trade quality row ${code}`);
+
+  const completeDefinition = workbookBuilder.edgebookDetailedWorkbook([exactTrade], {
+    ...cashFlowExport,
+    complete: true,
+    errors: [],
+    rows: cashFlowExport.rows.slice(0,1),
+    financialPending: { connectionCount: 1, connectedConnectionCount: 1, disconnectedConnectionCount: 0, accountStatusUnknownCount: 0, pendingExactMoneyRetries: 0, pendingPositionReviewCount: 0, pendingLiveReconciliationCount: 0, pendingHistoricalReviewCount: 0, pendingReconciliationCount: 0, liveReviewUnavailableCount: 0, tradeHistoryIncompleteCount: 0, syncIncompleteCount: 0, historyThrough: [{ connectionId: 'connection-1', accountId: 'account-1', timestamp: 1786943100000, connected: true }] },
+    connections: cashFlowExport.connections.map(connection => ({ ...connection, tradeHistoryComplete: true, tradeHistoryStartTimestamp: 1786930000000, tradeHistorySyncedThroughTimestamp: 1786943100000, accountCashFlowHistoryComplete: true, accountCashFlowHistoryStartTimestamp: 1786930000000, accountCashFlowSyncedThroughTimestamp: 1786943100000, accountCashFlowMonetaryScaleComplete: true, accountCashFlowTotalRows: 1, accountCashFlowScaledRows: 1, accountCashFlowUnscaledRows: 0, accountCashFlowPendingScaleRetries: 0 })),
+  });
+  const completeSummaryText = completeDefinition.sheets[0].rows.flat().map(valueOf).join(' | ');
+  if (!/Overall P&L status \| COMPLETE THROUGH account-1: 2026-08-17T05:05:00\.000Z/.test(completeSummaryText) || /Known broker trade net \(subtotal\)/.test(completeSummaryText)) failures.push('Detailed XLSX did not tie a complete Overall P&L claim to its exact broker-history through timestamp');
+  if (!/Account cash-flow ledger \| Complete through/.test(completeSummaryText) || /money scale incomplete/.test(completeSummaryText)) failures.push('Detailed XLSX did not restore complete account-adjustment coverage after every row had authoritative scale');
+  const completeAdjustmentSummaryRows = completeDefinition.sheets[0].rows.filter(row => ['Funding cash flows','Trading-related adjustments','Non-trading economics','Bonus / protection','Unknown adjustments'].includes(valueOf(row[0])));
+  if (completeAdjustmentSummaryRows.length !== 5 || completeAdjustmentSummaryRows.some(row => row[1]?.type !== 'formula_money')) failures.push('Detailed XLSX did not restore account-adjustment category formulas after monetary scale coverage became complete');
+
+  const disconnectedOnlyDefinition = workbookBuilder.edgebookDetailedWorkbook([], {
+    ...cashFlowExport,
+    rows: [], complete: true, errors: [],
+    financialPending: { connectionCount: 1, connectedConnectionCount: 0, disconnectedConnectionCount: 1, accountStatusUnknownCount: 0, pendingExactMoneyRetries: 0, pendingPositionReviewCount: 0, pendingLiveReconciliationCount: 0, pendingHistoricalReviewCount: 0, pendingReconciliationCount: 0, liveReviewUnavailableCount: 0, tradeHistoryIncompleteCount: 0, syncIncompleteCount: 0, historyThrough: [{ connectionId: 'connection-1', accountId: 'account-1', timestamp: 1786943100000, connected: false }] },
+    connections: cashFlowExport.connections.map(connection => ({ ...connection, connected: false, tradeHistoryComplete: true, tradeHistoryStartTimestamp: 1786930000000, tradeHistorySyncedThroughTimestamp: 1786943100000, accountCashFlowHistoryComplete: true, accountCashFlowHistoryStartTimestamp: 1786930000000, accountCashFlowSyncedThroughTimestamp: 1786943100000 })),
+  });
+  const disconnectedSummaryText = disconnectedOnlyDefinition.sheets[0].rows.flat().map(valueOf).join(' | ');
+  const disconnectedQualityCodes = disconnectedOnlyDefinition.sheets[4].rows.slice(1).map(row => valueOf(row[1]));
+  if (!/Overall P&L status \| WITHHELD/.test(disconnectedSummaryText) || !disconnectedQualityCodes.includes('BROKER_CONNECTION_DISCONNECTED_SNAPSHOT')) failures.push('Detailed XLSX labeled a disconnected potentially-withheld broker snapshot complete when no accepted trade row exposed the gap');
+
+  const bytes = xlsxExport.buildXlsx(definition);
+  const blob = xlsxExport.buildBlob(definition);
+  if (bytes[0] !== 0x50 || bytes[1] !== 0x4b || blob.type !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') failures.push('Production XLSX output is not a real XLSX ZIP/blob');
+  const entries = readStoredZipEntries(bytes);
+  for (const part of ['[Content_Types].xml', 'xl/workbook.xml', 'xl/styles.xml', 'xl/worksheets/sheet1.xml', 'xl/worksheets/sheet5.xml']) if (!entries.has(part)) failures.push(`Production XLSX ZIP omitted ${part}`);
+  const decode = name => new TextDecoder().decode(entries.get(name));
+  const allSheetXml = [...entries].filter(([name]) => name.startsWith('xl/worksheets/')).map(([, value]) => new TextDecoder().decode(value)).join('\n');
+  const tradesXml = decode('xl/worksheets/sheet2.xml');
+  const adjustmentsXml = decode('xl/worksheets/sheet4.xml');
+  const summaryXml = decode('xl/worksheets/sheet1.xml');
+  const stylesXml = decode('xl/styles.xml');
+  const expectedDateSerial = String(xlsxExport.excelSerial(new Date('2026-08-17T00:00:00.000Z')));
+  if (!tradesXml.includes(`<c r="A2" s="3" t="n"><v>${expectedDateSerial}</v></c>`) || !tradesXml.includes('<c r="X2" s="5" t="n"><v>12.34</v></c>')) failures.push('Detailed XLSX dates or money values were not typed numeric cells');
+  if (!summaryXml.includes('<f>SUMIF(') || !allSheetXml.includes('=HYPERLINK("https://bad.example")') || allSheetXml.includes('<f>HYPERLINK(') || !allSheetXml.includes('&lt;tag&gt;') || !allSheetXml.includes('₹')) failures.push('Detailed XLSX formula/injection/UTF-8/XML escaping contract regressed');
+  if (!allSheetXml.includes('2490112340000000001') || !allSheetXml.includes('200000000000000001')) failures.push('Detailed XLSX lost exact raw integer audit values to floating-point conversion');
+  if (adjustmentsXml.includes('<c r="G3"') || !adjustmentsXml.includes('-100000000000000002')) failures.push('Detailed XLSX serialized an unscaled cash-flow amount as typed money/zero or omitted its raw audit units');
+  if (!stylesXml.includes('numFmtId="49"') || !tradesXml.includes('<c r="E2" s="10" t="inlineStr">') || !allSheetXml.includes('s="10" t="inlineStr"')) failures.push('Detailed XLSX exact identifiers/raw values lost their explicit Excel text format');
+  if (!tradesXml.includes('<autoFilter ref="A1:AZ2"')) failures.push('Detailed XLSX filter no longer starts on the actual Trades header row');
+
+  const namedBytes = xlsxExport.buildXlsx({ sheets: [{ name: 'Invalid/very*long?sheet:name[one] 1234567890', rows: [['A']] }, { name: 'Invalid/very*long?sheet:name[one] 1234567890', rows: [['B']] }] });
+  const namedWorkbookXml = new TextDecoder().decode(readStoredZipEntries(namedBytes).get('xl/workbook.xml'));
+  const normalizedNames = [...namedWorkbookXml.matchAll(/<sheet name="([^"]+)"/g)].map(match => match[1]);
+  if (normalizedNames.length !== 2 || normalizedNames[0] === normalizedNames[1] || normalizedNames.some(name => name.length > 31 || /[\\/*?:\[\]]/.test(name))) failures.push('Production XLSX sheet-name bounds/uniqueness regressed');
+  let unsafeFormulaAccepted = false;
+  try { xlsxExport.buildXlsx({ sheets: [{ name: 'Unsafe', rows: [[{ type: 'formula', value: '=HYPERLINK("https://bad.example")' }]] }] }); unsafeFormulaAccepted = true; } catch {}
+  if (unsafeFormulaAccepted) failures.push('Production XLSX accepted an unallowlisted internal formula function');
+  let oversizedAccepted = false;
+  try { xlsxExport.buildXlsx({ sheets: [{ name: 'Too large', rows: Array.from({ length: 1251 }, () => Array(200).fill(0)) }] }); oversizedAccepted = true; } catch {}
+  if (oversizedAccepted) failures.push('Production XLSX exceeded its 250,000-cell browser memory bound');
+} catch (error) {
+  failures.push(`Detailed XLSX production-writer fixture failed: ${error.message}`);
+}
+
+try {
+  const calls = [];
+  const adapter = createVpsDataAdapter({ async get(requestPath) { calls.push(requestPath); return { accountCashFlows: [], nextCursor: null }; } });
+  const page = await adapter.ctrader.accountCashFlows('connection 1', { limit: 999, cursor: 'next page' });
+  if (page.nextCursor !== null || calls[0] !== '/ctrader/connections/connection%201/cash-flows?limit=500&cursor=next+page') failures.push('Account cash-flow XLSX pagination adapter regressed');
+  const invalid = createVpsDataAdapter({ async get() { return { accountCashFlows: [], nextCursor: 7 }; } });
+  let invalidRejected = false;
+  try { await invalid.ctrader.accountCashFlows('connection-1'); } catch (error) { invalidRejected = error?.code === 'CTRADER_CASH_FLOW_PAGE_INVALID'; }
+  if (!invalidRejected) failures.push('Account cash-flow XLSX pagination accepted an invalid cursor contract');
+} catch (error) {
+  failures.push(`Account cash-flow XLSX pagination fixture failed: ${error.message}`);
 }
 
 if (failures.length) {

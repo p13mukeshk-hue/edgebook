@@ -1647,6 +1647,12 @@ describe("normal MCP sync after reviewed reconciliation", () => {
       expect(write?.sql).toContain("providerExecutionLineage,fingerprintSha256");
       expect(write?.sql).toContain("- 'pnlMethod' - 'grossProfit' - 'commission' - 'swap'");
       expect(write?.sql).toContain("- 'pnlConversionFee' - 'realizedEvents'");
+      expect(write?.sql).toContain("- 'pnlAuthority' - 'pnlComponentsCoverage'");
+      expect(write?.sql).toContain("- 'reconciledManualPnlPreserved'");
+      if (pathKind === "linked") {
+        expect(write?.sql).toContain("'pnlAuthority','preserved_reconciled_manual'");
+        expect(write?.sql).toContain("'reconciledManualPnlPreserved',true");
+      }
       expect(write?.sql).toMatch(pathKind === "linked"
         ? /WHEN \$9::numeric IS NOT NULL THEN \$9::numeric[\s\S]*?THEN pnl[\s\S]*?THEN NULL[\s\S]*?ELSE pnl/
         : /THEN trades\.pnl[\s\S]*?ELSE EXCLUDED\.pnl/);
@@ -1658,13 +1664,21 @@ describe("normal MCP sync after reviewed reconciliation", () => {
           | "provider_mixed_exact_money";
         lineage: string;
         realizedEvents: string[];
+        authority: "provider" | "provider_unavailable" | "preserved_reconciled_manual";
+        coverageExact: boolean;
+        manualPreserved: boolean;
       };
       const transition = (stored: MoneyState, incoming: MoneyState, linked: boolean): MoneyState => {
         const storedExact = stored.method !== "unavailable";
         const sameLineage = stored.lineage === incoming.lineage;
         if (incoming.method === "unavailable" && storedExact && sameLineage) return stored;
         if (linked && incoming.method === "unavailable" && !storedExact) {
-          return { ...incoming, pnl: stored.pnl };
+          return stored.pnl === null ? incoming : {
+            ...incoming,
+            pnl: stored.pnl,
+            authority: "preserved_reconciled_manual",
+            manualPreserved: true,
+          };
         }
         return incoming;
       };
@@ -1673,18 +1687,27 @@ describe("normal MCP sync after reviewed reconciliation", () => {
         method: "provider_close_detail_money_digits",
         lineage,
         realizedEvents: [`close:${pnl}`],
+        authority: "provider",
+        coverageExact: true,
+        manualPreserved: false,
       });
       const mixedExact = (pnl: string, lineage = "same-lineage"): MoneyState => ({
         pnl,
         method: "provider_mixed_exact_money",
         lineage,
         realizedEvents: [`partial-close:${pnl}`],
+        authority: "provider",
+        coverageExact: true,
+        manualPreserved: false,
       });
       const unavailable = (lineage = "same-lineage"): MoneyState => ({
         pnl: null,
         method: "unavailable",
         lineage,
         realizedEvents: [],
+        authority: "provider_unavailable",
+        coverageExact: false,
+        manualPreserved: false,
       });
 
       expect(transition(exact("25"), unavailable(), pathKind === "linked")).toEqual(exact("25"));
@@ -1698,6 +1721,8 @@ describe("normal MCP sync after reviewed reconciliation", () => {
         expect(transition({ ...unavailable(), pnl: "19" }, unavailable(), true)).toEqual({
           ...unavailable(),
           pnl: "19",
+          authority: "preserved_reconciled_manual",
+          manualPreserved: true,
         });
       }
     },

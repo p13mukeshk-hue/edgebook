@@ -3,9 +3,13 @@ import {
   fetchCompleteCashFlowHistory,
   fetchCompleteDealHistory,
   mergeOfficialDealFacts,
+  mergeCashFlowObservations,
   mergeStoredCashFlowFacts,
   mergeStoredExecutionWithOfficial,
+  parseExactMoneyRetryQueue,
+  parseCashFlowMoneyRetryQueue,
   resolveCashFlowMoneyScale,
+  selectDueExactMoneyRetries,
   CTraderSyncError,
 } from "../src/ctrader/sync.js";
 import type { CTraderCashFlow, CTraderDeal } from "../src/ctrader/protocol.js";
@@ -46,6 +50,32 @@ function stubCashFlow(id: string, timestamp: number): CTraderCashFlow {
 }
 
 describe("complete cTrader history retrieval", () => {
+  it("validates and caps the durable exact-money retry cursor before provider reads", () => {
+    const entry = (executionId: string, positionId: string) => ({
+      executionId,
+      positionId,
+      executionTimestamp: 100,
+      attemptCount: 0,
+      firstObservedAt: 200,
+      lastAttemptAt: null,
+      nextAttemptAt: 300,
+    });
+    const parsed = parseExactMoneyRetryQueue({
+      exactMoneyRetryQueueVersion: 1,
+      exactMoneyRetries: [entry("1", "10"), entry("2", "10"), entry("3", "11"), entry("4", "12"), entry("5", "13")],
+    });
+
+    expect(selectDueExactMoneyRetries(parsed, 300).map(retry => retry.executionId)).toEqual(["1", "3", "4"]);
+    expect(() => parseExactMoneyRetryQueue({
+      exactMoneyRetryQueueVersion: 1,
+      exactMoneyRetries: [{ ...entry("1", "10"), untrustedWindowStart: 0 }],
+    })).toThrowError(expect.objectContaining({ code: "CTRADER_EXACT_MONEY_RETRY_CURSOR_INVALID" }));
+    expect(() => parseExactMoneyRetryQueue({
+      exactMoneyRetryQueueVersion: 1,
+      exactMoneyRetries: Array.from({ length: 501 }, (_, index) => entry(String(index + 1), String(index + 1))),
+    })).toThrowError(expect.objectContaining({ code: "CTRADER_EXACT_MONEY_RETRY_CURSOR_INVALID" }));
+  });
+
   it("bisects saturated ranges and deduplicates overlapping provider rows", async () => {
     const one = stubDeal("1", 10);
     const two = stubDeal("2", 90);
@@ -67,6 +97,23 @@ describe("complete cTrader history retrieval", () => {
       code: "HISTORY_PAGE_SATURATED",
       retryable: false,
     });
+  });
+
+  it("stops saturated retry history reads at the explicit provider-request budget", async () => {
+    const listDeals = vi.fn(async () => ({ deals: [], hasMore: true }));
+    await expect(fetchCompleteDealHistory(
+      { listDeals },
+      0,
+      100,
+      1,
+      async () => undefined,
+      null,
+      2,
+    )).rejects.toMatchObject<CTraderSyncError>({
+      code: "HISTORY_PAGINATION_LIMIT",
+      retryable: false,
+    });
+    expect(listDeals).toHaveBeenCalledTimes(2);
   });
 
   it("preserves exact official close money across a weaker replay and fails closed on a conflicting exact replay", () => {
@@ -110,7 +157,7 @@ describe("complete cTrader history retrieval", () => {
     }));
   });
 
-  it("replays exact official close money using the authoritative account exponent when deal digits are omitted", () => {
+  it("does not treat trader or deal precision as close-money authority", () => {
     const first = stubDeal("1", 50);
     first.tradeSide = "SELL";
     first.moneyDigits = null;
@@ -134,15 +181,14 @@ describe("complete cTrader history retrieval", () => {
     };
 
     const merged = mergeOfficialDealFacts(first, replay, 2);
-
-    expect(merged.closePositionDetail).toEqual(replay.closePositionDetail);
+    expect(merged.closePositionDetail?.moneyDigits).toBeNull();
     expect(() => mergeOfficialDealFacts(first, {
       ...replay,
       closePositionDetail: { ...replay.closePositionDetail, grossProfit: 1_001n },
     }, 2)).toThrowError(expect.objectContaining({ code: "CTRADER_OFFICIAL_DEAL_CONFLICT" }));
   });
 
-  it("keeps account-scaled exact money when a saturated first sync sees a weaker overlapping replay", async () => {
+  it("retains an unscaled close observation without promoting account precision during overlap", async () => {
     const exact = stubDeal("1", 10);
     exact.tradeSide = "SELL";
     exact.moneyDigits = null;
@@ -203,8 +249,9 @@ describe("complete cTrader history retrieval", () => {
     (exactCanonical.edgebookMcpDeal as Record<string, unknown>).side = "SELL";
     (exactCanonical.edgebookMcpDeal as Record<string, unknown>).role = "CLOSE";
     expect(mergeStoredExecutionWithOfficial("1", exactCanonical, exactOfficial, "5032134")).toBe(exactOfficial);
-    expect(() => mergeStoredExecutionWithOfficial("1", exactCanonical, { ...exactOfficial, closePositionDetail: null }, "5032134"))
-      .toThrowError(expect.objectContaining({ code: "CTRADER_OFFICIAL_DEAL_DOWNGRADE" }));
+    const officialUnavailable = { ...exactOfficial, closePositionDetail: null };
+    expect(mergeStoredExecutionWithOfficial("1", exactCanonical, officialUnavailable, "5032134"))
+      .toBe(officialUnavailable);
     expect(() => mergeStoredExecutionWithOfficial("1", exactCanonical, {
       ...exactOfficial,
       closePositionDetail: { ...exactOfficial.closePositionDetail!, grossProfit: 1_001n },
@@ -267,14 +314,14 @@ describe("complete cTrader history retrieval", () => {
     });
   });
 
-  it("ranks row moneyDigits above account fallback and never silently changes an immutable row exponent", () => {
+  it("uses only row moneyDigits for cash flows and never silently changes an immutable row exponent", () => {
     expect(resolveCashFlowMoneyScale({ cashFlowMoneyDigits: 3, accountMoneyDigits: 2 })).toEqual({
       moneyDigits: 3,
       source: "cash_flow",
     });
     expect(resolveCashFlowMoneyScale({ cashFlowMoneyDigits: null, accountMoneyDigits: 2 })).toEqual({
-      moneyDigits: 2,
-      source: "account",
+      moneyDigits: null,
+      source: "unavailable",
     });
     expect(resolveCashFlowMoneyScale({
       cashFlowMoneyDigits: null,
@@ -283,19 +330,39 @@ describe("complete cTrader history retrieval", () => {
     })).toEqual({ moneyDigits: 3, source: "cash_flow" });
     expect(resolveCashFlowMoneyScale({
       cashFlowMoneyDigits: null,
-      accountMoneyDigits: null,
+      accountMoneyDigits: 4,
       stored: { moneyDigits: 2, source: "account" },
-    })).toEqual({ moneyDigits: 2, source: "account" });
+    })).toEqual({ moneyDigits: null, source: "unavailable" });
     expect(() => resolveCashFlowMoneyScale({
       cashFlowMoneyDigits: 4,
       accountMoneyDigits: 2,
       stored: { moneyDigits: 3, source: "cash_flow" },
     })).toThrowError(expect.objectContaining({ code: "CASH_FLOW_MONEY_DIGITS_CONFLICT" }));
-    expect(() => resolveCashFlowMoneyScale({
-      cashFlowMoneyDigits: null,
-      accountMoneyDigits: 3,
-      stored: { moneyDigits: 2, source: "account" },
-    })).toThrowError(expect.objectContaining({ code: "CASH_FLOW_ACCOUNT_MONEY_DIGITS_CONFLICT" }));
+  });
+
+  it("durably validates cash-flow scale retries and joins a later row exponent", () => {
+    const retry = {
+      balanceHistoryId: "7",
+      changeBalanceTimestamp: 100,
+      attemptCount: 0,
+      firstObservedAt: 200,
+      lastAttemptAt: null,
+      nextAttemptAt: 300,
+    };
+    expect(parseCashFlowMoneyRetryQueue({
+      cashFlowMoneyRetryQueueVersion: 1,
+      cashFlowMoneyRetries: [retry],
+    })).toEqual([retry]);
+    expect(() => parseCashFlowMoneyRetryQueue({
+      cashFlowMoneyRetryQueueVersion: 1,
+      cashFlowMoneyRetries: [{ ...retry, untrustedWindowStart: 0 }],
+    })).toThrowError(expect.objectContaining({ code: "CTRADER_CASH_FLOW_MONEY_RETRY_CURSOR_INVALID" }));
+    const missing = { ...stubCashFlow("7", 100), moneyDigits: null };
+    expect(mergeCashFlowObservations(missing, { ...missing, moneyDigits: 4 }).moneyDigits).toBe(4);
+    expect(() => mergeCashFlowObservations(
+      { ...missing, moneyDigits: 2 },
+      { ...missing, moneyDigits: 4 },
+    )).toThrowError(expect.objectContaining({ code: "CASH_FLOW_ID_CONFLICT" }));
   });
 
   it("preserves optional immutable cash-flow enrichment and rejects cross-sync identity conflicts", () => {

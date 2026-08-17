@@ -37,7 +37,7 @@ function deal(input: {
           commission: -50n,
           balance: 1_000_000n,
           closedVolumeCents: input.volume,
-          moneyDigits: null,
+          moneyDigits: 2,
           pnlConversionFee: 25n,
           raw: {},
         }
@@ -162,10 +162,59 @@ describe("cTrader position projection", () => {
     });
   });
 
+  it("uses only the close message exponent when deal and trader exponents differ", () => {
+    const opening = deal({ id: "1", side: "BUY", time: "2026-01-01T00:00:00.000Z", volume: 10_000_000n });
+    const closing = deal({ id: "2", side: "SELL", time: "2026-01-02T00:00:00.000Z", volume: 10_000_000n, close: true });
+    closing.moneyDigits = 2;
+    closing.closePositionDetail = { ...closing.closePositionDetail!, moneyDigits: 4 };
+    const projection = projectPosition({
+      deals: [opening, closing],
+      lightSymbol: light,
+      symbolSpec: spec,
+      symbolCategories: new Map(),
+      assetClasses: new Map(),
+      accountMoneyDigits: 0,
+      timeZone: "UTC",
+    });
+    expect(projection).toMatchObject({
+      pnl: "1.217",
+      grossProfit: "1.2345",
+      commission: "-0.005",
+      swap: "-0.01",
+      pnlConversionFee: "0.0025",
+    });
+  });
+
+  it("keeps close money unavailable when its own exponent is absent", () => {
+    const opening = deal({ id: "1", side: "BUY", time: "2026-01-01T00:00:00.000Z", volume: 10_000_000n });
+    const closing = deal({ id: "2", side: "SELL", time: "2026-01-02T00:00:00.000Z", volume: 10_000_000n, close: true });
+    closing.moneyDigits = 2;
+    closing.closePositionDetail = { ...closing.closePositionDetail!, moneyDigits: null };
+    const projection = projectPosition({
+      deals: [opening, closing],
+      lightSymbol: light,
+      symbolSpec: spec,
+      symbolCategories: new Map(),
+      assetClasses: new Map(),
+      accountMoneyDigits: 4,
+      timeZone: "UTC",
+    });
+    expect(projection).toMatchObject({
+      realizedPnlComplete: false,
+      pnl: null,
+      grossProfit: null,
+      commission: null,
+      swap: null,
+      pnlConversionFee: null,
+      realizedEvents: [],
+    });
+  });
+
   it("does not present a partial close-money aggregate as the position total", () => {
     const opening = deal({ id: "1", side: "BUY", time: "2026-01-01T00:00:00.000Z", volume: 10_000_000n });
     const exactClose = deal({ id: "2", side: "SELL", time: "2026-01-02T00:00:00.000Z", volume: 4_000_000n, close: true });
     const missingCloseMoney = deal({ id: "3", side: "SELL", time: "2026-01-03T00:00:00.000Z", volume: 6_000_000n });
+    exactClose.closePositionDetail = { ...exactClose.closePositionDetail!, moneyDigits: 2 };
     const projection = projectPosition({
       deals: [opening, exactClose, missingCloseMoney],
       lightSymbol: light,
@@ -179,6 +228,36 @@ describe("cTrader position projection", () => {
       closedVolumeCents: "10000000",
       openVolumeCents: "0",
       isOpen: false,
+      realizedPnlComplete: false,
+      pnl: null,
+      grossProfit: null,
+      commission: null,
+      swap: null,
+      pnlConversionFee: null,
+    });
+    expect(projection.realizedEvents.map(event => event.executionId)).toEqual(["2"]);
+  });
+
+  it("keeps mixed exact and missing close money incomplete on an open partial position", () => {
+    const opening = deal({ id: "1", side: "BUY", time: "2026-01-01T00:00:00.000Z", volume: 10_000_000n });
+    const exactClose = deal({ id: "2", side: "SELL", time: "2026-01-02T00:00:00.000Z", volume: 2_000_000n, close: true });
+    const missingCloseMoney = deal({ id: "3", side: "SELL", time: "2026-01-03T00:00:00.000Z", volume: 3_000_000n, close: true });
+    missingCloseMoney.closePositionDetail = { ...missingCloseMoney.closePositionDetail!, moneyDigits: null };
+
+    const projection = projectPosition({
+      deals: [opening, exactClose, missingCloseMoney],
+      lightSymbol: light,
+      symbolSpec: spec,
+      symbolCategories: new Map(),
+      assetClasses: new Map(),
+      accountMoneyDigits: 2,
+      timeZone: "UTC",
+    });
+
+    expect(projection).toMatchObject({
+      closedVolumeCents: "5000000",
+      openVolumeCents: "5000000",
+      isOpen: true,
       realizedPnlComplete: false,
       pnl: null,
       grossProfit: null,

@@ -68,6 +68,10 @@ export type CTraderTraderMetadata = {
   registrationTimestamp: number | null;
   depositAssetId: string;
   moneyDigits: number | null;
+  /** Current account balance in the provider's lossless money units. */
+  balance: bigint;
+  /** Monotonic provider balance revision, when supplied. */
+  balanceVersion: bigint | null;
   raw: JsonObject;
 };
 
@@ -469,6 +473,10 @@ export function parseTraderMetadata(payload: JsonObject): CTraderTraderMetadata 
     registrationTimestamp: optionalTimestamp(trader.registrationTimestamp, "trader.registrationTimestamp"),
     depositAssetId: protocolIntegerString(trader.depositAssetId, "trader.depositAssetId"),
     moneyDigits: protocolMoneyDigits(trader.moneyDigits, "trader.moneyDigits"),
+    balance: protocolSignedBigInt(trader.balance, "trader.balance"),
+    balanceVersion: trader.balanceVersion === undefined
+      ? null
+      : protocolSignedBigInt(trader.balanceVersion, "trader.balanceVersion"),
     raw: trader,
   };
 }

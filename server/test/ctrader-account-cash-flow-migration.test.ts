@@ -18,7 +18,8 @@ describe("cTrader account cash-flow migration invariants", () => {
     expect(sql).not.toMatch(/\btrade_id\s+uuid/i);
     expect(sql).toMatch(/no position\/deal identifier/i);
     expect(sql).toMatch(/money_digits BETWEEN 0 AND 18/);
-    expect(sql).toMatch(/money_digits_source IN \('cash_flow', 'account', 'unavailable'\)/);
+    expect(sql).toMatch(/money_digits_source IN \('cash_flow', 'unavailable'\)/);
+    expect(sql).not.toMatch(/money_digits_source IN \([^)]*'account'/);
     expect(sql).toMatch(/operation_type BETWEEN 0 AND 2147483647/);
   });
 

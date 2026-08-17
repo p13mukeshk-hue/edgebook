@@ -239,9 +239,14 @@ export function projectPosition(input: {
       realizedPnlComplete = false;
       continue;
     }
-    const digits = close.moneyDigits ?? deal.moneyDigits ?? input.accountMoneyDigits;
+    // ProtoOAClosePositionDetail owns the exponent for every monetary field in
+    // that message. ProtoOADeal.moneyDigits scales only the deal commission,
+    // while ProtoOATrader.moneyDigits scales only trader-level money. Mixing
+    // either exponent into close money can silently move P&L by 10x/100x.
+    const digits = close.moneyDigits;
     if (digits === null) {
-      throw new CTraderProjectionError("MONEY_DIGITS_MISSING", `Closing deal ${deal.dealId} has no authoritative moneyDigits`);
+      realizedPnlComplete = false;
+      continue;
     }
     gross.push({ units: close.grossProfit, digits });
     swaps.push({ units: close.swap, digits });

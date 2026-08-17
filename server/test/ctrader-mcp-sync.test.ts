@@ -1352,6 +1352,16 @@ describe("CTraderMcpSyncEngine", () => {
     expect(tradeInsert?.values[13]).toBe("23.4");
     expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
       pnlMethod: "provider_close_detail_money_digits",
+      pnlAuthority: "provider",
+      pnlComponentsCoverage: {
+        source: "ProtoOAClosePositionDetail",
+        tradeLevelExact: true,
+        grossProfit: true,
+        brokerCommission: true,
+        swap: true,
+        pnlConversionFee: true,
+        otherAccountCashFlowsIncluded: false,
+      },
       grossProfit: "25",
       commission: "-0.5",
       swap: "-1",
@@ -1615,7 +1625,7 @@ describe("CTraderMcpSyncEngine", () => {
     const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
     const brokerData = JSON.parse(String(tradeInsert?.values[20]));
     expect(tradeInsert?.values[13]).toBeNull();
-    expect(brokerData).toMatchObject({ pnlMethod: "unavailable" });
+    expect(brokerData).toMatchObject({ pnlMethod: "unavailable", pnlAuthority: "provider_unavailable" });
     expect(brokerData).toMatchObject({
       calculatedGrossPnl: null,
       calculatedGrossCurrency: null,
@@ -1651,6 +1661,16 @@ describe("CTraderMcpSyncEngine", () => {
     const brokerData = JSON.parse(String(tradeInsert?.values[20]));
     expect(brokerData).toMatchObject({
       pnlMethod: "provider_explicit_net_cents",
+      pnlAuthority: "provider",
+      pnlComponentsCoverage: {
+        source: "RemoteMcpVettedExactNet",
+        tradeLevelExact: true,
+        grossProfit: false,
+        brokerCommission: false,
+        swap: false,
+        pnlConversionFee: false,
+        formula: "provider_exact_net",
+      },
       calculatedGrossPnl: "100",
       calculatedGrossProvenance: {
         providerExactNetPriority: true,
@@ -1823,6 +1843,7 @@ describe("CTraderMcpSyncEngine", () => {
     expect(tradeInsert?.values[13]).toBeNull();
     expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
       pnlMethod: "unavailable",
+      pnlAuthority: "provider_unavailable",
       grossProfit: null,
       commission: null,
       swap: null,

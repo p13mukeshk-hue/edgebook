@@ -6,6 +6,7 @@ import { withTransaction } from "../db/database.js";
 import type { EventBus } from "../events/event-bus.js";
 import { createOpaqueToken, hashToken } from "../auth/tokens.js";
 import { AppError, notFound } from "../lib/errors.js";
+import { decodeCursor, encodeCursor } from "../lib/pagination.js";
 import { resolveOwnedAccountMapping } from "../modules/accounts/sync.js";
 import type { AuthContext } from "../types.js";
 import type { CTraderGateway } from "./client.js";
@@ -49,6 +50,7 @@ type ConnectionRow = QueryResultRow & {
   account_label: string | null;
   mapped_account_id: string | null;
   legacy_mapped_account_id: string | null;
+  sync_cursor: unknown;
   provider_metadata: unknown;
   connected_at: Date | string | null;
   last_sync_at: Date | string | null;
@@ -93,6 +95,24 @@ export type CTraderPublicConnection = {
   brokerTitleShort: string | null;
   traderLogin: string | null;
   accountCurrency: string | null;
+  accountBalance: string | null;
+  accountBalanceRawUnits: string | null;
+  accountBalanceMoneyDigits: number | null;
+  accountBalanceVersion: string | null;
+  accountBalanceAsOf: string | null;
+  accountBalanceSource: "ProtoOATrader" | null;
+  accountBalanceScalingStatus: "exact" | "money_digits_unavailable" | "not_synced";
+  accountCashFlowHistoryComplete: boolean;
+  accountCashFlowHistoryStartTimestamp: number | null;
+  accountCashFlowSyncedThroughTimestamp: number | null;
+  accountCashFlowMonetaryScaleComplete: boolean;
+  accountCashFlowTotalRows: number;
+  accountCashFlowScaledRows: number;
+  accountCashFlowUnscaledRows: number;
+  accountCashFlowPendingScaleRetries: number;
+  tradeHistoryComplete: boolean;
+  tradeHistoryStartTimestamp: number | null;
+  tradeHistorySyncedThroughTimestamp: number | null;
   connectedAt: string | null;
   lastSyncAt: string | null;
   disconnectedAt: string | null;
@@ -126,9 +146,11 @@ export type CTraderPublicAccountCashFlow = {
   rawEquityUnits: string | null;
   currency: string;
   moneyDigits: number | null;
-  moneyDigitsSource: "cash_flow" | "account" | "unavailable";
+  moneyDigitsSource: "cash_flow" | "unavailable";
   balanceVersion: string | null;
   occurredAt: string;
+  category: "funding" | "trading_related_adjustment" | "non_trading_economics" | "bonus_or_protection" | "unknown";
+  includedInTradePnl: false;
   positionAttribution: "not_available_from_ctrader";
   scalingStatus: "exact" | "money_digits_unavailable";
 };
@@ -242,10 +264,27 @@ export interface CTraderBrokerService {
   }): Promise<CTraderPublicConnection>;
   connectionStatus(userId: string, connectionId: string): Promise<{
     connection: CTraderPublicConnection;
+    accountCashFlowHistoryComplete: boolean;
+    accountCashFlowHistoryStartTimestamp: number | null;
+    accountCashFlowSyncedThroughTimestamp: number | null;
+    accountCashFlowMonetaryScaleComplete: boolean;
+    accountCashFlowTotalRows: number;
+    accountCashFlowScaledRows: number;
+    accountCashFlowUnscaledRows: number;
+    accountCashFlowPendingScaleRetries: number;
+    tradeHistoryComplete: boolean;
+    tradeHistoryStartTimestamp: number | null;
+    tradeHistorySyncedThroughTimestamp: number | null;
     latestSyncRun: CTraderPublicSyncRun | null;
     historicalImport: CTraderHistoricalImport | null;
     accountCashFlows: CTraderPublicAccountCashFlow[];
   }>;
+  listAccountCashFlows(input: {
+    userId: string;
+    connectionId: string;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ accountCashFlows: CTraderPublicAccountCashFlow[]; nextCursor: string | null }>;
   queueManualSync(userId: string, connectionId: string): Promise<{ syncRunId: string; status: "queued" }>;
   startHistoricalImport(input: {
     auth: AuthContext;
@@ -512,12 +551,132 @@ function firstTimestamp(objects: readonly Record<string, unknown>[], keys: reado
   return null;
 }
 
+function strictProviderHistoryTimestamp(value: unknown): number | null {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    && value <= 2_147_483_646_000
+    ? value
+    : null;
+}
+
+function strictProviderCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+type PublicTradeHistoryCoverage = {
+  tradeHistoryComplete: boolean;
+  tradeHistoryStartTimestamp: number | null;
+  tradeHistorySyncedThroughTimestamp: number | null;
+};
+
+function incompleteTradeHistoryCoverage(): PublicTradeHistoryCoverage {
+  return {
+    tradeHistoryComplete: false,
+    tradeHistoryStartTimestamp: null,
+    tradeHistorySyncedThroughTimestamp: null,
+  };
+}
+
+/**
+ * Public completeness is deliberately stronger than "the requested window was
+ * exhausted".  It requires a registration-floor cursor written by a successful
+ * sync and agreement with the server-owned connection metadata. Bounded MCP
+ * floors remain useful for ingestion but can never claim complete history.
+ */
+function tradeHistoryCoverage(row: ConnectionRow): PublicTradeHistoryCoverage {
+  const cursor = objectValue(row.sync_cursor);
+  const metadata = objectValue(row.provider_metadata);
+  if (cursor.version !== 1 || cursor.fullHistoryComplete !== true) {
+    return incompleteTradeHistoryCoverage();
+  }
+  const lastSuccessfulSyncAt = row.last_sync_at === null ? Number.NaN : new Date(row.last_sync_at).getTime();
+  if (!Number.isFinite(lastSuccessfulSyncAt)) return incompleteTradeHistoryCoverage();
+
+  let start: number | null = null;
+  const through = strictProviderHistoryTimestamp(cursor.syncedThroughTimestamp);
+  if (row.connection_mode === "official") {
+    const cursorRegistration = strictProviderHistoryTimestamp(cursor.registrationTimestamp);
+    const metadataRegistration = strictProviderHistoryTimestamp(metadata.registrationTimestamp);
+    if (cursorRegistration === null || metadataRegistration !== cursorRegistration) {
+      return incompleteTradeHistoryCoverage();
+    }
+    start = cursorRegistration;
+  } else {
+    // A connection-time floor (including a user-attested empty boundary) is a
+    // bounded view, not proof that earlier broker trades do not exist.
+    if (metadata.historyReadValidated !== true
+      || metadata.historyFloorKind !== "registration"
+      || cursor.historyFloorKind !== "registration"
+      || cursor.historyWindowComplete !== true) {
+      return incompleteTradeHistoryCoverage();
+    }
+    const metadataRegistration = strictProviderHistoryTimestamp(metadata.registrationTimestamp);
+    const metadataFloor = strictProviderHistoryTimestamp(metadata.historyFloorTimestamp);
+    const cursorStart = strictProviderHistoryTimestamp(cursor.historyStartTimestamp);
+    if (metadataRegistration === null
+      || metadataFloor !== metadataRegistration
+      || cursorStart !== metadataRegistration) {
+      return incompleteTradeHistoryCoverage();
+    }
+    start = metadataRegistration;
+  }
+
+  if (start === null || through === null || start > through || through > lastSuccessfulSyncAt) {
+    return incompleteTradeHistoryCoverage();
+  }
+  return {
+    tradeHistoryComplete: true,
+    tradeHistoryStartTimestamp: start,
+    tradeHistorySyncedThroughTimestamp: through,
+  };
+}
+
 function mapConnection(row: ConnectionRow): CTraderPublicConnection {
   const metadata = objectValue(row.provider_metadata);
   const errorMessage = row.latest_sync_error_message ?? stringOrNull(metadata.lastErrorMessage);
   const errorCode = row.latest_sync_error_code ?? stringOrNull(metadata.lastErrorCode);
   const warningMessage = stringOrNull(metadata.lastWarningMessage);
   const warningCode = stringOrNull(metadata.lastWarningCode);
+  const balanceMoneyDigits = typeof metadata.accountBalanceMoneyDigits === "number"
+    && Number.isInteger(metadata.accountBalanceMoneyDigits)
+    && metadata.accountBalanceMoneyDigits >= 0
+    && metadata.accountBalanceMoneyDigits <= 18
+    ? metadata.accountBalanceMoneyDigits
+    : null;
+  const balanceSource = metadata.accountBalanceSource === "ProtoOATrader" ? "ProtoOATrader" : null;
+  const balanceScalingStatus = balanceSource === null
+    ? "not_synced"
+    : metadata.accountBalanceScalingStatus === "exact"
+      ? "exact"
+      : "money_digits_unavailable";
+  const cashFlowHistoryStartTimestamp = strictProviderHistoryTimestamp(
+    metadata.accountCashFlowHistoryStartTimestamp,
+  );
+  const cashFlowSyncedThroughTimestamp = strictProviderHistoryTimestamp(
+    metadata.accountCashFlowSyncedThroughTimestamp,
+  );
+  const cashFlowHistoryComplete = metadata.accountCashFlowHistoryComplete === true
+    && cashFlowHistoryStartTimestamp !== null
+    && cashFlowSyncedThroughTimestamp !== null
+    && cashFlowHistoryStartTimestamp <= cashFlowSyncedThroughTimestamp;
+  const cashFlowTotalRowsValue = strictProviderCount(metadata.accountCashFlowTotalRows);
+  const cashFlowScaledRowsValue = strictProviderCount(metadata.accountCashFlowScaledRows);
+  const cashFlowUnscaledRowsValue = strictProviderCount(metadata.accountCashFlowUnscaledRows);
+  const cashFlowPendingScaleRetriesValue = strictProviderCount(metadata.accountCashFlowPendingScaleRetries);
+  const cashFlowMonetaryScaleComplete = metadata.accountCashFlowMonetaryScaleComplete === true
+    && cashFlowTotalRowsValue !== null
+    && cashFlowScaledRowsValue !== null
+    && cashFlowUnscaledRowsValue !== null
+    && cashFlowPendingScaleRetriesValue !== null
+    && cashFlowScaledRowsValue + cashFlowUnscaledRowsValue === cashFlowTotalRowsValue
+    && cashFlowUnscaledRowsValue === 0
+    && cashFlowPendingScaleRetriesValue === 0;
+  const cashFlowTotalRows = cashFlowTotalRowsValue ?? 0;
+  const cashFlowScaledRows = cashFlowScaledRowsValue ?? 0;
+  const cashFlowUnscaledRows = cashFlowUnscaledRowsValue ?? 0;
+  const cashFlowPendingScaleRetries = cashFlowPendingScaleRetriesValue ?? 0;
+  const tradeHistory = tradeHistoryCoverage(row);
   return {
     id: row.id,
     connected: row.connected,
@@ -530,6 +689,22 @@ function mapConnection(row: ConnectionRow): CTraderPublicConnection {
     brokerTitleShort: stringOrNull(metadata.brokerTitleShort),
     traderLogin: stringOrNull(metadata.traderLogin),
     accountCurrency: stringOrNull(metadata.accountCurrency),
+    accountBalance: stringOrNull(metadata.accountBalance),
+    accountBalanceRawUnits: stringOrNull(metadata.accountBalanceRawUnits),
+    accountBalanceMoneyDigits: balanceMoneyDigits,
+    accountBalanceVersion: stringOrNull(metadata.accountBalanceVersion),
+    accountBalanceAsOf: stringOrNull(metadata.accountBalanceAsOf),
+    accountBalanceSource: balanceSource,
+    accountBalanceScalingStatus: balanceScalingStatus,
+    accountCashFlowHistoryComplete: cashFlowHistoryComplete,
+    accountCashFlowHistoryStartTimestamp: cashFlowHistoryComplete ? cashFlowHistoryStartTimestamp : null,
+    accountCashFlowSyncedThroughTimestamp: cashFlowHistoryComplete ? cashFlowSyncedThroughTimestamp : null,
+    accountCashFlowMonetaryScaleComplete: cashFlowMonetaryScaleComplete,
+    accountCashFlowTotalRows: cashFlowTotalRows,
+    accountCashFlowScaledRows: cashFlowScaledRows,
+    accountCashFlowUnscaledRows: cashFlowUnscaledRows,
+    accountCashFlowPendingScaleRetries: cashFlowPendingScaleRetries,
+    ...tradeHistory,
     connectedAt: iso(row.connected_at),
     lastSyncAt: iso(row.last_sync_at),
     disconnectedAt: iso(row.disconnected_at),
@@ -564,24 +739,40 @@ function canonicalDatabaseDecimal(value: string | null): string | null {
   return /^0(?:\.0*)?$/.test(unsigned) ? "0" : `${match[1]}${unsigned}`;
 }
 
+export function accountCashFlowCategory(
+  operationType: number | null,
+): CTraderPublicAccountCashFlow["category"] {
+  if (operationType === null) return "unknown";
+  if ([0, 1, 30, 31, 32, 33, 36, 37].includes(operationType)) return "funding";
+  if ([15, 16, 17, 18, 21, 22, 34, 35].includes(operationType)) return "trading_related_adjustment";
+  if ((operationType >= 3 && operationType <= 14) || (operationType >= 27 && operationType <= 29)) {
+    return "non_trading_economics";
+  }
+  if ([19, 20, 38, 39].includes(operationType)) return "bonus_or_protection";
+  return "unknown";
+}
+
 function mapAccountCashFlow(row: AccountCashFlowRow): CTraderPublicAccountCashFlow {
+  const exactRowScale = row.money_digits_source === "cash_flow" && row.money_digits !== null;
   return {
     balanceHistoryId: row.external_cash_flow_id,
     operationType: row.operation_type,
     operationName: row.operation_name,
-    amount: canonicalDatabaseDecimal(row.amount),
-    balance: canonicalDatabaseDecimal(row.balance),
-    equity: canonicalDatabaseDecimal(row.equity),
+    amount: exactRowScale ? canonicalDatabaseDecimal(row.amount) : null,
+    balance: exactRowScale ? canonicalDatabaseDecimal(row.balance) : null,
+    equity: exactRowScale ? canonicalDatabaseDecimal(row.equity) : null,
     rawAmountUnits: row.raw_delta,
     rawBalanceUnits: row.raw_balance,
     rawEquityUnits: row.raw_equity,
     currency: row.currency_code,
-    moneyDigits: row.money_digits,
-    moneyDigitsSource: row.money_digits_source,
+    moneyDigits: exactRowScale ? row.money_digits : null,
+    moneyDigitsSource: exactRowScale ? "cash_flow" : "unavailable",
     balanceVersion: row.balance_version,
     occurredAt: new Date(row.occurred_at).toISOString(),
+    category: accountCashFlowCategory(row.operation_type),
+    includedInTradePnl: false,
     positionAttribution: "not_available_from_ctrader",
-    scalingStatus: row.money_digits === null ? "money_digits_unavailable" : "exact",
+    scalingStatus: exactRowScale ? "exact" : "money_digits_unavailable",
   };
 }
 
@@ -815,8 +1006,24 @@ function reviewedProjection(value: unknown): ReviewedProjection | null {
   };
 }
 
-function reviewedProjectionBrokerData(projection: ReviewedProjection): Record<string, unknown> {
-  return { ...projection.brokerData, providerTradeDate: projection.tradeDate };
+function reviewedProjectionBrokerData(
+  projection: ReviewedProjection,
+  linkedManualRow?: unknown,
+): Record<string, unknown> {
+  const manualPnl = objectValue(linkedManualRow).pnl;
+  const preservesManualPnl = projection.pnl === null
+    && manualPnl !== null
+    && manualPnl !== undefined
+    && manualPnl !== ""
+    && Number.isFinite(Number(manualPnl));
+  return {
+    ...projection.brokerData,
+    providerTradeDate: projection.tradeDate,
+    ...(preservesManualPnl ? {
+      pnlAuthority: "preserved_reconciled_manual",
+      reconciledManualPnlPreserved: true,
+    } : {}),
+  };
 }
 
 const historicalImportSelect = `
@@ -912,10 +1119,29 @@ const liveReconciliationCandidateSelect = `
 
 function liveAllowedActions(row: LiveReconciliationCandidateRow): CTraderLiveReconciliationAction[] {
   if (row.status !== "pending") return [];
-  if (row.classification === "high_confidence") return ["link_manual", "publish_separate", "reject"];
-  if (row.classification === "ambiguous") return ["link_manual", "publish_separate", "reject"];
-  if (row.classification === "deleted_manual") return ["suppress_deleted", "reject"];
-  return ["link_manual", "reject"];
+  // A repair candidate deliberately remains pending even when it falls beyond
+  // the bounded exact-money refetch batch. Do not let publish/link/suppress
+  // consume that durable completeness gate before cTrader supplies the
+  // message-local close moneyDigits and staging replaces this projection.
+  if (objectValue(row.candidate_data).exactMoneyRepairPending === true) return [];
+  // A broker-absent candidate may age beyond either sync mode's overlap and
+  // never be fetched again. It therefore cannot use the legacy "dismiss and
+  // let the next sync publish" action: that would make the position disappear
+  // nondeterministically. The user can link it, publish it separately,
+  // suppress an intentional deletion, or simply leave the review pending.
+  const canDeferRejectedPublish = row.broker_trade_id !== null;
+  const withOptionalReject = (actions: CTraderLiveReconciliationAction[]) =>
+    canDeferRejectedPublish ? [...actions, "reject" as const] : actions;
+  if (row.classification === "high_confidence") return withOptionalReject(["link_manual", "publish_separate"]);
+  if (row.classification === "ambiguous") return withOptionalReject(["link_manual", "publish_separate"]);
+  if (row.classification === "deleted_manual") {
+    const actions: CTraderLiveReconciliationAction[] = ["suppress_deleted"];
+    if (row.broker_trade_id === null) {
+      actions.push("publish_separate");
+    }
+    return withOptionalReject(actions);
+  }
+  return withOptionalReject(["link_manual"]);
 }
 
 function mapLiveReconciliationCandidate(row: LiveReconciliationCandidateRow): CTraderLiveReconciliationCandidate {
@@ -1036,7 +1262,7 @@ async function resolveConnectionIdentity(
 const connectionSelect = `
   SELECT c.id, c.connected, c.connection_mode, c.external_account_id, c.provider_environment,
          c.account_label, c.mapped_account_id, c.legacy_mapped_account_id,
-         c.provider_metadata, c.connected_at, c.last_sync_at,
+         c.sync_cursor, c.provider_metadata, c.connected_at, c.last_sync_at,
          c.disconnected_at, c.disconnect_reason, c.token_expires_at,
          latest.id AS latest_sync_id, latest.status AS latest_sync_status,
          latest.counters AS latest_sync_counters,
@@ -1640,6 +1866,17 @@ export class PostgresCTraderService implements CTraderBrokerService {
 
   async connectionStatus(userId: string, connectionId: string): Promise<{
     connection: CTraderPublicConnection;
+    accountCashFlowHistoryComplete: boolean;
+    accountCashFlowHistoryStartTimestamp: number | null;
+    accountCashFlowSyncedThroughTimestamp: number | null;
+    accountCashFlowMonetaryScaleComplete: boolean;
+    accountCashFlowTotalRows: number;
+    accountCashFlowScaledRows: number;
+    accountCashFlowUnscaledRows: number;
+    accountCashFlowPendingScaleRetries: number;
+    tradeHistoryComplete: boolean;
+    tradeHistoryStartTimestamp: number | null;
+    tradeHistorySyncedThroughTimestamp: number | null;
     latestSyncRun: CTraderPublicSyncRun | null;
     historicalImport: CTraderHistoricalImport | null;
     accountCashFlows: CTraderPublicAccountCashFlow[];
@@ -1664,11 +1901,59 @@ export class PostgresCTraderService implements CTraderBrokerService {
         [userId, connectionId],
       ),
     ]);
+    const connection = mapConnection(row);
     return {
-      connection: mapConnection(row),
+      connection,
+      accountCashFlowHistoryComplete: connection.accountCashFlowHistoryComplete,
+      accountCashFlowHistoryStartTimestamp: connection.accountCashFlowHistoryStartTimestamp,
+      accountCashFlowSyncedThroughTimestamp: connection.accountCashFlowSyncedThroughTimestamp,
+      accountCashFlowMonetaryScaleComplete: connection.accountCashFlowMonetaryScaleComplete,
+      accountCashFlowTotalRows: connection.accountCashFlowTotalRows,
+      accountCashFlowScaledRows: connection.accountCashFlowScaledRows,
+      accountCashFlowUnscaledRows: connection.accountCashFlowUnscaledRows,
+      accountCashFlowPendingScaleRetries: connection.accountCashFlowPendingScaleRetries,
+      tradeHistoryComplete: connection.tradeHistoryComplete,
+      tradeHistoryStartTimestamp: connection.tradeHistoryStartTimestamp,
+      tradeHistorySyncedThroughTimestamp: connection.tradeHistorySyncedThroughTimestamp,
       latestSyncRun: mapLatestSync(row),
       historicalImport: historical.rows[0] ? mapHistoricalImport(historical.rows[0]) : null,
       accountCashFlows: accountCashFlows.rows.map(mapAccountCashFlow),
+    };
+  }
+
+  async listAccountCashFlows(input: {
+    userId: string;
+    connectionId: string;
+    limit: number;
+    cursor?: string;
+  }): Promise<{ accountCashFlows: CTraderPublicAccountCashFlow[]; nextCursor: string | null }> {
+    await this.findConnectionRow(input.userId, input.connectionId);
+    const cursor = decodeCursor(input.cursor);
+    if (cursor !== null && !/^(?:0|[1-9]\d{0,99})$/.test(cursor.id)) {
+      throw new AppError(400, "INVALID_CURSOR", "The pagination cursor is invalid");
+    }
+    const result = await this.database.query<AccountCashFlowRow>(
+      `SELECT external_cash_flow_id, operation_type, operation_name,
+              amount::text, balance::text, equity::text,
+              raw_delta::text, raw_balance::text, raw_equity::text, currency_code,
+              money_digits, money_digits_source, balance_version::text, occurred_at
+       FROM ctrader_account_cash_flows
+       WHERE user_id=$1 AND broker_connection_id=$2
+         ${cursor === null ? "" : "AND (occurred_at, external_cash_flow_id) < ($3::timestamptz, $4::text)"}
+       ORDER BY occurred_at DESC, external_cash_flow_id DESC
+       LIMIT $${cursor === null ? 3 : 5}`,
+      cursor === null
+        ? [input.userId, input.connectionId, input.limit + 1]
+        : [input.userId, input.connectionId, cursor.at, cursor.id, input.limit + 1],
+    );
+    const hasMore = result.rows.length > input.limit;
+    const rows = hasMore ? result.rows.slice(0, input.limit) : result.rows;
+    const last = rows.at(-1);
+    return {
+      accountCashFlows: rows.map(mapAccountCashFlow),
+      nextCursor: hasMore && last
+        ? encodeCursor({ at: new Date(last.occurred_at).toISOString(), id: last.external_cash_flow_id })
+        : null,
     };
   }
 
@@ -1933,8 +2218,10 @@ export class PostgresCTraderService implements CTraderBrokerService {
        WHERE candidate.user_id=$1 AND candidate.broker_connection_id=$2
           AND candidate.status='pending'
           AND connection.connected=true
-          AND connection.connection_mode='mcp_read'
-          AND connection.oauth_scope='mcp_read'
+          AND (
+            (connection.connection_mode='mcp_read' AND connection.oauth_scope='mcp_read')
+            OR (connection.connection_mode='official' AND connection.oauth_scope='accounts')
+          )
        ORDER BY candidate.created_at ASC, candidate.id ASC
        LIMIT 501`,
       [userId, connectionId],
@@ -1955,8 +2242,10 @@ export class PostgresCTraderService implements CTraderBrokerService {
        WHERE candidate.id=$1 AND candidate.user_id=$2
           AND candidate.broker_connection_id=$3
           AND connection.connected=true
-          AND connection.connection_mode='mcp_read'
-          AND connection.oauth_scope='mcp_read'`,
+          AND (
+            (connection.connection_mode='mcp_read' AND connection.oauth_scope='mcp_read')
+            OR (connection.connection_mode='official' AND connection.oauth_scope='accounts')
+          )`,
       [candidateId, userId, connectionId],
     );
     if (!rows.rows[0]) throw notFound("cTrader live reconciliation candidate");
@@ -2017,8 +2306,10 @@ export class PostgresCTraderService implements CTraderBrokerService {
           WHERE candidate.id=$1 AND candidate.user_id=$2
             AND candidate.broker_connection_id=$3
             AND connection.connected=true
-            AND connection.connection_mode='mcp_read'
-            AND connection.oauth_scope='mcp_read'
+            AND (
+              (connection.connection_mode='mcp_read' AND connection.oauth_scope='mcp_read')
+              OR (connection.connection_mode='official' AND connection.oauth_scope='accounts')
+            )
          FOR UPDATE OF candidate, connection`,
         [input.candidateId, input.auth.user.id, input.connectionId],
       );
@@ -2029,6 +2320,13 @@ export class PostgresCTraderService implements CTraderBrokerService {
       }
       if (candidate.row_version !== input.expectedVersion) {
         throw new AppError(409, "VERSION_CONFLICT", "The reconciliation candidate changed; reload before deciding");
+      }
+      if (objectValue(candidate.candidate_data).exactMoneyRepairPending === true) {
+        throw new AppError(
+          409,
+          "CTRADER_EXACT_MONEY_REPAIR_PENDING",
+          "This broker position is waiting for authoritative cTrader money; sync again before resolving it",
+        );
       }
       if (!liveAllowedActions(candidate).includes(input.action)) {
         throw new AppError(409, "RECONCILIATION_ACTION_INVALID", "This action is not safe for this candidate");
@@ -2178,7 +2476,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
             projection.exitPrice, projection.quantity, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
-            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), selectedManualId,
+            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection, manual.row)), selectedManualId,
             input.auth.user.id, expectedManualVersion,
           ],
         );
@@ -2529,7 +2827,7 @@ export class PostgresCTraderService implements CTraderBrokerService {
             projection.symbol, projection.asset, projection.direction, projection.entryPrice,
             projection.exitPrice, projection.quantity, projection.pnl, projection.isOpen,
             projection.tradeDate, projection.entryAt, projection.exitAt, projection.entryTime,
-            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection)), candidate.manual_trade_id,
+            projection.exitTime, JSON.stringify(reviewedProjectionBrokerData(projection, manual.rows[0].row)), candidate.manual_trade_id,
             input.auth.user.id, candidate.manual_row_version,
           ],
         );

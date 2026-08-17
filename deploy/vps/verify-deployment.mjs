@@ -83,6 +83,15 @@ requireText(migrationTools, /\/srv\/edgebook-migration\/output:\/migration-outpu
 requireText(migrationTools, /\/srv\/edgebook-data\/uploads:\/srv\/edgebook-data\/uploads(?:\s|$)/m, 'migration upload scope is explicit');
 rejectText(migrationTools, /GOOGLE_CLIENT_ID|SESSION_PEPPER|CTRADER_|POSTGRES_SUPERUSER_PASSWORD|EDGEBOOK_DB_OWNER_PASSWORD|ports:/, 'migration tools receive unrelated secrets or host ports');
 requireText(read('deploy/vps/Dockerfile.migration'), /USER 12001:12001[\s\S]*ENTRYPOINT \["node"\]/, 'non-root migration tool entrypoint');
+const moneyDigitsMigration = read('server/migrations/009_ctrader_message_local_money_digits.sql');
+requireText(moneyDigitsMigration, /SET LOCAL lock_timeout\s*=\s*'30s';/, '009 moneyDigits migration has bounded lock timeout');
+requireText(moneyDigitsMigration, /SET LOCAL statement_timeout\s*=\s*'15min';/, '009 moneyDigits migration has bounded statement timeout');
+const requiredMigrationSource = read('server/src/modules/system/routes.ts');
+const migration008Index = requiredMigrationSource.indexOf('008_ctrader_account_cash_flows.sql');
+const migration009Index = requiredMigrationSource.indexOf('009_ctrader_message_local_money_digits.sql');
+const migration900Index = requiredMigrationSource.indexOf('900_legacy_firebase_archive.sql');
+if (migration008Index < 0 || migration009Index <= migration008Index || migration900Index <= migration009Index) failures.push('Required migration readiness order must apply 009 after 008 and before legacy archive migration');
+requireText(read('server/src/db/migrate.ts'), /readdir\(migrationsDirectory\)[\s\S]*\.sort\(\(left, right\) => left\.localeCompare\(right\)\)/, 'migration runner applies numbered SQL files in deterministic order');
 
 const cleanup = serviceBlock(compose, 'cleanup', null);
 requireText(cleanup, /profiles:\s*\[["']jobs["']\]/, 'cleanup profile gate');
@@ -125,12 +134,13 @@ requireText(nginx, /worker-src[^;]*'self'[^;]*blob:[^;]*https:\/\/cdn\.jsdelivr\
 rejectText(nginx, /cloudfunctions\.net|firebaseio\.com|firebasestorage|www\.gstatic\.com\/firebasejs/, 'Firebase/Cloud Functions origin in production proxy policy');
 
 const build = read('deploy/vps/scripts/build-public.sh');
-for (const publicFile of ['client/api-client.js', 'client/auth-adapter.js', 'client/data-adapter.js', 'client/on-device-dictation.js', 'client/on-device-whisper-worker.js']) {
+for (const publicFile of ['client/api-client.js', 'client/auth-adapter.js', 'client/data-adapter.js', 'client/on-device-dictation.js', 'client/on-device-whisper-worker.js', 'client/xlsx-export.js']) {
   requireText(build, new RegExp(publicFile.replace(/[./]/g, '\\$&')), `allowlisted public file ${publicFile}`);
 }
 requireText(build, /worker_hash="\$\(sha256sum "\$destination\/client\/on-device-whisper-worker\.js"\)"[\s\S]*controller_hash="\$\(sha256sum "\$destination\/client\/on-device-dictation\.js"\)"/, 'worker then controller content-derived cache versions');
 requireText(build, /sed -i [^\n]*on-device-whisper-worker\.js\?v=\$worker_hash[^\n]*on-device-dictation\.js/, 'controller receives immutable worker URL');
 requireText(build, /sed -i [^\n]*on-device-dictation\.js\?v=\$controller_hash[^\n]*app\.html/, 'app receives immutable dictation controller URL');
+requireText(build, /xlsx_hash="\$\(sha256sum "\$destination\/client\/xlsx-export\.js"\)"[\s\S]*sed -i [^\n]*xlsx-export\.js\?v=\$xlsx_hash[^\n]*app\.html/, 'app receives immutable XLSX writer URL');
 requireText(build, /--mode rehearsal\|cutover/, 'separate rehearsal/cutover artifacts');
 requireText(build, /firebaseDependency["']?:false/, 'VPS-only artifact marker');
 requireText(build, /sha256sum "\$destination\/client\/\$asset\.js"/, 'content-derived client adapter cache version');

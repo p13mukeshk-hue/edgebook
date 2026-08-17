@@ -413,6 +413,18 @@ export function createVpsDataAdapter(api) {
           label: label?.trim() || null,
         }),
       status: id => api.get(`/ctrader/connections/${encodeURIComponent(id)}/status`),
+      async accountCashFlows(id, { limit = 500, cursor = null } = {}) {
+        const safeLimit = Number.isInteger(limit) ? Math.max(1, Math.min(500, limit)) : 500;
+        const query = new URLSearchParams({ limit: String(safeLimit) });
+        if (cursor) query.set('cursor', String(cursor));
+        const payload = await api.get(`/ctrader/connections/${encodeURIComponent(id)}/cash-flows?${query}`);
+        if (!payload || !Array.isArray(payload.accountCashFlows) || (payload.nextCursor !== null && typeof payload.nextCursor !== 'string')) {
+          const error = new Error('cTrader returned an invalid account cash-flow page');
+          error.code = 'CTRADER_CASH_FLOW_PAGE_INVALID';
+          throw error;
+        }
+        return { accountCashFlows: payload.accountCashFlows, nextCursor: payload.nextCursor };
+      },
       sync: id => api.post(`/ctrader/connections/${encodeURIComponent(id)}/sync`, {}),
       disconnect: id => api.post(`/ctrader/connections/${encodeURIComponent(id)}/disconnect`, {}),
       async listLiveReconciliation(id) {

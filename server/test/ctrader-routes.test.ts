@@ -47,6 +47,10 @@ function mockService() {
     listConnections: vi.fn(async () => []),
     createConnection: vi.fn(),
     connectionStatus: vi.fn(),
+    listAccountCashFlows: vi.fn(async () => ({
+      accountCashFlows: [{ balanceHistoryId: "88", amount: "-12.5" }],
+      nextCursor: null,
+    })),
     queueManualSync: vi.fn(),
     startHistoricalImport: vi.fn(async () => ({
       id: "00000000-0000-4000-8000-000000000070",
@@ -157,6 +161,27 @@ describe("cTrader HTTP contract", () => {
     const response = await app.inject({ method: "GET", url: "/api/config" });
     expect(response.json().ctraderEnabled).toBe(true);
     expect(response.json()).toMatchObject({ ctraderOAuthEnabled: true, ctraderMcpEnabled: true });
+    await app.close();
+  });
+
+  it("returns a bounded tenant-scoped account cash-flow page", async () => {
+    const service = mockService();
+    const app = await buildApp(config(), dependencies(service));
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/ctrader/connections/00000000-0000-4000-8000-000000000090/cash-flows?limit=500",
+      headers: { cookie: "edgebook_session=session-token" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      accountCashFlows: [{ balanceHistoryId: "88", amount: "-12.5" }],
+      nextCursor: null,
+    });
+    expect(service.listAccountCashFlows).toHaveBeenCalledWith({
+      userId: "00000000-0000-4000-8000-000000000002",
+      connectionId: "00000000-0000-4000-8000-000000000090",
+      limit: 500,
+    });
     await app.close();
   });
 

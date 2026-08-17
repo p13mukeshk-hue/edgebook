@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient, QueryResultRow } from "pg";
 import type { AppConfig } from "../config.js";
 import type { Database } from "../db/database.js";
@@ -71,9 +71,32 @@ type SyncConnectionRow = QueryResultRow & {
   legacy_mapped_account_id: string | null;
 };
 
+type OfficialProjectionContext = {
+  connection: SyncConnectionRow;
+  trader: CTraderTraderMetadata;
+  assets: CTraderAsset[];
+};
+
 type StoredExecutionRow = QueryResultRow & {
   external_position_id: string;
   raw_payload: unknown;
+};
+
+type MissingCloseMoneyExecutionRow = QueryResultRow & {
+  external_execution_id: string;
+  external_position_id: string;
+  executed_at: Date | string;
+};
+
+type MissingCashFlowMoneyRow = QueryResultRow & {
+  external_cash_flow_id: string;
+  occurred_at: Date | string;
+};
+
+type CashFlowScaleCoverageRow = QueryResultRow & {
+  total_rows: string | number;
+  scaled_rows: string | number;
+  unscaled_rows: string | number;
 };
 
 type ExistingTradeRow = QueryResultRow & {
@@ -83,6 +106,60 @@ type ExistingTradeRow = QueryResultRow & {
   broker_data: unknown;
   reconciled_manual_trade: boolean;
 };
+
+type OfficialLiveManualTradeRow = QueryResultRow & {
+  id: string;
+  row_version: number;
+  deleted_at: Date | string | null;
+  symbol: string;
+  direction: "Long" | "Short";
+  entry_price: string;
+  exit_price: string | null;
+  quantity: string;
+  pnl: string | null;
+  trade_date: Date | string;
+  entry_at: Date | string | null;
+  exit_at: Date | string | null;
+  strategy: string | null;
+  emotion: string | null;
+  notes: string | null;
+  psychology: unknown;
+  custom_fields: unknown;
+  screenshot_count: number | string;
+};
+
+function reconciliationSymbol(value: string): string {
+  const normalized = value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  // Narrow legacy journal alias shared with the MCP reconciler.  It is used
+  // only for duplicate identity comparison; the provider symbol stays XAUUSD.
+  return normalized === "GOLD" ? "XAUUSD" : normalized;
+}
+
+function reconciliationDate(value: Date | string): string {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+}
+
+function decimalWithin(
+  left: string | null,
+  right: string | null,
+  relativeTolerance: number,
+  absoluteTolerance: number,
+): boolean {
+  if (left === null || right === null) return left === right;
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  if (!Number.isFinite(leftNumber) || !Number.isFinite(rightNumber)) return false;
+  const difference = Math.abs(leftNumber - rightNumber);
+  return difference <= absoluteTolerance
+    || difference / Math.max(Math.abs(leftNumber), Math.abs(rightNumber), 1e-12) <= relativeTolerance;
+}
+
+function dateDistanceDays(left: Date | string, right: string): number | null {
+  const leftAt = Date.parse(`${reconciliationDate(left)}T00:00:00.000Z`);
+  const rightAt = Date.parse(`${right}T00:00:00.000Z`);
+  if (!Number.isFinite(leftAt) || !Number.isFinite(rightAt)) return null;
+  return Math.abs(leftAt - rightAt) / 86_400_000;
+}
 
 export type CTraderSyncCounters = {
   inserted: number;
@@ -100,6 +177,19 @@ export type CTraderSyncCounters = {
   fetchedAccountCashFlows?: number;
   insertedAccountCashFlows?: number;
   updatedAccountCashFlows?: number;
+  invalidatedAccountCashFlowFallbacks?: number;
+  totalAccountCashFlows?: number;
+  scaledAccountCashFlows?: number;
+  unscaledAccountCashFlows?: number;
+  attemptedCashFlowMoneyRetries?: number;
+  completedCashFlowMoneyRetries?: number;
+  pendingCashFlowMoneyRetries?: number;
+  deauthorizedUnsupportedExactExecutions?: number;
+  deauthorizedUnsupportedExactTrades?: number;
+  sanitizedUnsupportedExactCandidates?: number;
+  attemptedExactMoneyRetries?: number;
+  completedExactMoneyRetries?: number;
+  pendingExactMoneyRetries?: number;
 };
 
 export type CTraderSyncResult = {
@@ -246,6 +336,387 @@ function safeTimestamp(value: unknown): number | null {
   return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 2_147_483_646_000 ? parsed : null;
 }
 
+const EXACT_MONEY_RETRY_QUEUE_VERSION = 1;
+const EXACT_MONEY_RETRY_QUEUE_LIMIT = 500;
+const EXACT_MONEY_RETRIES_PER_SYNC = 3;
+const EXACT_MONEY_RETRY_ATTEMPT_LIMIT = 32;
+const EXACT_MONEY_RETRY_BASE_DELAY_MS = 5 * 60 * 1_000;
+const EXACT_MONEY_RETRY_MAX_DELAY_MS = 24 * 60 * 60 * 1_000;
+const EXACT_MONEY_RETRY_WINDOW_RADIUS_MS = 60 * 1_000;
+const EXACT_MONEY_RETRY_HISTORY_REQUEST_LIMIT = 16;
+const CASH_FLOW_MONEY_RETRY_QUEUE_VERSION = 1;
+const CASH_FLOW_MONEY_RETRY_QUEUE_LIMIT = 500;
+const CASH_FLOW_MONEY_RETRIES_PER_SYNC = 3;
+
+export type CTraderExactMoneyRetry = {
+  executionId: string;
+  positionId: string;
+  executionTimestamp: number;
+  attemptCount: number;
+  firstObservedAt: number;
+  lastAttemptAt: number | null;
+  nextAttemptAt: number;
+};
+
+export type CTraderCashFlowMoneyRetry = {
+  balanceHistoryId: string;
+  changeBalanceTimestamp: number;
+  attemptCount: number;
+  firstObservedAt: number;
+  lastAttemptAt: number | null;
+  nextAttemptAt: number;
+};
+
+function retryCursorError(detail: string): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_EXACT_MONEY_RETRY_CURSOR_INVALID",
+    `The cTrader exact-money retry cursor ${detail}`,
+    false,
+  );
+}
+
+function retryCursorId(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/.test(value)) {
+    throw retryCursorError(`has an invalid ${field}`);
+  }
+  try {
+    if (BigInt(value) > 9_223_372_036_854_775_807n) {
+      throw retryCursorError(`has an out-of-range ${field}`);
+    }
+  } catch (error) {
+    if (error instanceof CTraderSyncError) throw error;
+    throw retryCursorError(`has an invalid ${field}`);
+  }
+  return value;
+}
+
+/**
+ * Reads the durable retry queue without accepting partially valid state. A
+ * malformed cursor could otherwise widen arbitrary provider history windows or
+ * create an unbounded request loop, so queue version, size and every field are
+ * checked before the first retry request is made.
+ */
+export function parseExactMoneyRetryQueue(cursor: Record<string, unknown>): CTraderExactMoneyRetry[] {
+  const version = cursor.exactMoneyRetryQueueVersion;
+  const value = cursor.exactMoneyRetries;
+  if (version === undefined && value === undefined) return [];
+  if (version !== EXACT_MONEY_RETRY_QUEUE_VERSION || !Array.isArray(value)) {
+    throw retryCursorError("has an unsupported version or shape");
+  }
+  if (value.length > EXACT_MONEY_RETRY_QUEUE_LIMIT) {
+    throw retryCursorError(`exceeds the ${EXACT_MONEY_RETRY_QUEUE_LIMIT}-entry safety limit`);
+  }
+  const allowedKeys = new Set([
+    "executionId", "positionId", "executionTimestamp", "attemptCount",
+    "firstObservedAt", "lastAttemptAt", "nextAttemptAt",
+  ]);
+  const seen = new Set<string>();
+  const parsed = value.map((candidate, index): CTraderExactMoneyRetry => {
+    const entry = objectValue(candidate);
+    if (Object.keys(entry).length === 0 || Object.keys(entry).some((key) => !allowedKeys.has(key))) {
+      throw retryCursorError(`entry ${index} has an invalid shape`);
+    }
+    const executionId = retryCursorId(entry.executionId, `executionId in entry ${index}`);
+    const positionId = retryCursorId(entry.positionId, `positionId in entry ${index}`);
+    if (seen.has(executionId)) throw retryCursorError(`contains duplicate executionId ${executionId}`);
+    seen.add(executionId);
+    const executionTimestamp = safeTimestamp(entry.executionTimestamp);
+    const firstObservedAt = safeTimestamp(entry.firstObservedAt);
+    const lastAttemptAt = entry.lastAttemptAt === null ? null : safeTimestamp(entry.lastAttemptAt);
+    const nextAttemptAt = safeTimestamp(entry.nextAttemptAt);
+    const attemptCount = typeof entry.attemptCount === "number" ? entry.attemptCount : Number.NaN;
+    if (executionTimestamp === null || firstObservedAt === null || nextAttemptAt === null
+      || !Number.isSafeInteger(attemptCount) || attemptCount < 0
+      || attemptCount > EXACT_MONEY_RETRY_ATTEMPT_LIMIT
+      || (entry.lastAttemptAt !== null && lastAttemptAt === null)) {
+      throw retryCursorError(`entry ${index} has invalid bounds`);
+    }
+    if ((attemptCount === 0 && lastAttemptAt !== null)
+      || (attemptCount > 0 && lastAttemptAt === null)
+      || (lastAttemptAt !== null && lastAttemptAt < firstObservedAt)
+      || nextAttemptAt < (lastAttemptAt ?? firstObservedAt)) {
+      throw retryCursorError(`entry ${index} has an inconsistent retry chronology`);
+    }
+    return {
+      executionId,
+      positionId,
+      executionTimestamp,
+      attemptCount,
+      firstObservedAt,
+      lastAttemptAt,
+      nextAttemptAt,
+    };
+  });
+  return parsed.sort((left, right) => left.nextAttemptAt - right.nextAttemptAt
+    || left.executionTimestamp - right.executionTimestamp
+    || (BigInt(left.executionId) < BigInt(right.executionId) ? -1 : 1));
+}
+
+/** Selects a fixed number of due retries and never hits one position twice in a sync. */
+export function selectDueExactMoneyRetries(
+  queue: readonly CTraderExactMoneyRetry[],
+  now: number,
+): CTraderExactMoneyRetry[] {
+  if (safeTimestamp(now) === null) throw retryCursorError("was evaluated at an invalid timestamp");
+  const selected: CTraderExactMoneyRetry[] = [];
+  const positions = new Set<string>();
+  for (const entry of queue) {
+    if (entry.nextAttemptAt > now || positions.has(entry.positionId)) continue;
+    selected.push(entry);
+    positions.add(entry.positionId);
+    if (selected.length === EXACT_MONEY_RETRIES_PER_SYNC) break;
+  }
+  return selected;
+}
+
+function cashFlowRetryCursorError(detail: string): CTraderSyncError {
+  return new CTraderSyncError(
+    "CTRADER_CASH_FLOW_MONEY_RETRY_CURSOR_INVALID",
+    `The cTrader cash-flow money retry cursor ${detail}`,
+    false,
+  );
+}
+
+export function parseCashFlowMoneyRetryQueue(cursor: Record<string, unknown>): CTraderCashFlowMoneyRetry[] {
+  const version = cursor.cashFlowMoneyRetryQueueVersion;
+  const value = cursor.cashFlowMoneyRetries;
+  if (version === undefined && value === undefined) return [];
+  if (version !== CASH_FLOW_MONEY_RETRY_QUEUE_VERSION || !Array.isArray(value)) {
+    throw cashFlowRetryCursorError("has an unsupported version or shape");
+  }
+  if (value.length > CASH_FLOW_MONEY_RETRY_QUEUE_LIMIT) {
+    throw cashFlowRetryCursorError(`exceeds the ${CASH_FLOW_MONEY_RETRY_QUEUE_LIMIT}-entry safety limit`);
+  }
+  const allowedKeys = new Set([
+    "balanceHistoryId", "changeBalanceTimestamp", "attemptCount",
+    "firstObservedAt", "lastAttemptAt", "nextAttemptAt",
+  ]);
+  const seen = new Set<string>();
+  const parsed = value.map((candidate, index): CTraderCashFlowMoneyRetry => {
+    const entry = objectValue(candidate);
+    if (Object.keys(entry).length === 0 || Object.keys(entry).some((key) => !allowedKeys.has(key))) {
+      throw cashFlowRetryCursorError(`entry ${index} has an invalid shape`);
+    }
+    let balanceHistoryId: string;
+    try {
+      balanceHistoryId = retryCursorId(entry.balanceHistoryId, `balanceHistoryId in entry ${index}`);
+    } catch {
+      throw cashFlowRetryCursorError(`entry ${index} has an invalid balanceHistoryId`);
+    }
+    if (seen.has(balanceHistoryId)) throw cashFlowRetryCursorError(`contains duplicate balanceHistoryId ${balanceHistoryId}`);
+    seen.add(balanceHistoryId);
+    const changeBalanceTimestamp = safeTimestamp(entry.changeBalanceTimestamp);
+    const firstObservedAt = safeTimestamp(entry.firstObservedAt);
+    const lastAttemptAt = entry.lastAttemptAt === null ? null : safeTimestamp(entry.lastAttemptAt);
+    const nextAttemptAt = safeTimestamp(entry.nextAttemptAt);
+    const attemptCount = typeof entry.attemptCount === "number" ? entry.attemptCount : Number.NaN;
+    if (changeBalanceTimestamp === null || firstObservedAt === null || nextAttemptAt === null
+      || !Number.isSafeInteger(attemptCount) || attemptCount < 0
+      || attemptCount > EXACT_MONEY_RETRY_ATTEMPT_LIMIT
+      || (entry.lastAttemptAt !== null && lastAttemptAt === null)) {
+      throw cashFlowRetryCursorError(`entry ${index} has invalid bounds`);
+    }
+    if ((attemptCount === 0 && lastAttemptAt !== null)
+      || (attemptCount > 0 && lastAttemptAt === null)
+      || (lastAttemptAt !== null && lastAttemptAt < firstObservedAt)
+      || nextAttemptAt < (lastAttemptAt ?? firstObservedAt)) {
+      throw cashFlowRetryCursorError(`entry ${index} has an inconsistent retry chronology`);
+    }
+    return {
+      balanceHistoryId,
+      changeBalanceTimestamp,
+      attemptCount,
+      firstObservedAt,
+      lastAttemptAt,
+      nextAttemptAt,
+    };
+  });
+  return parsed.sort((left, right) => left.nextAttemptAt - right.nextAttemptAt
+    || left.changeBalanceTimestamp - right.changeBalanceTimestamp
+    || (BigInt(left.balanceHistoryId) < BigInt(right.balanceHistoryId) ? -1 : 1));
+}
+
+function selectDueCashFlowMoneyRetries(
+  queue: readonly CTraderCashFlowMoneyRetry[],
+  now: number,
+): CTraderCashFlowMoneyRetry[] {
+  if (safeTimestamp(now) === null) throw cashFlowRetryCursorError("was evaluated at an invalid timestamp");
+  const selected: CTraderCashFlowMoneyRetry[] = [];
+  const timestamps = new Set<number>();
+  for (const entry of queue) {
+    if (entry.nextAttemptAt > now || timestamps.has(entry.changeBalanceTimestamp)) continue;
+    selected.push(entry);
+    timestamps.add(entry.changeBalanceTimestamp);
+    if (selected.length === CASH_FLOW_MONEY_RETRIES_PER_SYNC) break;
+  }
+  return selected;
+}
+
+function retryDelayMs(attemptCount: number): number {
+  return Math.min(
+    EXACT_MONEY_RETRY_MAX_DELAY_MS,
+    EXACT_MONEY_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, Math.min(attemptCount - 1, 20))),
+  );
+}
+
+function advancedExactMoneyRetry(entry: CTraderExactMoneyRetry, attemptedAt: number): CTraderExactMoneyRetry {
+  const attemptCount = Math.min(EXACT_MONEY_RETRY_ATTEMPT_LIMIT, entry.attemptCount + 1);
+  return {
+    ...entry,
+    attemptCount,
+    lastAttemptAt: attemptedAt,
+    nextAttemptAt: Math.min(2_147_483_646_000, attemptedAt + retryDelayMs(attemptCount)),
+  };
+}
+
+function advancedCashFlowMoneyRetry(
+  entry: CTraderCashFlowMoneyRetry,
+  attemptedAt: number,
+): CTraderCashFlowMoneyRetry {
+  const attemptCount = Math.min(EXACT_MONEY_RETRY_ATTEMPT_LIMIT, entry.attemptCount + 1);
+  return {
+    ...entry,
+    attemptCount,
+    lastAttemptAt: attemptedAt,
+    nextAttemptAt: Math.min(2_147_483_646_000, attemptedAt + retryDelayMs(attemptCount)),
+  };
+}
+
+function missingExactMoneyClosings(deals: readonly CTraderDeal[]): CTraderDeal[] {
+  const chronological = [...deals].sort(timestampCompare);
+  const opening = chronological.find((deal) => deal.closePositionDetail === null);
+  if (!opening) return [];
+  return chronological.filter((deal) =>
+    deal.tradeSide !== opening.tradeSide
+    && (deal.closePositionDetail === null || deal.closePositionDetail.moneyDigits === null));
+}
+
+function reconcileExactMoneyRetryQueue(input: {
+  previous: readonly CTraderExactMoneyRetry[];
+  attemptedExecutionIds: ReadonlySet<string>;
+  projectedPositions: ReadonlyMap<string, readonly CTraderDeal[]>;
+  discoveredMissing?: ReadonlyArray<{
+    executionId: string;
+    positionId: string;
+    executionTimestamp: number;
+  }>;
+  observedAt: number;
+}): CTraderExactMoneyRetry[] {
+  const next = new Map(input.previous.map((entry) => [entry.executionId, entry]));
+  const projectedPositionIds = new Set(input.projectedPositions.keys());
+  for (const [positionId, deals] of input.projectedPositions) {
+    const missing = new Map(missingExactMoneyClosings(deals).map((deal) => [deal.dealId, deal]));
+    for (const [executionId, entry] of next) {
+      if (entry.positionId === positionId && !missing.has(executionId)) next.delete(executionId);
+    }
+    for (const deal of missing.values()) {
+      const previous = next.get(deal.dealId);
+      if (previous) {
+        next.set(
+          deal.dealId,
+          input.attemptedExecutionIds.has(deal.dealId)
+            ? advancedExactMoneyRetry(previous, input.observedAt)
+            : previous,
+        );
+      } else {
+        next.set(deal.dealId, {
+          executionId: deal.dealId,
+          positionId: deal.positionId,
+          executionTimestamp: deal.executionTimestamp,
+          attemptCount: 0,
+          firstObservedAt: input.observedAt,
+          lastAttemptAt: null,
+          nextAttemptAt: Math.min(2_147_483_646_000, input.observedAt + EXACT_MONEY_RETRY_BASE_DELAY_MS),
+        });
+      }
+    }
+  }
+  // A bounded retry window may temporarily return no copy of its target deal.
+  // Persist backoff for that attempt instead of hammering the same window on
+  // every worker tick; the existing obligation remains durable.
+  for (const entry of input.previous) {
+    if (input.attemptedExecutionIds.has(entry.executionId)
+      && !projectedPositionIds.has(entry.positionId)) {
+      next.set(entry.executionId, advancedExactMoneyRetry(entry, input.observedAt));
+    }
+  }
+  for (const discovered of input.discoveredMissing ?? []) {
+    if (next.has(discovered.executionId) || next.size >= EXACT_MONEY_RETRY_QUEUE_LIMIT) continue;
+    next.set(discovered.executionId, {
+      ...discovered,
+      attemptCount: 0,
+      firstObservedAt: input.observedAt,
+      lastAttemptAt: null,
+      nextAttemptAt: Math.min(2_147_483_646_000, input.observedAt + EXACT_MONEY_RETRY_BASE_DELAY_MS),
+    });
+  }
+  if (next.size > EXACT_MONEY_RETRY_QUEUE_LIMIT) {
+    throw new CTraderSyncError(
+      "CTRADER_EXACT_MONEY_RETRY_LIMIT_EXCEEDED",
+      `More than ${EXACT_MONEY_RETRY_QUEUE_LIMIT} closed executions are missing authoritative cTrader money`,
+      false,
+    );
+  }
+  return [...next.values()].sort((left, right) => left.nextAttemptAt - right.nextAttemptAt
+    || left.executionTimestamp - right.executionTimestamp
+    || (BigInt(left.executionId) < BigInt(right.executionId) ? -1 : 1));
+}
+
+function reconcileCashFlowMoneyRetryQueue(input: {
+  previous: readonly CTraderCashFlowMoneyRetry[];
+  attemptedBalanceHistoryIds: ReadonlySet<string>;
+  fetchedCashFlows: readonly CTraderCashFlow[];
+  discoveredMissing: ReadonlyArray<{ balanceHistoryId: string; changeBalanceTimestamp: number }>;
+  observedAt: number;
+}): CTraderCashFlowMoneyRetry[] {
+  const next = new Map(input.previous.map((entry) => [entry.balanceHistoryId, entry]));
+  const fetchedIds = new Set<string>();
+  for (const cashFlow of input.fetchedCashFlows) {
+    fetchedIds.add(cashFlow.balanceHistoryId);
+    if (cashFlow.moneyDigits !== null) {
+      next.delete(cashFlow.balanceHistoryId);
+      continue;
+    }
+    const prior = next.get(cashFlow.balanceHistoryId);
+    if (prior) {
+      next.set(
+        cashFlow.balanceHistoryId,
+        input.attemptedBalanceHistoryIds.has(cashFlow.balanceHistoryId)
+          ? advancedCashFlowMoneyRetry(prior, input.observedAt)
+          : prior,
+      );
+    } else if (next.size < CASH_FLOW_MONEY_RETRY_QUEUE_LIMIT) {
+      next.set(cashFlow.balanceHistoryId, {
+        balanceHistoryId: cashFlow.balanceHistoryId,
+        changeBalanceTimestamp: cashFlow.changeBalanceTimestamp,
+        attemptCount: 0,
+        firstObservedAt: input.observedAt,
+        lastAttemptAt: null,
+        nextAttemptAt: Math.min(2_147_483_646_000, input.observedAt + EXACT_MONEY_RETRY_BASE_DELAY_MS),
+      });
+    }
+  }
+  for (const prior of input.previous) {
+    if (input.attemptedBalanceHistoryIds.has(prior.balanceHistoryId)
+      && !fetchedIds.has(prior.balanceHistoryId)) {
+      next.set(prior.balanceHistoryId, advancedCashFlowMoneyRetry(prior, input.observedAt));
+    }
+  }
+  for (const discovered of input.discoveredMissing) {
+    if (next.has(discovered.balanceHistoryId) || next.size >= CASH_FLOW_MONEY_RETRY_QUEUE_LIMIT) continue;
+    next.set(discovered.balanceHistoryId, {
+      ...discovered,
+      attemptCount: 0,
+      firstObservedAt: input.observedAt,
+      lastAttemptAt: null,
+      nextAttemptAt: Math.min(2_147_483_646_000, input.observedAt + EXACT_MONEY_RETRY_BASE_DELAY_MS),
+    });
+  }
+  return [...next.values()].sort((left, right) => left.nextAttemptAt - right.nextAttemptAt
+    || left.changeBalanceTimestamp - right.changeBalanceTimestamp
+    || (BigInt(left.balanceHistoryId) < BigInt(right.balanceHistoryId) ? -1 : 1));
+}
+
 function json(value: unknown): string {
   return JSON.stringify(value, (_key, candidate: unknown) => typeof candidate === "bigint" ? candidate.toString() : candidate);
 }
@@ -260,25 +731,31 @@ function decimalFromScaledInteger(value: bigint, digits: number): string {
   return `${negative ? "-" : ""}${whole}${fraction.length > 0 ? `.${fraction}` : ""}`;
 }
 
-function executionMoney(deal: CTraderDeal, accountMoneyDigits: number | null): {
+function executionMoney(deal: CTraderDeal): {
   pnl: string | null;
   commission: string | null;
   swap: string | null;
   moneyDigits: number | null;
 } {
   const close = deal.closePositionDetail;
-  const moneyDigits = close?.moneyDigits ?? deal.moneyDigits ?? accountMoneyDigits;
-  if (moneyDigits === null) return { pnl: null, commission: null, swap: null, moneyDigits: null };
-  const commission = close?.commission ?? deal.commission;
+  // Message-local scale authority is strict. Close money is exact only with
+  // ProtoOAClosePositionDetail.moneyDigits. ProtoOADeal.moneyDigits may scale
+  // only ProtoOADeal.commission; ProtoOATrader.moneyDigits is deliberately not
+  // a fallback for either message.
+  const closeDigits = close?.moneyDigits ?? null;
+  const dealCommissionDigits = deal.moneyDigits;
+  const exactCloseMoney = close !== null && closeDigits !== null;
+  const commission = exactCloseMoney ? close.commission : deal.commission;
+  const commissionDigits = exactCloseMoney ? closeDigits : dealCommissionDigits;
   return {
-    pnl: close === null
+    pnl: !exactCloseMoney
       ? null
-      : decimalFromScaledInteger(close.grossProfit + close.swap + close.commission - close.pnlConversionFee, moneyDigits),
-    commission: commission === null || commission === undefined
+      : decimalFromScaledInteger(close.grossProfit + close.swap + close.commission - close.pnlConversionFee, closeDigits),
+    commission: commission === null || commission === undefined || commissionDigits === null
       ? null
-      : decimalFromScaledInteger(commission, moneyDigits),
-    swap: close === null ? null : decimalFromScaledInteger(close.swap, moneyDigits),
-    moneyDigits,
+      : decimalFromScaledInteger(commission, commissionDigits),
+    swap: !exactCloseMoney ? null : decimalFromScaledInteger(close.swap, closeDigits),
+    moneyDigits: exactCloseMoney ? closeDigits : commissionDigits,
   };
 }
 
@@ -305,8 +782,8 @@ function optionalDealIdentity<T>(
   return incoming ?? existing;
 }
 
-function officialMoneyDigits(deal: CTraderDeal, accountMoneyDigits: number | null): number | null {
-  return deal.closePositionDetail?.moneyDigits ?? deal.moneyDigits ?? accountMoneyDigits;
+function officialMoneyDigits(deal: CTraderDeal): number | null {
+  return deal.closePositionDetail?.moneyDigits ?? null;
 }
 
 function sameScaledMoney(
@@ -404,7 +881,9 @@ function storedMcpMoney(canonical: Record<string, unknown>, executionId: string)
  * Safely upgrades an execution stored by the Remote MCP reader to the official
  * Open API representation. The MCP envelope is accepted only after its
  * immutable execution identity is validated. Exact MCP money can be replaced
- * only by agreeing official close money; a weaker official replay fails closed.
+ * only by agreeing official close money. A weaker official observation remains
+ * provider-unavailable and enters the official retry queue; it is never
+ * promoted with a deal/trader exponent.
  */
 export function mergeStoredExecutionWithOfficial(
   storedExecutionId: string,
@@ -413,6 +892,7 @@ export function mergeStoredExecutionWithOfficial(
   expectedAccountId?: string,
   accountMoneyDigits: number | null = null,
 ): CTraderDeal {
+  void accountMoneyDigits;
   if (storedExecutionId !== incoming.dealId) {
     throw storedExecutionInvalid(storedExecutionId, "does not match the fetched official deal identity");
   }
@@ -423,7 +903,7 @@ export function mergeStoredExecutionWithOfficial(
       if (!parsed || parsed.dealId !== storedExecutionId) {
         throw storedExecutionInvalid(storedExecutionId, "cannot be parsed safely");
       }
-      return mergeOfficialDealFacts(parsed, incoming, accountMoneyDigits);
+      return mergeOfficialDealFacts(parsed, incoming);
     } catch (error) {
       if (error instanceof CTraderSyncError) throw error;
       throw storedExecutionInvalid(storedExecutionId, "cannot be parsed safely");
@@ -476,14 +956,10 @@ export function mergeStoredExecutionWithOfficial(
 
   const storedMoney = storedMcpMoney(canonical, storedExecutionId);
   if (storedMoney.rank === 0) return incoming;
-  const digits = officialMoneyDigits(incoming, accountMoneyDigits);
+  const digits = officialMoneyDigits(incoming);
   const close = incoming.closePositionDetail;
   if (close === null || digits === null) {
-    throw new CTraderSyncError(
-      "CTRADER_OFFICIAL_DEAL_DOWNGRADE",
-      `Official cTrader history omitted exact close money already stored for deal ${incoming.dealId}`,
-      false,
-    );
+    return incoming;
   }
   const officialNet = {
     value: close.grossProfit + close.swap + close.commission - close.pnlConversionFee,
@@ -523,6 +999,7 @@ export function mergeOfficialDealFacts(
   incoming: CTraderDeal,
   accountMoneyDigits: number | null = null,
 ): CTraderDeal {
+  void accountMoneyDigits;
   if (existing.dealId !== incoming.dealId) {
     throw new CTraderSyncError("CTRADER_OFFICIAL_DEAL_CONFLICT", "cTrader mixed official execution identities", false);
   }
@@ -535,20 +1012,18 @@ export function mergeOfficialDealFacts(
     );
   }
   if (existing.closePositionDetail && incoming.closePositionDetail) {
-    const existingDigits = officialMoneyDigits(existing, accountMoneyDigits);
-    const incomingDigits = officialMoneyDigits(incoming, accountMoneyDigits);
-    if (existingDigits === null || incomingDigits === null) {
-      throw new CTraderSyncError(
-        "CTRADER_OFFICIAL_DEAL_CONFLICT",
-        `cTrader returned conflicting exact-money precision for immutable deal ${incoming.dealId}`,
-        false,
-      );
-    }
+    const existingDigits = officialMoneyDigits(existing);
+    const incomingDigits = officialMoneyDigits(incoming);
     for (const field of ["grossProfit", "swap", "commission", "balance", "pnlConversionFee"] as const) {
-      if (!sameScaledMoney(
-        { value: existing.closePositionDetail[field], digits: existingDigits },
-        { value: incoming.closePositionDetail[field], digits: incomingDigits },
-      )) {
+      const agrees = existingDigits !== null && incomingDigits !== null
+        ? sameScaledMoney(
+            { value: existing.closePositionDetail[field], digits: existingDigits },
+            { value: incoming.closePositionDetail[field], digits: incomingDigits },
+          )
+        // Without both message-local exponents the values cannot be compared
+        // after scaling. Equal lossless raw units are the only safe join.
+        : existing.closePositionDetail[field] === incoming.closePositionDetail[field];
+      if (!agrees) {
         throw new CTraderSyncError(
           "CTRADER_OFFICIAL_DEAL_CONFLICT",
           `cTrader changed ${field} for immutable deal ${incoming.dealId}`,
@@ -566,10 +1041,15 @@ export function mergeOfficialDealFacts(
       );
     }
   }
-  const close = incoming.closePositionDetail ?? existing.closePositionDetail;
-  const moneyDigits = close !== null && incoming.closePositionDetail === null
-    ? existing.moneyDigits
-    : optionalDealIdentity(incoming.dealId, "moneyDigits", existing.moneyDigits, incoming.moneyDigits);
+  const close = existing.closePositionDetail !== null
+    && existing.closePositionDetail.moneyDigits !== null
+    && incoming.closePositionDetail?.moneyDigits === null
+      ? existing.closePositionDetail
+      : incoming.closePositionDetail ?? existing.closePositionDetail;
+  // These two fields belong to ProtoOADeal. Never let a close-detail exponent
+  // influence their immutable identity or vice versa.
+  const moneyDigits = optionalDealIdentity(incoming.dealId, "deal moneyDigits", existing.moneyDigits, incoming.moneyDigits);
+  const dealCommission = optionalDealIdentity(incoming.dealId, "deal commission", existing.commission, incoming.commission);
   return {
     ...existing,
     ...incoming,
@@ -580,9 +1060,7 @@ export function mergeOfficialDealFacts(
         ? existing.providerUpdatedTimestamp
         : Math.max(existing.providerUpdatedTimestamp, incoming.providerUpdatedTimestamp),
     moneyDigits,
-    commission: close !== null && incoming.closePositionDetail === null
-      ? existing.commission
-      : optionalDealIdentity(incoming.dealId, "commission", existing.commission, incoming.commission),
+    commission: dealCommission,
     closePositionDetail: close,
     // Persist a canonical provider envelope containing retained exact fields so
     // every subsequent projection re-parses the same authoritative facts.
@@ -591,9 +1069,7 @@ export function mergeOfficialDealFacts(
       ...incoming.raw,
       orderId: optionalDealIdentity(incoming.dealId, "order identity", existing.orderId, incoming.orderId) ?? undefined,
       moneyDigits: moneyDigits ?? undefined,
-      commission: (close !== null && incoming.closePositionDetail === null
-        ? existing.commission
-        : optionalDealIdentity(incoming.dealId, "commission", existing.commission, incoming.commission))?.toString(),
+      commission: dealCommission?.toString(),
       closePositionDetail: close?.raw,
     },
   };
@@ -612,9 +1088,13 @@ export async function fetchCompleteDealHistory(
   maxRows: number,
   heartbeat: () => Promise<void> = async () => undefined,
   accountMoneyDigits: number | null = null,
+  requestLimit = 100_000,
 ): Promise<CTraderDeal[]> {
   if (!Number.isSafeInteger(fromTimestamp) || !Number.isSafeInteger(toTimestamp) || fromTimestamp < 0 || toTimestamp < fromTimestamp) {
     throw new CTraderSyncError("HISTORY_RANGE_INVALID", "The cTrader history range is invalid", false);
+  }
+  if (!Number.isSafeInteger(requestLimit) || requestLimit < 1 || requestLimit > 100_000) {
+    throw new CTraderSyncError("HISTORY_REQUEST_LIMIT_INVALID", "The cTrader history request limit is invalid", false);
   }
   // Some cTrader backends reject overly wide historical boundaries. Seed the
   // request with bounded seven-day windows, then bisect only windows that are
@@ -634,7 +1114,7 @@ export async function fetchCompleteDealHistory(
     const window = windows.pop();
     if (!window) break;
     requests += 1;
-    if (requests > 100_000) {
+    if (requests > requestLimit) {
       throw new CTraderSyncError("HISTORY_PAGINATION_LIMIT", "cTrader history required too many pages", false);
     }
     await heartbeat();
@@ -647,7 +1127,7 @@ export async function fetchCompleteDealHistory(
       if (previous && json(previous.raw) !== json(deal.raw)) {
         // The most recent payload supplies optional metadata, but immutable
         // exact-money observations are joined at their authoritative scale.
-        // Per-deal moneyDigits ranks above the trader/account fallback.
+        // Each message retains only its own authoritative moneyDigits.
         const previousUpdate = previous.providerUpdatedTimestamp ?? previous.executionTimestamp;
         const nextUpdate = deal.providerUpdatedTimestamp ?? deal.executionTimestamp;
         deals.set(
@@ -676,6 +1156,22 @@ export async function fetchCompleteDealHistory(
   return [...deals.values()].sort(timestampCompare);
 }
 
+function mergeOfficialDealCollections(
+  current: readonly CTraderDeal[],
+  incoming: readonly CTraderDeal[],
+  accountMoneyDigits: number | null,
+): CTraderDeal[] {
+  const merged = new Map(current.map((deal) => [deal.dealId, deal]));
+  for (const deal of incoming) {
+    const existing = merged.get(deal.dealId);
+    merged.set(
+      deal.dealId,
+      existing === undefined ? deal : mergeOfficialDealFacts(existing, deal, accountMoneyDigits),
+    );
+  }
+  return [...merged.values()].sort(timestampCompare);
+}
+
 function cashFlowTimestampCompare(left: CTraderCashFlow, right: CTraderCashFlow): number {
   if (left.changeBalanceTimestamp !== right.changeBalanceTimestamp) {
     return left.changeBalanceTimestamp - right.changeBalanceTimestamp;
@@ -685,16 +1181,37 @@ function cashFlowTimestampCompare(left: CTraderCashFlow, right: CTraderCashFlow)
   return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
 }
 
-function sameCashFlow(left: CTraderCashFlow, right: CTraderCashFlow): boolean {
-  return left.balanceHistoryId === right.balanceHistoryId
-    && left.operationType === right.operationType
-    && left.operationName === right.operationName
-    && left.balance === right.balance
-    && left.delta === right.delta
-    && left.changeBalanceTimestamp === right.changeBalanceTimestamp
-    && left.balanceVersion === right.balanceVersion
-    && left.equity === right.equity
-    && left.moneyDigits === right.moneyDigits;
+export function mergeCashFlowObservations(
+  existing: CTraderCashFlow,
+  incoming: CTraderCashFlow,
+): CTraderCashFlow {
+  const conflict = (field: string): never => {
+    throw new CTraderSyncError(
+      "CASH_FLOW_ID_CONFLICT",
+      `cTrader changed ${field} for immutable cash-flow ${incoming.balanceHistoryId}`,
+      false,
+    );
+  };
+  if (existing.balanceHistoryId !== incoming.balanceHistoryId) conflict("identity");
+  if (existing.operationName !== incoming.operationName) conflict("operation name");
+  if (existing.operationType !== null && incoming.operationType !== null
+    && existing.operationType !== incoming.operationType) conflict("operation type");
+  if (existing.balance !== incoming.balance) conflict("raw balance");
+  if (existing.delta !== incoming.delta) conflict("raw delta");
+  if (existing.changeBalanceTimestamp !== incoming.changeBalanceTimestamp) conflict("timestamp");
+  if (existing.balanceVersion !== null && incoming.balanceVersion !== null
+    && existing.balanceVersion !== incoming.balanceVersion) conflict("balance version");
+  if (existing.equity !== null && incoming.equity !== null && existing.equity !== incoming.equity) conflict("raw equity");
+  if (existing.moneyDigits !== null && incoming.moneyDigits !== null
+    && existing.moneyDigits !== incoming.moneyDigits) conflict("moneyDigits");
+  return {
+    ...existing,
+    ...incoming,
+    operationType: incoming.operationType ?? existing.operationType,
+    balanceVersion: incoming.balanceVersion ?? existing.balanceVersion,
+    equity: incoming.equity ?? existing.equity,
+    moneyDigits: incoming.moneyDigits ?? existing.moneyDigits,
+  };
 }
 
 /** Joins immutable cash-flow observations and preserves optional enrichment. */
@@ -748,7 +1265,10 @@ export function resolveCashFlowMoneyScale(input: {
   cashFlowMoneyDigits: number | null;
   accountMoneyDigits: number | null;
   stored?: { moneyDigits: number | null; source: CashFlowMoneyDigitsSource } | null;
-}): { moneyDigits: number | null; source: CashFlowMoneyDigitsSource } {
+}): { moneyDigits: number | null; source: "cash_flow" | "unavailable" } {
+  // ProtoOADepositWithdraw.moneyDigits is message-local. The trader/account
+  // exponent is not authority for row balance, delta, or equity.
+  void input.accountMoneyDigits;
   if (input.cashFlowMoneyDigits !== null) {
     if (input.stored?.source === "cash_flow"
       && input.stored.moneyDigits !== input.cashFlowMoneyDigits) {
@@ -760,24 +1280,10 @@ export function resolveCashFlowMoneyScale(input: {
     }
     return { moneyDigits: input.cashFlowMoneyDigits, source: "cash_flow" };
   }
-  // A row-specific exponent is stronger than the account fallback. Preserve it
-  // if an overlapping response later omits the optional row field.
+  // Preserve a previously observed row exponent if an overlapping response
+  // later omits that optional field.
   if (input.stored?.source === "cash_flow" && input.stored.moneyDigits !== null) {
     return { moneyDigits: input.stored.moneyDigits, source: "cash_flow" };
-  }
-  if (input.stored?.source === "account" && input.stored.moneyDigits !== null) {
-    if (input.accountMoneyDigits !== null
-      && input.accountMoneyDigits !== input.stored.moneyDigits) {
-      throw new CTraderSyncError(
-        "CASH_FLOW_ACCOUNT_MONEY_DIGITS_CONFLICT",
-        "cTrader changed the account moneyDigits used to scale an immutable account cash flow",
-        false,
-      );
-    }
-    return { moneyDigits: input.stored.moneyDigits, source: "account" };
-  }
-  if (input.accountMoneyDigits !== null) {
-    return { moneyDigits: input.accountMoneyDigits, source: "account" };
   }
   return { moneyDigits: null, source: "unavailable" };
 }
@@ -819,14 +1325,10 @@ export async function fetchCompleteCashFlowHistory(
         );
       }
       const prior = cashFlows.get(cashFlow.balanceHistoryId);
-      if (prior && !sameCashFlow(prior, cashFlow)) {
-        throw new CTraderSyncError(
-          "CASH_FLOW_ID_CONFLICT",
-          "cTrader returned conflicting values for an immutable account cash-flow identity",
-          false,
-        );
-      }
-      cashFlows.set(cashFlow.balanceHistoryId, cashFlow);
+      cashFlows.set(
+        cashFlow.balanceHistoryId,
+        prior === undefined ? cashFlow : mergeCashFlowObservations(prior, cashFlow),
+      );
     }
     if (to === toTimestamp) break;
     // Boundaries are inclusive, so the next window begins one millisecond
@@ -834,6 +1336,21 @@ export async function fetchCompleteCashFlowHistory(
     from = to + 1;
   }
   return [...cashFlows.values()].sort(cashFlowTimestampCompare);
+}
+
+function mergeCashFlowCollections(
+  current: readonly CTraderCashFlow[],
+  incoming: readonly CTraderCashFlow[],
+): CTraderCashFlow[] {
+  const merged = new Map(current.map((cashFlow) => [cashFlow.balanceHistoryId, cashFlow]));
+  for (const cashFlow of incoming) {
+    const existing = merged.get(cashFlow.balanceHistoryId);
+    merged.set(
+      cashFlow.balanceHistoryId,
+      existing === undefined ? cashFlow : mergeCashFlowObservations(existing, cashFlow),
+    );
+  }
+  return [...merged.values()].sort(cashFlowTimestampCompare);
 }
 
 function isAuthFailure(error: unknown): boolean {
@@ -1008,6 +1525,10 @@ export class CTraderSyncEngine {
     try {
       await heartbeat();
       const trader = await session.getTraderMetadata();
+      // Capture this immediately after the broker response. Later symbol and
+      // history calls can take minutes on a large account, so the end-of-sync
+      // cursor is not a truthful observation time for the balance snapshot.
+      const traderObservedAt = Date.now();
       if (trader.registrationTimestamp === null) {
         throw new CTraderSyncError(
           "REGISTRATION_TIMESTAMP_MISSING",
@@ -1020,6 +1541,8 @@ export class CTraderSyncEngine {
       const categories = await session.listSymbolCategories();
       const lightSymbols = await session.listSymbols();
       const cursorBefore = objectValue(connection.sync_cursor);
+      const exactMoneyRetriesBefore = parseExactMoneyRetryQueue(cursorBefore);
+      const cashFlowMoneyRetriesBefore = parseCashFlowMoneyRetryQueue(cursorBefore);
       const fullHistoryComplete = cursorBefore.fullHistoryComplete === true;
       const syncedThrough = safeTimestamp(cursorBefore.syncedThroughTimestamp);
       const configuredEarlierBound = this.config.cTrader.historyStartTimestamp;
@@ -1033,7 +1556,11 @@ export class CTraderSyncEngine {
       if (authoritativeStart > toTimestamp) {
         throw new CTraderSyncError("REGISTRATION_TIMESTAMP_INVALID", "The cTrader registration timestamp is in the future", false);
       }
-      const fetchedDeals = await fetchCompleteDealHistory(
+      if (exactMoneyRetriesBefore.some((entry) =>
+        entry.executionTimestamp < authoritativeStart || entry.executionTimestamp > toTimestamp)) {
+        throw retryCursorError("contains an execution outside the authoritative account-history boundary");
+      }
+      let fetchedDeals = await fetchCompleteDealHistory(
         session,
         fromTimestamp,
         toTimestamp,
@@ -1041,6 +1568,21 @@ export class CTraderSyncEngine {
         heartbeat,
         trader.moneyDigits,
       );
+      const dueExactMoneyRetries = fullHistoryComplete
+        ? selectDueExactMoneyRetries(exactMoneyRetriesBefore, toTimestamp)
+        : [];
+      for (const retry of dueExactMoneyRetries) {
+        const retryDeals = await fetchCompleteDealHistory(
+          session,
+          Math.max(authoritativeStart, retry.executionTimestamp - EXACT_MONEY_RETRY_WINDOW_RADIUS_MS),
+          Math.min(toTimestamp, retry.executionTimestamp + EXACT_MONEY_RETRY_WINDOW_RADIUS_MS),
+          this.config.cTrader.maxDealsPerRequest,
+          heartbeat,
+          trader.moneyDigits,
+          EXACT_MONEY_RETRY_HISTORY_REQUEST_LIMIT,
+        );
+        fetchedDeals = mergeOfficialDealCollections(fetchedDeals, retryDeals, trader.moneyDigits);
+      }
       const cashFlowHistoryComplete = cursorBefore.cashFlowHistoryComplete === true;
       const cashFlowSyncedThrough = safeTimestamp(cursorBefore.cashFlowSyncedThroughTimestamp);
       // Spotware explicitly defines registrationTimestamp as the minimum
@@ -1048,15 +1590,32 @@ export class CTraderSyncEngine {
       // for older executions, but it must not make cash-flow boundaries
       // invalid.
       const cashFlowAuthoritativeStart = trader.registrationTimestamp;
+      if (cashFlowMoneyRetriesBefore.some((entry) =>
+        entry.changeBalanceTimestamp < cashFlowAuthoritativeStart
+        || entry.changeBalanceTimestamp > toTimestamp)) {
+        throw cashFlowRetryCursorError("contains a row outside the authoritative account-history boundary");
+      }
       const cashFlowFromTimestamp = cashFlowHistoryComplete && cashFlowSyncedThrough !== null
         ? Math.max(cashFlowAuthoritativeStart, cashFlowSyncedThrough - this.config.cTrader.syncOverlapSeconds * 1_000)
         : cashFlowAuthoritativeStart;
-      const fetchedCashFlows = await fetchCompleteCashFlowHistory(
+      let fetchedCashFlows = await fetchCompleteCashFlowHistory(
         session,
         cashFlowFromTimestamp,
         toTimestamp,
         heartbeat,
       );
+      const dueCashFlowMoneyRetries = cashFlowHistoryComplete
+        ? selectDueCashFlowMoneyRetries(cashFlowMoneyRetriesBefore, toTimestamp)
+        : [];
+      for (const retry of dueCashFlowMoneyRetries) {
+        const retryCashFlows = await fetchCompleteCashFlowHistory(
+          session,
+          retry.changeBalanceTimestamp,
+          retry.changeBalanceTimestamp,
+          heartbeat,
+        );
+        fetchedCashFlows = mergeCashFlowCollections(fetchedCashFlows, retryCashFlows);
+      }
 
       const symbolIds = [...new Set(fetchedDeals.map((deal) => deal.symbolId))];
       const lightById = new Map(lightSymbols.map((symbol) => [symbol.symbolId, symbol]));
@@ -1086,8 +1645,13 @@ export class CTraderSyncEngine {
         fetchedDeals,
         fetchedCashFlows,
         cursorBefore,
+        exactMoneyRetriesBefore,
+        attemptedExactMoneyRetryIds: new Set(dueExactMoneyRetries.map((entry) => entry.executionId)),
+        cashFlowMoneyRetriesBefore,
+        attemptedCashFlowMoneyRetryIds: new Set(dueCashFlowMoneyRetries.map((entry) => entry.balanceHistoryId)),
         registrationTimestamp: trader.registrationTimestamp,
         syncedThroughTimestamp: toTimestamp,
+        traderObservedAt,
       });
     } finally {
       await session.close();
@@ -1105,8 +1669,13 @@ export class CTraderSyncEngine {
     fetchedDeals: CTraderDeal[];
     fetchedCashFlows: CTraderCashFlow[];
     cursorBefore: Record<string, unknown>;
+    exactMoneyRetriesBefore: CTraderExactMoneyRetry[];
+    attemptedExactMoneyRetryIds: ReadonlySet<string>;
+    cashFlowMoneyRetriesBefore: CTraderCashFlowMoneyRetry[];
+    attemptedCashFlowMoneyRetryIds: ReadonlySet<string>;
     registrationTimestamp: number;
     syncedThroughTimestamp: number;
+    traderObservedAt: number;
   }): Promise<CTraderSyncResult> {
     const accountCurrency = this.accountCurrency(input.trader, input.assets);
     const result = await withTransaction(this.database, async (client) => {
@@ -1163,6 +1732,19 @@ export class CTraderSyncEngine {
         fetchedAccountCashFlows: input.fetchedCashFlows.length,
         insertedAccountCashFlows: 0,
         updatedAccountCashFlows: 0,
+        invalidatedAccountCashFlowFallbacks: 0,
+        totalAccountCashFlows: 0,
+        scaledAccountCashFlows: 0,
+        unscaledAccountCashFlows: 0,
+        attemptedCashFlowMoneyRetries: input.attemptedCashFlowMoneyRetryIds.size,
+        completedCashFlowMoneyRetries: 0,
+        pendingCashFlowMoneyRetries: 0,
+        deauthorizedUnsupportedExactExecutions: 0,
+        deauthorizedUnsupportedExactTrades: 0,
+        sanitizedUnsupportedExactCandidates: 0,
+        attemptedExactMoneyRetries: input.attemptedExactMoneyRetryIds.size,
+        completedExactMoneyRetries: 0,
+        pendingExactMoneyRetries: 0,
       };
       const dealIds = input.fetchedDeals.map((deal) => deal.dealId);
       const existingExecutions = dealIds.length === 0
@@ -1184,7 +1766,7 @@ export class CTraderSyncEngine {
               input.trader.moneyDigits,
             )
           : fetchedDeal;
-        const money = executionMoney(deal, input.trader.moneyDigits);
+        const money = executionMoney(deal);
         const closeVolume = deal.closePositionDetail?.closedVolumeCents ?? null;
         await client.query(
           `INSERT INTO trade_executions (
@@ -1247,6 +1829,184 @@ export class CTraderSyncEngine {
         if (storedExecution) counters.updatedExecutions += 1;
         else counters.insertedExecutions += 1;
       }
+
+      // Older builds incorrectly treated deal/trader moneyDigits as a scale
+      // for closePositionDetail. De-authorize every such stored observation,
+      // including positions outside the normal overlap, before any API or
+      // export can continue presenting the derived values as provider exact.
+      const missingCloseMoneyExecutions = await client.query<MissingCloseMoneyExecutionRow>(
+        `SELECT external_execution_id, external_position_id, executed_at
+         FROM trade_executions
+         WHERE user_id=$1 AND broker_connection_id=$2
+           AND jsonb_typeof(raw_payload->'closePositionDetail')='object'
+           AND raw_payload->'closePositionDetail'->>'moneyDigits' IS NULL
+         ORDER BY executed_at ASC, external_execution_id::numeric ASC
+         LIMIT $3`,
+        [input.connection.user_id, input.connection.id, EXACT_MONEY_RETRY_QUEUE_LIMIT + 1],
+      );
+      if (missingCloseMoneyExecutions.rows.length > 0) {
+        const executionRepair = await client.query(
+          `UPDATE trade_executions SET
+             pnl=NULL,
+             commission=CASE
+               WHEN raw_payload->>'commission' ~ '^-?(0|[1-9][0-9]*)$'
+                AND raw_payload->>'moneyDigits' ~ '^([0-9]|1[0-8])$'
+               THEN (raw_payload->>'commission')::numeric
+                 / power(10::numeric, (raw_payload->>'moneyDigits')::int)
+               ELSE NULL
+             END,
+             swap=NULL,
+             money_digits=CASE
+               WHEN raw_payload->>'commission' ~ '^-?(0|[1-9][0-9]*)$'
+                AND raw_payload->>'moneyDigits' ~ '^([0-9]|1[0-8])$'
+               THEN (raw_payload->>'moneyDigits')::int
+               ELSE NULL
+             END,
+             imported_at=now()
+           WHERE user_id=$1 AND broker_connection_id=$2
+             AND jsonb_typeof(raw_payload->'closePositionDetail')='object'
+             AND raw_payload->'closePositionDetail'->>'moneyDigits' IS NULL
+             AND (
+               pnl IS NOT NULL OR swap IS NOT NULL
+               OR commission IS DISTINCT FROM CASE
+                 WHEN raw_payload->>'commission' ~ '^-?(0|[1-9][0-9]*)$'
+                  AND raw_payload->>'moneyDigits' ~ '^([0-9]|1[0-8])$'
+                 THEN (raw_payload->>'commission')::numeric
+                   / power(10::numeric, (raw_payload->>'moneyDigits')::int)
+                 ELSE NULL
+               END
+               OR money_digits IS DISTINCT FROM CASE
+                 WHEN raw_payload->>'commission' ~ '^-?(0|[1-9][0-9]*)$'
+                  AND raw_payload->>'moneyDigits' ~ '^([0-9]|1[0-8])$'
+                 THEN (raw_payload->>'moneyDigits')::int
+                 ELSE NULL
+               END
+             )`,
+          [input.connection.user_id, input.connection.id],
+        );
+        counters.deauthorizedUnsupportedExactExecutions = executionRepair.rowCount ?? 0;
+        const tradeRepair = await client.query(
+          `UPDATE trades SET
+             pnl=CASE
+               WHEN broker_data->>'pnlAuthority'='preserved_reconciled_manual'
+                AND broker_data->>'reconciledManualPnlPreserved'='true'
+               THEN pnl ELSE NULL
+             END,
+             broker_data=(broker_data
+               - 'grossProfit' - 'commission' - 'swap' - 'pnlConversionFee' - 'realizedEvents'
+               - 'pnlMethod' - 'pnlAuthority' - 'pnlComponentsCoverage')
+               || jsonb_build_object(
+                 'pnlMethod','partial_provider_close_detail_unavailable',
+                 'pnlAuthority',CASE
+                   WHEN broker_data->>'pnlAuthority'='preserved_reconciled_manual'
+                    AND broker_data->>'reconciledManualPnlPreserved'='true'
+                   THEN 'preserved_reconciled_manual' ELSE 'provider_unavailable'
+                 END,
+                 'reconciledManualPnlPreserved',CASE
+                   WHEN broker_data->>'pnlAuthority'='preserved_reconciled_manual'
+                    AND broker_data->>'reconciledManualPnlPreserved'='true'
+                   THEN true ELSE false
+                 END,
+                 'pnlComponentsCoverage',jsonb_build_object(
+                   'version',1,
+                   'source','ProtoOAClosePositionDetail',
+                   'scope','realized_closing_deals',
+                   'tradeLevelExact',false,
+                   'grossProfit',false,
+                   'brokerCommission',false,
+                   'swap',false,
+                   'pnlConversionFee',false,
+                   'formula','grossProfit + swap + commission - pnlConversionFee',
+                   'otherAccountCashFlowsIncluded',false,
+                   'otherAccountCashFlowsAttribution','not_provided_by_position'
+                 )
+               ),
+             row_version=row_version+1,
+             updated_at=now()
+           WHERE user_id=$1 AND broker_connection_id=$2
+             AND EXISTS (
+               SELECT 1 FROM trade_executions AS vulnerable_execution
+               WHERE vulnerable_execution.user_id=trades.user_id
+                 AND vulnerable_execution.broker_connection_id=trades.broker_connection_id
+                 AND trades.external_trade_key='position:' || vulnerable_execution.external_position_id
+                 AND jsonb_typeof(vulnerable_execution.raw_payload->'closePositionDetail')='object'
+                 AND vulnerable_execution.raw_payload->'closePositionDetail'->>'moneyDigits' IS NULL
+             )
+             AND (
+               (pnl IS NOT NULL AND NOT (
+                 broker_data->>'pnlAuthority'='preserved_reconciled_manual'
+                 AND broker_data->>'reconciledManualPnlPreserved'='true'
+               ))
+               OR broker_data ?| ARRAY['grossProfit','commission','swap','pnlConversionFee','realizedEvents']
+               OR COALESCE(broker_data->>'pnlAuthority','') NOT IN (
+                 'provider_unavailable','preserved_reconciled_manual'
+               )
+             )`,
+          [input.connection.user_id, input.connection.id],
+        );
+        counters.deauthorizedUnsupportedExactTrades = tradeRepair.rowCount ?? 0;
+        const candidateRepair = await client.query(
+          `UPDATE ctrader_live_reconciliation_candidates AS candidate SET
+             projected_trade=jsonb_set(
+               jsonb_set(candidate.projected_trade,'{pnl}','null'::jsonb,true),
+               '{brokerData}',
+               (COALESCE(candidate.projected_trade->'brokerData','{}'::jsonb)
+                 - 'grossProfit' - 'commission' - 'swap' - 'pnlConversionFee' - 'realizedEvents'
+                 - 'pnlMethod' - 'pnlAuthority' - 'pnlComponentsCoverage')
+                 || jsonb_build_object(
+                   'pnlMethod','partial_provider_close_detail_unavailable',
+                   'pnlAuthority','provider_unavailable',
+                   'reconciledManualPnlPreserved',false,
+                   'pnlComponentsCoverage',jsonb_build_object(
+                     'version',1,
+                     'source','ProtoOAClosePositionDetail',
+                     'scope','realized_closing_deals',
+                     'tradeLevelExact',false,
+                     'grossProfit',false,
+                     'brokerCommission',false,
+                     'swap',false,
+                     'pnlConversionFee',false,
+                     'formula','grossProfit + swap + commission - pnlConversionFee',
+                     'otherAccountCashFlowsIncluded',false,
+                     'otherAccountCashFlowsAttribution','not_provided_by_position'
+                   )
+                 ),
+               true
+             ),
+             candidate_data=candidate.candidate_data || jsonb_build_object(
+               'exactMoneyRepairPending',true,
+               'exactMoneyRepairReason','close_position_detail_money_digits_unavailable'
+             ),
+             projection_fingerprint=decode(repeat('ff',32),'hex'),
+             row_version=candidate.row_version+1
+           FROM trade_executions AS vulnerable_execution
+           WHERE candidate.user_id=$1 AND candidate.broker_connection_id=$2
+             AND candidate.status='pending'
+             AND vulnerable_execution.user_id=candidate.user_id
+             AND vulnerable_execution.broker_connection_id=candidate.broker_connection_id
+             AND vulnerable_execution.external_position_id=candidate.external_position_id
+             AND jsonb_typeof(vulnerable_execution.raw_payload->'closePositionDetail')='object'
+             AND vulnerable_execution.raw_payload->'closePositionDetail'->>'moneyDigits' IS NULL
+             AND (
+               candidate.projected_trade->>'pnl' IS NOT NULL
+               OR COALESCE(candidate.projected_trade->'brokerData'->>'pnlAuthority','') <> 'provider_unavailable'
+               OR COALESCE(candidate.candidate_data->>'exactMoneyRepairPending','') <> 'true'
+               OR candidate.projection_fingerprint IS DISTINCT FROM decode(repeat('ff',32),'hex')
+             )`,
+          [input.connection.user_id, input.connection.id],
+        );
+        counters.sanitizedUnsupportedExactCandidates = candidateRepair.rowCount ?? 0;
+      }
+
+      const invalidatedCashFlowFallbacks = await client.query(
+        `UPDATE ctrader_account_cash_flows SET
+           amount=NULL, balance=NULL, equity=NULL, money_digits=NULL,
+           money_digits_source='unavailable', synced_at=now()
+         WHERE user_id=$1 AND broker_connection_id=$2
+           AND money_digits_source='account'`,
+        [input.connection.user_id, input.connection.id],
+      );
+      counters.invalidatedAccountCashFlowFallbacks = invalidatedCashFlowFallbacks.rowCount ?? 0;
 
       const existingCashFlows = input.fetchedCashFlows.length === 0
         ? new Map<string, StoredCashFlowRow>()
@@ -1355,8 +2115,70 @@ export class CTraderSyncEngine {
         else counters.insertedAccountCashFlows! += 1;
       }
 
+      const cashFlowCoverageResult = await client.query<CashFlowScaleCoverageRow>(
+        `SELECT
+           count(*)::text AS total_rows,
+           count(*) FILTER (
+             WHERE money_digits_source='cash_flow' AND money_digits IS NOT NULL
+           )::text AS scaled_rows,
+           count(*) FILTER (
+             WHERE money_digits_source<>'cash_flow' OR money_digits IS NULL
+           )::text AS unscaled_rows
+         FROM ctrader_account_cash_flows
+         WHERE user_id=$1 AND broker_connection_id=$2`,
+        [input.connection.user_id, input.connection.id],
+      );
+      const cashFlowCoverage = cashFlowCoverageResult.rows[0] ?? {
+        total_rows: 0,
+        scaled_rows: 0,
+        unscaled_rows: 0,
+      };
+      const totalAccountCashFlows = Number(cashFlowCoverage.total_rows);
+      const scaledAccountCashFlows = Number(cashFlowCoverage.scaled_rows);
+      const unscaledAccountCashFlows = Number(cashFlowCoverage.unscaled_rows);
+      if (![totalAccountCashFlows, scaledAccountCashFlows, unscaledAccountCashFlows]
+        .every((value) => Number.isSafeInteger(value) && value >= 0)
+        || scaledAccountCashFlows + unscaledAccountCashFlows !== totalAccountCashFlows) {
+        throw new CTraderSyncError(
+          "CASH_FLOW_SCALE_COVERAGE_INVALID",
+          "Stored cTrader cash-flow scale coverage is inconsistent",
+          false,
+        );
+      }
+      counters.totalAccountCashFlows = totalAccountCashFlows;
+      counters.scaledAccountCashFlows = scaledAccountCashFlows;
+      counters.unscaledAccountCashFlows = unscaledAccountCashFlows;
+      const missingCashFlowMoney = await client.query<MissingCashFlowMoneyRow>(
+        `SELECT external_cash_flow_id, occurred_at
+         FROM ctrader_account_cash_flows
+         WHERE user_id=$1 AND broker_connection_id=$2
+           AND (money_digits_source<>'cash_flow' OR money_digits IS NULL)
+         ORDER BY occurred_at ASC, external_cash_flow_id::numeric ASC
+         LIMIT $3`,
+        [input.connection.user_id, input.connection.id, CASH_FLOW_MONEY_RETRY_QUEUE_LIMIT + 1],
+      );
+      const discoveredMissingCashFlows = missingCashFlowMoney.rows.flatMap((row) => {
+        const timestamp = new Date(row.occurred_at).getTime();
+        return safeTimestamp(timestamp) === null ? [] : [{
+          balanceHistoryId: row.external_cash_flow_id,
+          changeBalanceTimestamp: timestamp,
+        }];
+      });
+      const cashFlowMoneyRetriesAfter = reconcileCashFlowMoneyRetryQueue({
+        previous: input.cashFlowMoneyRetriesBefore,
+        attemptedBalanceHistoryIds: input.attemptedCashFlowMoneyRetryIds,
+        fetchedCashFlows: input.fetchedCashFlows,
+        discoveredMissing: discoveredMissingCashFlows,
+        observedAt: input.syncedThroughTimestamp,
+      });
+      counters.completedCashFlowMoneyRetries = [...input.attemptedCashFlowMoneyRetryIds]
+        .filter((balanceHistoryId) => !cashFlowMoneyRetriesAfter
+          .some((entry) => entry.balanceHistoryId === balanceHistoryId)).length;
+      counters.pendingCashFlowMoneyRetries = cashFlowMoneyRetriesAfter.length;
+
       await this.upsertSymbolSpecs(client, input);
       const positionIds = [...new Set(input.fetchedDeals.map((deal) => deal.positionId))];
+      const projectedPositions = new Map<string, CTraderDeal[]>();
       if (positionIds.length > 0) {
         const stored = await client.query<StoredExecutionRow>(
           `SELECT external_position_id, raw_payload
@@ -1366,20 +2188,19 @@ export class CTraderSyncEngine {
            ORDER BY executed_at ASC, external_execution_id::numeric ASC`,
           [input.connection.id, positionIds],
         );
-        const grouped = new Map<string, CTraderDeal[]>();
         for (const row of stored.rows) {
           const parsed = parseDeals({ deal: [row.raw_payload], hasMore: false }).deals[0];
           if (!parsed) continue;
-          const group = grouped.get(row.external_position_id) ?? [];
+          const group = projectedPositions.get(row.external_position_id) ?? [];
           group.push(parsed);
-          grouped.set(row.external_position_id, group);
+          projectedPositions.set(row.external_position_id, group);
         }
         const lightById = new Map(input.lightSymbols.map((symbol) => [symbol.symbolId, symbol]));
         const specById = new Map(input.symbolSpecs.map((spec) => [spec.symbolId, spec]));
         const categories = new Map(input.categories.map((category) => [category.id, category]));
         const classes = new Map(input.assetClasses.map((assetClass) => [assetClass.id, assetClass]));
         for (const positionId of positionIds) {
-          const deals = grouped.get(positionId);
+          const deals = projectedPositions.get(positionId);
           if (!deals || deals.length === 0) {
             throw new CTraderSyncError("POSITION_EXECUTIONS_MISSING", `No stored executions exist for position ${positionId}`, false);
           }
@@ -1398,10 +2219,42 @@ export class CTraderSyncEngine {
             accountMoneyDigits: input.trader.moneyDigits,
             timeZone: this.config.cTrader.tradingTimeZone,
           });
+          if (await this.stageLiveReconciliation(client, input, projection)) {
+            counters.positionsProjected += 1;
+            continue;
+          }
           await this.upsertProjection(client, input, projection, counters);
           counters.positionsProjected += 1;
         }
       }
+
+      const exactMoneyRetriesAfter = reconcileExactMoneyRetryQueue({
+        previous: input.exactMoneyRetriesBefore,
+        attemptedExecutionIds: input.attemptedExactMoneyRetryIds,
+        projectedPositions,
+        discoveredMissing: missingCloseMoneyExecutions.rows.flatMap((row) => {
+          const executionTimestamp = new Date(row.executed_at).getTime();
+          return safeTimestamp(executionTimestamp) === null ? [] : [{
+            executionId: row.external_execution_id,
+            positionId: row.external_position_id,
+            executionTimestamp,
+          }];
+        }),
+        observedAt: input.syncedThroughTimestamp,
+      });
+      counters.completedExactMoneyRetries = [...input.attemptedExactMoneyRetryIds]
+        .filter((executionId) => !exactMoneyRetriesAfter.some((entry) => entry.executionId === executionId)).length;
+      counters.pendingExactMoneyRetries = exactMoneyRetriesAfter.length;
+
+      const priorLastDealTimestamp = safeTimestamp(input.cursorBefore.lastDealTimestamp);
+      const fetchedLastDeal = input.fetchedDeals.at(-1) ?? null;
+      const fetchedAdvancesLastDeal = fetchedLastDeal !== null
+        && (priorLastDealTimestamp === null || fetchedLastDeal.executionTimestamp >= priorLastDealTimestamp);
+      const priorLastCashFlowTimestamp = safeTimestamp(input.cursorBefore.lastCashFlowTimestamp);
+      const fetchedLastCashFlow = input.fetchedCashFlows.at(-1) ?? null;
+      const fetchedAdvancesLastCashFlow = fetchedLastCashFlow !== null
+        && (priorLastCashFlowTimestamp === null
+          || fetchedLastCashFlow.changeBalanceTimestamp >= priorLastCashFlowTimestamp);
 
       const cursorAfter = {
         version: 1,
@@ -1410,22 +2263,49 @@ export class CTraderSyncEngine {
         syncedThroughTimestamp: input.syncedThroughTimestamp,
         cashFlowHistoryComplete: true,
         cashFlowSyncedThroughTimestamp: input.syncedThroughTimestamp,
-        lastCashFlowTimestamp: input.fetchedCashFlows.at(-1)?.changeBalanceTimestamp
-          ?? safeTimestamp(input.cursorBefore.lastCashFlowTimestamp),
-        lastCashFlowId: input.fetchedCashFlows.at(-1)?.balanceHistoryId
-          ?? (typeof input.cursorBefore.lastCashFlowId === "string" ? input.cursorBefore.lastCashFlowId : null),
-        lastDealTimestamp: input.fetchedDeals.at(-1)?.executionTimestamp
-          ?? safeTimestamp(input.cursorBefore.lastDealTimestamp),
-        lastDealId: input.fetchedDeals.at(-1)?.dealId
-          ?? (typeof input.cursorBefore.lastDealId === "string" ? input.cursorBefore.lastDealId : null),
+        exactMoneyRetryQueueVersion: EXACT_MONEY_RETRY_QUEUE_VERSION,
+        exactMoneyRetries: exactMoneyRetriesAfter,
+        cashFlowMoneyRetryQueueVersion: CASH_FLOW_MONEY_RETRY_QUEUE_VERSION,
+        cashFlowMoneyRetries: cashFlowMoneyRetriesAfter,
+        lastCashFlowTimestamp: fetchedAdvancesLastCashFlow
+          ? fetchedLastCashFlow.changeBalanceTimestamp
+          : priorLastCashFlowTimestamp,
+        lastCashFlowId: fetchedAdvancesLastCashFlow
+          ? fetchedLastCashFlow.balanceHistoryId
+          : (typeof input.cursorBefore.lastCashFlowId === "string" ? input.cursorBefore.lastCashFlowId : null),
+        lastDealTimestamp: fetchedAdvancesLastDeal
+          ? fetchedLastDeal.executionTimestamp
+          : priorLastDealTimestamp,
+        lastDealId: fetchedAdvancesLastDeal
+          ? fetchedLastDeal.dealId
+          : (typeof input.cursorBefore.lastDealId === "string" ? input.cursorBefore.lastDealId : null),
       };
       const metadata = {
         registrationTimestamp: input.registrationTimestamp,
         depositAssetId: input.trader.depositAssetId,
         accountCurrency,
         accountMoneyDigits: input.trader.moneyDigits,
+        accountBalance: input.trader.moneyDigits === null
+          ? null
+          : decimalFromScaledInteger(input.trader.balance, input.trader.moneyDigits),
+        accountBalanceRawUnits: input.trader.balance.toString(),
+        accountBalanceVersion: input.trader.balanceVersion?.toString() ?? null,
+        accountBalanceMoneyDigits: input.trader.moneyDigits,
+        accountBalanceAsOf: new Date(input.traderObservedAt).toISOString(),
+        accountBalanceSource: "ProtoOATrader",
+        accountBalanceScalingStatus: input.trader.moneyDigits === null
+          ? "money_digits_unavailable"
+          : "exact",
         accountCashFlowHistoryComplete: true,
+        accountCashFlowHistoryStartTimestamp: input.registrationTimestamp,
+        accountCashFlowSyncedThroughTimestamp: input.syncedThroughTimestamp,
         accountCashFlowPositionAttribution: "not_provided_by_ctrader",
+        accountCashFlowMonetaryScaleComplete: unscaledAccountCashFlows === 0
+          && cashFlowMoneyRetriesAfter.length === 0,
+        accountCashFlowTotalRows: totalAccountCashFlows,
+        accountCashFlowScaledRows: scaledAccountCashFlows,
+        accountCashFlowUnscaledRows: unscaledAccountCashFlows,
+        accountCashFlowPendingScaleRetries: cashFlowMoneyRetriesAfter.length,
         lastErrorCode: null,
         lastErrorMessage: null,
         reauthRequired: false,
@@ -1502,13 +2382,294 @@ export class CTraderSyncEngine {
     }
   }
 
+  private projectionBrokerData(
+    input: OfficialProjectionContext,
+    projection: CTraderTradeProjection,
+  ): Record<string, unknown> {
+    return {
+      provider: "ctrader",
+      connectionMode: "official",
+      readOnly: true,
+      environment: input.connection.provider_environment,
+      ctidTraderAccountId: input.connection.external_account_id,
+      positionId: projection.positionId,
+      symbolId: projection.symbolId,
+      providerTradeDate: projection.tradeDate,
+      providerTradeDateTimeZone: this.config.cTrader.tradingTimeZone,
+      openedVolumeCents: projection.openedVolumeCents,
+      closedVolumeCents: projection.closedVolumeCents,
+      openVolumeCents: projection.openVolumeCents,
+      quantityProjection: {
+        version: 1,
+        value: projection.quantityLots,
+        unit: "lots",
+        lots: projection.quantityLots,
+        baseUnits: volumeCentsToUnits(BigInt(projection.openedVolumeCents)),
+        volumeScale: "unit_cents",
+        source: "provider_filled_volume",
+      },
+      grossProfit: projection.grossProfit,
+      commission: projection.commission,
+      swap: projection.swap,
+      pnlConversionFee: projection.pnlConversionFee,
+      realizedEvents: projection.realizedEvents,
+      pnlMethod: projection.realizedPnlComplete
+        ? "provider_close_detail_money_digits"
+        : BigInt(projection.closedVolumeCents) > 0n
+          ? "partial_provider_close_detail_unavailable"
+          : "not_realized",
+      pnlAuthority: projection.pnl !== null ? "provider" : "provider_unavailable",
+      reconciledManualPnlPreserved: false,
+      pnlComponentsCoverage: {
+        version: 1,
+        source: "ProtoOAClosePositionDetail",
+        scope: "realized_closing_deals",
+        tradeLevelExact: projection.realizedPnlComplete,
+        grossProfit: projection.realizedPnlComplete,
+        brokerCommission: projection.realizedPnlComplete,
+        swap: projection.realizedPnlComplete,
+        pnlConversionFee: projection.realizedPnlComplete,
+        formula: "grossProfit + swap + commission - pnlConversionFee",
+        otherAccountCashFlowsIncluded: false,
+        otherAccountCashFlowsAttribution: "not_provided_by_position",
+      },
+      accountCurrency: this.accountCurrency(input.trader, input.assets),
+      accountMoneyDigits: input.trader.moneyDigits,
+      classification: projection.classification,
+    };
+  }
+
+  /**
+   * Official full-history replay must use the same reviewed duplicate boundary
+   * as ongoing MCP sync.  A plausible manual journal is staged and the new
+   * broker row is withheld until the user chooses link/separate/reject.  No
+   * confidence level auto-merges financial or psychology data.
+   */
+  private async stageLiveReconciliation(
+    client: PoolClient,
+    input: OfficialProjectionContext,
+    projection: CTraderTradeProjection,
+  ): Promise<boolean> {
+    const connection = input.connection;
+    const externalKey = `position:${projection.positionId}`;
+    const tombstone = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM ctrader_trade_tombstones
+         WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+       ) AS exists`,
+      [connection.user_id, connection.id, externalKey],
+    );
+    if (tombstone.rows[0]?.exists) return false;
+
+    const prior = await client.query<{ status: string }>(
+      `SELECT status FROM ctrader_live_reconciliation_candidates
+       WHERE user_id=$1 AND broker_connection_id=$2 AND external_position_id=$3
+       LIMIT 1`,
+      [connection.user_id, connection.id, projection.positionId],
+    );
+    if (prior.rows[0] && prior.rows[0].status !== "pending") return false;
+
+    const broker = await client.query<{ id: string; row_version: number; deleted_at: Date | string | null }>(
+      `SELECT id, row_version, deleted_at FROM trades
+       WHERE user_id=$1 AND broker_connection_id=$2 AND external_trade_key=$3
+       LIMIT 1`,
+      [connection.user_id, connection.id, externalKey],
+    );
+    const brokerRow = broker.rows[0] ?? null;
+    if (brokerRow?.deleted_at) return false;
+
+    const manualRows = (await client.query<OfficialLiveManualTradeRow>(
+      `SELECT manual.id, manual.row_version, manual.deleted_at,
+              manual.symbol, manual.direction, manual.entry_price::text,
+              manual.exit_price::text, manual.quantity::text, manual.pnl::text,
+              manual.trade_date, manual.entry_at, manual.exit_at,
+              manual.strategy, manual.emotion, manual.notes,
+              manual.psychology, manual.custom_fields,
+              (SELECT count(*) FROM file_objects file
+               WHERE file.user_id=manual.user_id AND file.trade_id=manual.id
+                 AND file.deleted_at IS NULL) AS screenshot_count
+       FROM trades manual
+       WHERE manual.user_id=$1
+         AND manual.broker_connection_id IS NULL
+         AND manual.external_trade_key IS NULL
+         AND manual.source_system <> 'ctrader'
+         AND manual.trade_date BETWEEN $2::date - 1 AND $2::date + 1
+         AND (
+           ($3::uuid IS NOT NULL AND manual.account_id=$3::uuid)
+           OR ($3::uuid IS NULL AND $4::text IS NOT NULL AND manual.legacy_account_id=$4::text)
+         )
+       ORDER BY manual.created_at ASC, manual.id ASC
+       LIMIT 101`,
+      [
+        connection.user_id,
+        projection.tradeDate,
+        connection.mapped_account_id,
+        connection.legacy_mapped_account_id,
+      ],
+    )).rows;
+    if (manualRows.length > 100) {
+      throw new CTraderSyncError(
+        "CTRADER_LIVE_RECONCILIATION_LIMIT_EXCEEDED",
+        "Too many manual trades match the cTrader trade date; narrow the journal before syncing",
+        false,
+      );
+    }
+
+    const identityMatches = (manual: OfficialLiveManualTradeRow): boolean =>
+      reconciliationSymbol(manual.symbol) === reconciliationSymbol(projection.symbol)
+      && manual.direction === projection.direction;
+    const sameDate = manualRows.filter((manual) =>
+      identityMatches(manual) && reconciliationDate(manual.trade_date) === projection.tradeDate);
+    const strict = sameDate.filter((manual) =>
+      decimalWithin(manual.entry_price, projection.entryPrice, 0.0005, 0.00000001)
+      && decimalWithin(manual.exit_price, projection.exitPrice, 0.0005, 0.00000001)
+      && decimalWithin(manual.quantity, projection.quantityLots, 0.005, 0.00000001)
+      && (manual.pnl === null || projection.pnl === null
+        || decimalWithin(manual.pnl, projection.pnl, 0.005, 0.01))
+      && (manual.entry_at === null
+        || Math.abs(new Date(manual.entry_at).getTime() - Date.parse(projection.entryAt)) <= 300_000)
+      && (manual.exit_at === null || projection.exitAt === null
+        || Math.abs(new Date(manual.exit_at).getTime() - Date.parse(projection.exitAt)) <= 300_000));
+    const adjacent = sameDate.length > 0 ? [] : manualRows.filter((manual) => {
+      const days = dateDistanceDays(manual.trade_date, projection.tradeDate);
+      return identityMatches(manual) && days !== null && days <= 1
+        && decimalWithin(manual.entry_price, projection.entryPrice, 0.0005, 0.00000001)
+        && decimalWithin(manual.exit_price, projection.exitPrice, 0.0005, 0.00000001)
+        && decimalWithin(manual.quantity, projection.quantityLots, 0.005, 0.00000001);
+    });
+    const choices = sameDate.length > 0 ? sameDate : adjacent;
+    if (choices.length === 0) {
+      await client.query(
+        `DELETE FROM ctrader_live_reconciliation_candidates
+         WHERE user_id=$1 AND broker_connection_id=$2 AND external_position_id=$3
+           AND status='pending'`,
+        [connection.user_id, connection.id, projection.positionId],
+      );
+      return false;
+    }
+
+    const activeStrict = strict.filter((manual) => manual.deleted_at === null);
+    const deletedStrict = strict.filter((manual) => manual.deleted_at !== null);
+    const selected = strict.length === 1 ? strict[0] ?? null : null;
+    const classification = brokerRow !== null
+      ? "existing_pair"
+      : activeStrict.length === 1 && strict.length === 1
+        ? "high_confidence"
+        : deletedStrict.length === 1 && strict.length === 1
+          ? "deleted_manual"
+          : "ambiguous";
+    const reasons = classification === "high_confidence"
+      ? ["unique_strict_manual_match", "same_account", "official_provider_values_within_strict_tolerance"]
+      : classification === "deleted_manual"
+        ? ["unique_strict_deleted_manual_match", "deleted_trade_requires_explicit_suppression_review"]
+        : adjacent.length > 0
+          ? ["possible_manual_match_within_one_local_day", "explicit_manual_selection_required"]
+          : ["possible_manual_duplicate", "explicit_manual_selection_required"];
+    const choiceData = choices.map((manual) => ({
+      id: manual.id,
+      version: manual.row_version,
+      deleted: manual.deleted_at !== null,
+      symbol: manual.symbol,
+      direction: manual.direction,
+      date: reconciliationDate(manual.trade_date),
+      hasStrategy: Boolean(manual.strategy?.trim()),
+      hasEmotion: Boolean(manual.emotion?.trim()),
+      hasPsychology: Object.keys(objectValue(manual.psychology)).length > 0,
+      hasNotes: Boolean(manual.notes?.trim()),
+      hasCustomFields: Object.keys(objectValue(manual.custom_fields)).length > 0,
+      screenshotCount: Number(manual.screenshot_count ?? 0),
+    }));
+    const brokerData = this.projectionBrokerData(input, projection);
+    const exactMoneyRepairPending = BigInt(projection.closedVolumeCents) > 0n
+      && !projection.realizedPnlComplete;
+    const projectedTrade = {
+      positionId: projection.positionId,
+      symbol: projection.symbol,
+      asset: projection.asset,
+      direction: projection.direction,
+      entryPrice: projection.entryPrice,
+      exitPrice: projection.exitPrice,
+      quantity: projection.quantityLots,
+      quantityUnit: "lots",
+      quantityLots: projection.quantityLots,
+      quantityBaseUnits: volumeCentsToUnits(BigInt(projection.openedVolumeCents)),
+      pnl: projection.pnl,
+      isOpen: projection.isOpen,
+      tradeDate: projection.tradeDate,
+      entryAt: projection.entryAt,
+      exitAt: projection.exitAt,
+      entryTime: projection.entryTime,
+      exitTime: projection.exitTime,
+      brokerData,
+    };
+    // Keep every still-incomplete close projection in the same non-resolvable
+    // repair state, including a replay that again omits close moneyDigits.
+    // Only an authoritative exact projection receives its normal fingerprint,
+    // which guarantees the upsert clears this marker after self-healing.
+    const fingerprint = exactMoneyRepairPending
+      ? Buffer.alloc(32, 0xff)
+      : createHash("sha256").update(json(projectedTrade)).digest();
+    await client.query(
+      `INSERT INTO ctrader_live_reconciliation_candidates (
+         id, user_id, broker_connection_id, external_position_id,
+         external_trade_key, manual_trade_id, manual_row_version,
+         broker_trade_id, broker_row_version, classification, confidence,
+         reasons, differences, candidate_data, projected_trade,
+         projection_fingerprint, status
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,'{}'::jsonb,$13::jsonb,
+         $14::jsonb,$15,'pending'
+       )
+       ON CONFLICT (user_id, broker_connection_id, external_position_id)
+       DO UPDATE SET
+         manual_trade_id=EXCLUDED.manual_trade_id,
+         manual_row_version=EXCLUDED.manual_row_version,
+         broker_trade_id=EXCLUDED.broker_trade_id,
+         broker_row_version=EXCLUDED.broker_row_version,
+         classification=EXCLUDED.classification,
+         confidence=EXCLUDED.confidence,
+         reasons=EXCLUDED.reasons,
+         differences=EXCLUDED.differences,
+         candidate_data=EXCLUDED.candidate_data,
+         projected_trade=EXCLUDED.projected_trade,
+         projection_fingerprint=EXCLUDED.projection_fingerprint,
+         row_version=ctrader_live_reconciliation_candidates.row_version+1
+       WHERE ctrader_live_reconciliation_candidates.status='pending'
+         AND (
+           ctrader_live_reconciliation_candidates.projection_fingerprint IS DISTINCT FROM EXCLUDED.projection_fingerprint
+           OR ctrader_live_reconciliation_candidates.manual_trade_id IS DISTINCT FROM EXCLUDED.manual_trade_id
+           OR ctrader_live_reconciliation_candidates.manual_row_version IS DISTINCT FROM EXCLUDED.manual_row_version
+           OR ctrader_live_reconciliation_candidates.broker_trade_id IS DISTINCT FROM EXCLUDED.broker_trade_id
+           OR ctrader_live_reconciliation_candidates.broker_row_version IS DISTINCT FROM EXCLUDED.broker_row_version
+           OR ctrader_live_reconciliation_candidates.classification IS DISTINCT FROM EXCLUDED.classification
+         )`,
+      [
+        randomUUID(), connection.user_id, connection.id, projection.positionId, externalKey,
+        selected?.id ?? null, selected?.row_version ?? null,
+        brokerRow?.id ?? null, brokerRow?.row_version ?? null,
+        classification,
+        classification === "high_confidence" || classification === "deleted_manual" ? 100 : adjacent.length === 1 ? 60 : 40,
+        json(reasons),
+        json({
+          manualChoices: choiceData,
+          preservedFields: [
+            "id", "created_at", "trade_date", "strategy", "emotion", "notes", "tags",
+            "psychology", "custom_fields", "stop_loss", "take_profit", "files",
+          ],
+          ...(exactMoneyRepairPending ? {
+            exactMoneyRepairPending: true,
+            exactMoneyRepairReason: "close_position_detail_money_digits_unavailable",
+          } : {}),
+        }),
+        json(projectedTrade), fingerprint,
+      ],
+    );
+    return brokerRow === null;
+  }
+
   private async upsertProjection(
     client: PoolClient,
-    input: {
-      connection: SyncConnectionRow;
-      trader: CTraderTraderMetadata;
-      assets: CTraderAsset[];
-    },
+    input: OfficialProjectionContext,
     projection: CTraderTradeProjection,
     counters: CTraderSyncCounters,
   ): Promise<void> {
@@ -1543,44 +2704,7 @@ export class CTraderSyncEngine {
       counters.archivedTradesPreserved += 1;
       return;
     }
-    const providerBrokerData = {
-      provider: "ctrader",
-      connectionMode: "official",
-      readOnly: true,
-      environment: input.connection.provider_environment,
-      ctidTraderAccountId: input.connection.external_account_id,
-      positionId: projection.positionId,
-      symbolId: projection.symbolId,
-      providerTradeDate: projection.tradeDate,
-      providerTradeDateTimeZone: this.config.cTrader.tradingTimeZone,
-      openedVolumeCents: projection.openedVolumeCents,
-      closedVolumeCents: projection.closedVolumeCents,
-      openVolumeCents: projection.openVolumeCents,
-      grossProfit: projection.grossProfit,
-      commission: projection.commission,
-      swap: projection.swap,
-      pnlConversionFee: projection.pnlConversionFee,
-      realizedEvents: projection.realizedEvents,
-      pnlMethod: projection.realizedPnlComplete
-        ? "provider_close_detail_money_digits"
-        : projection.realizedEvents.length > 0 ? "partial_provider_close_detail_unavailable" : "not_realized",
-      pnlComponentsCoverage: {
-        version: 1,
-        source: "ProtoOAClosePositionDetail",
-        scope: "realized_closing_deals",
-        tradeLevelExact: projection.realizedPnlComplete,
-        grossProfit: projection.realizedPnlComplete,
-        brokerCommission: projection.realizedPnlComplete,
-        swap: projection.realizedPnlComplete,
-        pnlConversionFee: projection.realizedPnlComplete,
-        formula: "grossProfit + swap + commission - pnlConversionFee",
-        otherAccountCashFlowsIncluded: false,
-        otherAccountCashFlowsAttribution: "not_provided_by_position",
-      },
-      accountCurrency: this.accountCurrency(input.trader, input.assets),
-      accountMoneyDigits: input.trader.moneyDigits,
-      classification: projection.classification,
-    };
+    const providerBrokerData = this.projectionBrokerData(input, projection);
     const authority = mergeOfficialProjectionAuthority({
       existing: previous === null ? null : {
         pnl: previous.pnl,

@@ -22,6 +22,10 @@ const historicalImportSchema = z.object({
   clientRequestId: clientRequestIdSchema,
 }).strict();
 const reconciliationQuerySchema = z.object({ importId: historicalImportIdSchema }).strict();
+const accountCashFlowQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+  cursor: z.string().min(1).max(2_048).optional(),
+}).strict();
 const resolveCandidateSchema = z.object({
   action: z.enum(["link_manual", "publish_separate", "suppress_deleted", "reject"]),
   version: z.number().int().min(1),
@@ -193,6 +197,22 @@ export async function registerCTraderRoutes(
       const id = connectionIdSchema.parse(request.params.id);
       reply.header("Cache-Control", "no-store");
       return enabledService().connectionStatus(request.auth!.user.id, id);
+    },
+  );
+
+  app.get<{ Params: { id: string }; Querystring: { limit?: string; cursor?: string } }>(
+    "/api/ctrader/connections/:id/cash-flows",
+    protectedRead,
+    async (request, reply) => {
+      const connectionId = connectionIdSchema.parse(request.params.id);
+      const query = accountCashFlowQuerySchema.parse(request.query);
+      reply.header("Cache-Control", "no-store");
+      return enabledService().listAccountCashFlows({
+        userId: request.auth!.user.id,
+        connectionId,
+        limit: query.limit,
+        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+      });
     },
   );
 

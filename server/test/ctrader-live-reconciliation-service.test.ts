@@ -91,13 +91,15 @@ type HarnessOptions = {
   historicalAuditDependency?: boolean;
   projection?: Record<string, unknown>;
   eventFailure?: boolean;
+  connectionMode?: "official" | "mcp_read";
+  exactMoneyRepairPending?: boolean;
 };
 
-function connectionRow() {
+function connectionRow(mode: "official" | "mcp_read" = "mcp_read") {
   return {
     id: connectionId,
     connected: true,
-    connection_mode: "mcp_read",
+    connection_mode: mode,
     external_account_id: "5050060",
     provider_environment: "live",
     account_label: "25K",
@@ -145,7 +147,15 @@ function liveHarness(options: HarnessOptions = {}) {
     confidence: classification === "ambiguous" ? 60 : 95,
     reasons: [classification === "ambiguous" ? "adjacent_local_date" : "unique_strict_manual_match"],
     differences: {},
-    candidate_data: { manualChoices: [advertisedManual] },
+    candidate_data: {
+      manualChoices: [advertisedManual],
+      ...(options.exactMoneyRepairPending === true
+        ? {
+            exactMoneyRepairPending: true,
+            exactMoneyRepairReason: "close_position_detail_money_digits_unavailable",
+          }
+        : {}),
+    },
     projected_trade: options.projection ?? projection,
     manual_trade_id: classification === "ambiguous" ? null : manualTradeId,
     manual_row_version: classification === "ambiguous" ? null : 4,
@@ -174,7 +184,7 @@ function liveHarness(options: HarnessOptions = {}) {
       return result(resolution ? [resolution] : []);
     }
     if (sql.includes("FROM broker_connections c") && sql.includes("LEFT JOIN LATERAL")) {
-      return result([connectionRow()]);
+      return result([connectionRow(options.connectionMode)]);
     }
     if (sql.includes("FROM ctrader_live_reconciliation_candidates candidate") && sql.includes("FOR UPDATE")) {
       return result([candidate]);
@@ -272,7 +282,7 @@ describe("cTrader live reconciliation service", () => {
       version: 1,
       status: "pending",
       classification: "high_confidence",
-      allowedActions: ["link_manual", "publish_separate", "reject"],
+      allowedActions: ["link_manual", "publish_separate"],
       manualTrade: expect.objectContaining({
         id: manualTradeId,
         hasStrategy: true,
@@ -305,6 +315,64 @@ describe("cTrader live reconciliation service", () => {
     expect(listQuery?.sql).not.toContain("CASE WHEN candidate.status='pending'");
   });
 
+  it("keeps an exact-money repair candidate pending but blocks every financial resolution", async () => {
+    const { service, queries } = liveHarness({
+      connectionMode: "official",
+      exactMoneyRepairPending: true,
+    });
+
+    const response = await service.listLiveReconciliationCandidates(userId, connectionId);
+
+    expect(response.candidates[0]).toMatchObject({
+      status: "pending",
+      allowedActions: [],
+    });
+    await expect(service.resolveLiveReconciliationCandidate(resolutionInput()))
+      .rejects.toMatchObject({
+        statusCode: 409,
+        code: "CTRADER_EXACT_MONEY_REPAIR_PENDING",
+      });
+    expect(queries.some(({ sql }) => sql.includes("UPDATE trades SET"))).toBe(false);
+    expect(queries.some(({ sql }) => sql.includes("UPDATE ctrader_live_reconciliation_candidates SET"))).toBe(false);
+    expect(queries.some(({ sql }) => sql.includes("INSERT INTO ctrader_live_reconciliation_resolutions"))).toBe(false);
+  });
+
+  it("does not offer nondeterministic reject for a withheld official history position", async () => {
+    const { service } = liveHarness({
+      connectionMode: "official",
+      projection: {
+        ...projection,
+        brokerData: {
+          ...projection.brokerData,
+          connectionMode: "official",
+        },
+      },
+    });
+
+    const response = await service.listLiveReconciliationCandidates(userId, connectionId);
+
+    expect(response.candidates[0]?.allowedActions).toEqual(["link_manual", "publish_separate"]);
+    await expect(service.resolveLiveReconciliationCandidate({
+      ...resolutionInput(),
+      action: "reject",
+    })).rejects.toMatchObject({ code: "RECONCILIATION_ACTION_INVALID" });
+  });
+
+  it("lets an official deleted-manual match publish separately instead of forcing suppression", async () => {
+    const { service } = liveHarness({
+      classification: "deleted_manual",
+      connectionMode: "official",
+      projection: {
+        ...projection,
+        brokerData: { ...projection.brokerData, connectionMode: "official" },
+      },
+    });
+
+    const response = await service.listLiveReconciliationCandidates(userId, connectionId);
+
+    expect(response.candidates[0]?.allowedActions).toEqual(["suppress_deleted", "publish_separate"]);
+  });
+
   it("links a high-confidence match without overwriting subjective fields, screenshots, or manual P&L", async () => {
     const { service, queries, events } = liveHarness();
 
@@ -327,6 +395,8 @@ describe("cTrader live reconciliation service", () => {
     expect(JSON.parse(String(update?.values[16]))).toMatchObject({
       provider: "ctrader",
       providerTradeDate: "2026-08-11",
+      pnlAuthority: "preserved_reconciled_manual",
+      reconciledManualPnlPreserved: true,
     });
     expect(update?.values.slice(17)).toEqual([manualTradeId, userId, 4]);
     expect(queries.some((entry) => entry.sql.includes("UPDATE file_objects"))).toBe(false);
@@ -339,6 +409,58 @@ describe("cTrader live reconciliation service", () => {
     expect(audit?.sql).toContain("CASE WHEN $5::text='link_manual'");
     expect(audit?.sql).toContain("'trade_date','stop_loss','take_profit'");
     expect(events.publish).toHaveBeenCalledTimes(2);
+  });
+
+  it("resolves an official exact-money candidate and makes broker net authoritative", async () => {
+    const officialProjection = {
+      ...projection,
+      quantity: "0.1",
+      quantityUnit: "lots",
+      quantityLots: "0.1",
+      quantityBaseUnits: "10000",
+      pnl: "9",
+      brokerData: {
+        provider: "ctrader",
+        connectionMode: "official",
+        pnlMethod: "provider_close_detail_money_digits",
+        pnlAuthority: "provider",
+        grossProfit: "10",
+        commission: "-1",
+        swap: "0",
+        pnlConversionFee: "0",
+        quantityProjection: {
+          version: 1,
+          value: "0.1",
+          unit: "lots",
+          lots: "0.1",
+          baseUnits: "10000",
+          volumeScale: "unit_cents",
+          source: "provider_filled_volume",
+        },
+      },
+    };
+    const { service, queries } = liveHarness({
+      connectionMode: "official",
+      projection: officialProjection,
+    });
+
+    await service.resolveLiveReconciliationCandidate(resolutionInput());
+
+    const candidateLock = queries.find(({ sql }) =>
+      sql.includes("FROM ctrader_live_reconciliation_candidates candidate")
+      && sql.includes("FOR UPDATE"));
+    expect(candidateLock?.sql).toContain("connection.connection_mode='official'");
+    expect(candidateLock?.sql).toContain("connection.oauth_scope='accounts'");
+    const update = queries.find(({ sql }) =>
+      sql.includes("UPDATE trades SET") && sql.includes("broker_connection_id=$1"));
+    expect(update?.values[9]).toBe("9");
+    expect(JSON.parse(String(update?.values[16]))).toMatchObject({
+      connectionMode: "official",
+      pnlAuthority: "provider",
+      grossProfit: "10",
+      commission: "-1",
+      quantityProjection: { unit: "lots", baseUnits: "10000" },
+    });
   });
 
   it("merges an already-published broker row into the manual ID and removes only the merge tombstone", async () => {
@@ -433,7 +555,7 @@ describe("cTrader live reconciliation service", () => {
   });
 
   it("canonically replays one decision and rejects reuse of its idempotency key for another payload", async () => {
-    const { service, queries } = liveHarness();
+    const { service, queries } = liveHarness({ classification: "existing_pair", brokerTrade: true });
     const input = resolutionInput({ action: "reject", manualTradeId: null });
 
     const first = await service.resolveLiveReconciliationCandidate(input);
@@ -477,7 +599,7 @@ describe("cTrader live reconciliation service", () => {
     expect(insert?.values[10]).toBe("103.40");
     expect(insert?.values[18]).toBe(connectionId);
 
-    const rejectHarness = liveHarness();
+    const rejectHarness = liveHarness({ classification: "existing_pair", brokerTrade: true });
     const rejected = await rejectHarness.service.resolveLiveReconciliationCandidate(
       resolutionInput({ action: "reject", manualTradeId: null }),
     );
