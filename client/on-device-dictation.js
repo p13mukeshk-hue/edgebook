@@ -24,6 +24,7 @@
   const MIN_INTERIM_CAPTURE_MS = 900;
   const MIN_MANUAL_CAPTURE_MS = 350;
   const SILENCE_HALLUCINATIONS = new Set(['you', 'thank you', 'thanks for watching', 'bye', 'goodbye']);
+  const MICROPHONE_STORAGE_KEY = 'edgebook.voice.inputDeviceId';
 
   function createController(options = {}) {
     const root = options.root || global;
@@ -40,6 +41,8 @@
     const showToast = options.showToast || (() => {});
     const onSessionChange = options.onSessionChange || (() => {});
     const cancelDailyAutosave = options.cancelDailyAutosave || (() => {});
+    const onMicrophonesChange = options.onMicrophonesChange || (() => {});
+    const storage = options.storage === undefined ? root.localStorage : options.storage;
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
 
@@ -48,6 +51,79 @@
     let workerState = 'idle';
     let workerRequest = 0;
     let modelProgress = 0;
+    let microphoneChoices = [];
+
+    function storedMicrophoneId() {
+      try { return String(storage?.getItem?.(MICROPHONE_STORAGE_KEY) || ''); }
+      catch { return ''; }
+    }
+
+    function saveMicrophoneId(deviceId = '') {
+      const value = String(deviceId || '');
+      try {
+        if (value) storage?.setItem?.(MICROPHONE_STORAGE_KEY, value);
+        else storage?.removeItem?.(MICROPHONE_STORAGE_KEY);
+      } catch {}
+      return value;
+    }
+
+    function microphoneConstraints(deviceId = storedMicrophoneId()) {
+      return {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      };
+    }
+
+    function cleanMicrophoneLabel(value) {
+      const label = String(value || '').replace(/\s+/g, ' ').trim();
+      return label ? label.slice(0, 120) : 'selected microphone';
+    }
+
+    async function updateMicrophoneChoices() {
+      if (!navigator?.mediaDevices?.enumerateDevices) return microphoneChoices;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        microphoneChoices = devices
+          .filter(device => device?.kind === 'audioinput' && device.deviceId)
+          .map((device, index) => ({ deviceId: String(device.deviceId), label: cleanMicrophoneLabel(device.label || `Microphone ${index + 1}`) }));
+        onMicrophonesChange(microphoneChoices.slice(), storedMicrophoneId());
+      } catch {}
+      return microphoneChoices;
+    }
+
+    async function openMicrophone(current) {
+      const preferredDeviceId = storedMicrophoneId();
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(preferredDeviceId), video: false });
+      } catch (error) {
+        const retryDefault = preferredDeviceId && (error?.name === 'NotFoundError' || error?.name === 'OverconstrainedError');
+        if (!retryDefault) throw error;
+        saveMicrophoneId('');
+        stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(''), video: false });
+      }
+      const track = stream.getAudioTracks?.()[0] || stream.getTracks?.()[0] || null;
+      if (!track || track.kind && track.kind !== 'audio') {
+        stream.getTracks?.().forEach(item => item.stop?.());
+        const error = new Error('No live audio track was returned.');
+        error.name = 'NotFoundError';
+        throw error;
+      }
+      current.stream = stream;
+      current.browserTrack = track;
+      current.microphoneLabel = cleanMicrophoneLabel(track.label);
+      void updateMicrophoneChoices();
+      return track;
+    }
+
+    async function ensureMicrophone(current) {
+      const track = current.browserTrack;
+      if (current.stream && track && track.readyState !== 'ended') return track;
+      return openMicrophone(current);
+    }
 
     function setSession(value) {
       session = value;
@@ -187,7 +263,7 @@
         try { track.stop(); } catch {}
       }
       try { current.audioContext?.close(); } catch {}
-      Object.assign(current, { processor: null, source: null, analyser: null, silentGain: null, stream: null, audioContext: null });
+      Object.assign(current, { processor: null, source: null, analyser: null, silentGain: null, stream: null, browserTrack: null, audioContext: null });
     }
 
     function releaseRecognition(current, abort = false) {
@@ -313,18 +389,35 @@
     function scheduleBrowserRestart(current) {
       if (session !== current || current.stopRequested || current.engine !== 'browser') return;
       unschedule(current.restartTimer);
-      current.restartTimer = schedule(() => {
+      current.restartTimer = schedule(async () => {
         if (session !== current || current.stopRequested || current.engine !== 'browser') return;
         current.phase = 'requesting-microphone';
         refreshControls();
         setStatus(current.target, 'Reconnecting live Chrome transcription…', 'is-listening');
-        try { current.recognition?.start(); }
+        try {
+          const track = await ensureMicrophone(current);
+          if (session !== current || current.stopRequested || current.engine !== 'browser') return;
+          current.recognition?.start(track);
+        }
         catch { switchToWhisper(current, 'browser-restart-failed'); }
       }, BROWSER_RESTART_DELAY_MS);
     }
 
-    function startBrowserRecognition(current) {
+    async function startBrowserRecognition(current) {
       if (session !== current || current.stopRequested || typeof SpeechRecognitionClass !== 'function') return false;
+      let track;
+      try { track = await ensureMicrophone(current); }
+      catch (error) {
+        if (session !== current) return false;
+        const code = error?.name === 'NotAllowedError' || error?.name === 'SecurityError'
+          ? 'not-allowed'
+          : error?.name === 'NotFoundError' || error?.name === 'OverconstrainedError' ? 'audio-capture' : 'aborted';
+        const message = errorMessage(code);
+        finish(current, message, '');
+        showToast(message, 'error');
+        return false;
+      }
+      if (session !== current || current.stopRequested) return false;
       let recognition;
       try { recognition = new SpeechRecognitionClass(); }
       catch { switchToWhisper(current, 'browser-constructor-failed'); return false; }
@@ -341,11 +434,11 @@
         current.browserStarted = true;
         current.lastBrowserError = '';
         refreshControls();
-        setStatus(current.target, 'Chrome live transcription is listening… speak naturally.', 'is-listening');
+        setStatus(current.target, `Chrome live transcription is listening through ${current.microphoneLabel}… speak naturally.`, 'is-listening');
       };
       recognition.onaudiostart = () => {
         if (session !== current || current.engine !== 'browser') return;
-        setStatus(current.target, 'Listening… your words will appear here live.', 'is-listening');
+        setStatus(current.target, `Listening through ${current.microphoneLabel}… your words will appear here live.`, 'is-listening');
       };
       recognition.onspeechstart = () => {
         if (session !== current || current.engine !== 'browser') return;
@@ -396,8 +489,8 @@
         scheduleBrowserRestart(current);
       };
       refreshControls();
-      setStatus(current.target, 'Connecting to Chrome live transcription…', 'is-listening');
-      try { recognition.start(); }
+      setStatus(current.target, `Connecting ${current.microphoneLabel} to Chrome live transcription…`, 'is-listening');
+      try { recognition.start(track); }
       catch { switchToWhisper(current, 'browser-start-failed'); return false; }
       return true;
     }
@@ -445,9 +538,10 @@
       if (session !== current || current.stopRequested) return;
       current.phase = 'requesting-microphone';
       refreshControls();
-      setStatus(current.target, 'Requesting microphone permission…', 'is-listening');
+      setStatus(current.target, 'Connecting the selected microphone…', 'is-listening');
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+        await ensureMicrophone(current);
+        const stream = current.stream;
         if (session !== current || current.stopRequested) {
           stream.getTracks().forEach(track => track.stop());
           return;
@@ -468,7 +562,7 @@
         Object.assign(current, { stream, audioContext, source, analyser, processor, silentGain, sampleRate: audioContext.sampleRate, phase: 'listening' });
         processor.onaudioprocess = event => ingestAudio(current, event.inputBuffer.getChannelData(0));
         refreshControls();
-        setStatus(current.target, 'Listening privately on this device ··· audio never leaves this device.', 'is-listening');
+        setStatus(current.target, `Listening through ${current.microphoneLabel} privately on this device ··· audio never leaves this device.`, 'is-listening');
       } catch (error) {
         if (session !== current) return;
         const code = error?.name === 'NotAllowedError' || error?.name === 'SecurityError'
@@ -667,6 +761,8 @@
         restartTimer: null,
         recognition: null,
         stream: null,
+        browserTrack: null,
+        microphoneLabel: 'selected microphone',
         audioContext: null,
         source: null,
         analyser: null,
@@ -712,7 +808,7 @@
       setSession(current);
       element.addEventListener('input', current.onUserInput);
       refreshControls();
-      if (support.engine === 'browser') startBrowserRecognition(current);
+      if (support.engine === 'browser') await startBrowserRecognition(current);
       else {
         setStatus(target, 'Preparing private on-device Whisper fallback…', 'is-listening');
         ensureWorker(current);
@@ -727,6 +823,28 @@
       modelProgress = 0;
     }
 
+    async function discoverMicrophones({ requestPermission = false } = {}) {
+      let temporaryStream = null;
+      if (requestPermission && !session && navigator?.mediaDevices?.getUserMedia) {
+        const selected = storedMicrophoneId();
+        try { temporaryStream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(selected), video: false }); }
+        catch (error) {
+          if (!selected || (error?.name !== 'NotFoundError' && error?.name !== 'OverconstrainedError')) throw error;
+          saveMicrophoneId('');
+          temporaryStream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(''), video: false });
+        }
+      }
+      try { return await updateMicrophoneChoices(); }
+      finally { temporaryStream?.getTracks?.().forEach(track => track.stop?.()); }
+    }
+
+    function selectMicrophone(deviceId = '') {
+      const selected = saveMicrophoneId(deviceId);
+      if (session) stop({ quiet: true, immediate: true });
+      onMicrophonesChange(microphoneChoices.slice(), selected);
+      return selected;
+    }
+
     return Object.freeze({
       targetSpec,
       controlHtml,
@@ -734,6 +852,10 @@
       capability,
       errorMessage,
       joinText,
+      discoverMicrophones,
+      microphoneChoices: () => microphoneChoices.slice(),
+      selectedMicrophoneId: storedMicrophoneId,
+      selectMicrophone,
       toggle,
       stop,
       refreshControls,

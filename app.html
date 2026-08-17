@@ -1881,6 +1881,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
             <div class="s-nav-group">
               <div class="s-nav-group-label">General</div>
               <div class="s-nav-item active" id="sn-display" onclick="showSPanel('display',this)"><i class="fa-solid fa-paintbrush"></i> Display</div>
+              <div class="s-nav-item" id="sn-voice" onclick="showSPanel('voice',this)"><i class="fa-solid fa-microphone-lines"></i> Voice dictation</div>
               <div class="s-nav-item" id="sn-accounts" onclick="showSPanel('accounts',this)"><i class="fa-solid fa-wallet"></i> Accounts</div>
               <div class="s-nav-item" id="sn-symbols" onclick="showSPanel('symbols',this)"><i class="fa-solid fa-tag"></i> Symbols</div>
             </div>
@@ -1921,6 +1922,20 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Landing page</div><div class="s-row-desc">Page shown on login</div></div><div class="s-row-right"><select class="s-select" id="pref-landing" onchange="savePref('landingPage',this.value)"><option value="dashboard">Dashboard</option><option value="journal">Journal</option><option value="analytics">Analytics</option></select></div></div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Rows per page</div></div><div class="s-row-right"><select class="s-select" id="pref-rows" onchange="savePref('rowsPerPage',parseInt(this.value))"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option><option value="100">100</option></select></div></div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Compact table rows</div></div><div class="s-row-right"><label class="toggle"><input type="checkbox" id="pref-compact" onchange="savePref('compactTable',this.checked);applyCompact()"><div class="toggle-track"></div><div class="toggle-thumb"></div></label></div></div>
+              </div>
+            </div>
+
+            <!-- VOICE DICTATION -->
+            <div id="sp-voice" class="settings-panel">
+              <div class="s-panel-head"><div class="s-panel-head-left"><div class="s-panel-title">Voice dictation</div><div class="s-panel-sub">Choose the microphone Edgebook sends to both Chrome live transcription and its private fallback.</div></div></div>
+              <div class="s-section">
+                <div class="s-section-label">Audio input</div>
+                <div class="s-row"><div class="s-row-left"><div class="s-row-label">Microphone</div><div class="s-row-desc">The selected live audio track is used consistently in Log trade, Daily Journal, mood notes, heatmap notes and custom fields.</div></div><div class="s-row-right" style="gap:8px"><select class="s-select" id="voice-input-device" aria-label="Voice dictation microphone" onchange="setVoiceInputDevice(this.value)"><option value="">System default microphone</option></select><button type="button" class="btn-ghost" onclick="refreshVoiceInputDevices()" style="white-space:nowrap"><i class="fa-solid fa-rotate"></i> Detect</button></div></div>
+                <div id="voice-input-status" role="status" aria-live="polite" style="font-size:11px;line-height:1.5;color:var(--text3);padding:2px 0 8px">Click Detect once to allow microphone access and list this computer's inputs.</div>
+              </div>
+              <div class="s-section" style="margin-top:16px">
+                <div class="s-section-label">How it works</div>
+                <div style="font-size:12px;line-height:1.65;color:var(--text2)">Edgebook opens this microphone once, passes the same track into Chrome's live speech recognition, and keeps that track if it must switch to private on-device Whisper. The status below each microphone button shows the input currently in use.</div>
               </div>
             </div>
 
@@ -7101,10 +7116,50 @@ const dictationController=globalThis.createEdgebookDictationController({
   escapeHtml,
   showToast,
   onSessionChange(value){dictationSession=value;},
+  onMicrophonesChange(choices,selected){renderVoiceInputChoices(choices,selected);},
   cancelDailyAutosave(){
     if(typeof djAutoSaveTimer!=='undefined'){clearTimeout(djAutoSaveTimer);djAutoSaveTimer=null;}
   },
 });
+function renderVoiceInputChoices(choices=[],selected=''){
+  const select=document.getElementById('voice-input-device');
+  if(!select)return;
+  const wanted=String(selected||dictationController?.selectedMicrophoneId?.()||'');
+  select.replaceChildren();
+  const automatic=document.createElement('option');
+  automatic.value='';automatic.textContent='System default microphone';select.appendChild(automatic);
+  for(const choice of choices){
+    const option=document.createElement('option');
+    option.value=String(choice?.deviceId||'');
+    option.textContent=String(choice?.label||'Microphone');
+    if(option.value)select.appendChild(option);
+  }
+  if(wanted&&!Array.from(select.options).some(option=>option.value===wanted)){
+    const unavailable=document.createElement('option');
+    unavailable.value=wanted;unavailable.textContent='Previously selected microphone';select.appendChild(unavailable);
+  }
+  select.value=wanted;
+}
+async function refreshVoiceInputDevices(){
+  const status=document.getElementById('voice-input-status');
+  if(status)status.textContent='Detecting microphones…';
+  try{
+    const choices=await dictationController.discoverMicrophones({requestPermission:true});
+    renderVoiceInputChoices(choices,dictationController.selectedMicrophoneId());
+    if(status)status.textContent=choices.length?`${choices.length} microphone${choices.length===1?'':'s'} detected. Choose the same input you use in Codex.`:'No microphone input was found.';
+  }catch(error){
+    const blocked=error?.name==='NotAllowedError'||error?.name==='SecurityError';
+    if(status)status.textContent=blocked?'Microphone permission is blocked for Edgebook. Allow it in Chrome’s address bar and click Detect again.':'Edgebook could not read the microphone list. Check that the device is connected and try again.';
+  }
+}
+function setVoiceInputDevice(deviceId){
+  const selected=dictationController.selectMicrophone(deviceId);
+  const select=document.getElementById('voice-input-device');
+  const status=document.getElementById('voice-input-status');
+  const label=select?.selectedOptions?.[0]?.textContent||'System default microphone';
+  if(status)status.textContent=`Saved: ${label}. The next recording will use this exact input.`;
+  return selected;
+}
 function dictationTargetSpec(target){return dictationController.targetSpec(target);}
 function dictationControlHtml(target,label){return dictationController.controlHtml(target,label);}
 function dictationStatusHtml(target){return dictationController.statusHtml(target);}
@@ -7118,7 +7173,7 @@ function stopTradeVoice(options={}){if(dictationSession?.spec.context==='trade')
 function refreshTradeVoiceControls(){refreshDictationControls();}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')stopDictation({quiet:true,immediate:true});});
 window.addEventListener('pagehide',()=>stopDictation({quiet:true,immediate:true}));
-document.addEventListener('DOMContentLoaded',refreshDictationControls);
+document.addEventListener('DOMContentLoaded',()=>{refreshDictationControls();renderVoiceInputChoices(dictationController.microphoneChoices(),dictationController.selectedMicrophoneId());});
 
 const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-time'];
 function isCTraderTrade(trade){return String(trade?.sourceSystem||trade?.source||trade?.broker||'').toLowerCase()==='ctrader';}

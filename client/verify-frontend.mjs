@@ -759,10 +759,14 @@ requireMatch(app, /\.trade-voice-wave b\{[^}]*transition:height 70ms/, 'audio-le
 requireMatch(dictationControllerSource,/root\.isSecureContext\s*!==\s*true/,'secure-context dictation gate');
 requireMatch(dictationControllerSource,/root\.SpeechRecognition\s*\|\|\s*root\.webkitSpeechRecognition/,'Chrome and Edge live speech recognition selection');
 requireMatch(dictationControllerSource,/recognition\.continuous\s*=\s*true[\s\S]{0,120}?recognition\.interimResults\s*=\s*true/,'continuous browser speech with genuine interim text');
+requireMatch(dictationControllerSource,/getUserMedia\(\{\s*audio:\s*microphoneConstraints/,'selected microphone constraints are used for browser capture');
+requireMatch(dictationControllerSource,/recognition\.start\(track\)/,'selected microphone track is passed into Chrome speech recognition');
+requireMatch(dictationControllerSource,/function startCapture[\s\S]{0,500}?ensureMicrophone\(current\)[\s\S]{0,260}?current\.stream/,'Whisper fallback reuses the selected live microphone stream');
 requireMatch(dictationControllerSource,/recognition\.onresult[\s\S]{0,900}?renderTranscript\(current\)/,'browser results stream directly into the active field');
 requireMatch(dictationControllerSource,/code\s*===\s*'network'[\s\S]{0,240}?switchToWhisper\(current/,'automatic browser-service to on-device fallback');
 requireMatch(dictationControllerSource,/recognition\.onend[\s\S]{0,700}?scheduleBrowserRestart\(current\)/,'long browser dictation automatically reconnects after service boundaries');
 requireMatch(dictationControllerSource,/navigator\?\.mediaDevices\?\.getUserMedia/,'microphone capability gate');
+requireMatch(app,/id="sp-voice"[\s\S]{0,1800}?id="voice-input-device"[\s\S]{0,900}?refreshVoiceInputDevices/,'voice settings expose explicit microphone detection and selection');
 requireMatch(dictationControllerSource,/baseText:\s*element\.value/,'dictation preserves existing text');
 requireMatch(dictationControllerSource,/function promoteInterim[\s\S]{0,240}?renderTranscript/,'interim transcript promotion before teardown');
 requireMatch(dictationControllerSource,/track\.stop\(\)/,'immediate microphone privacy stop');
@@ -2898,8 +2902,8 @@ try {
   }
   const recognitions=[];
   class FakeSpeechRecognition {
-    constructor(){this.startCalls=0;recognitions.push(this);}
-    start(){this.startCalls+=1;}
+    constructor(){this.startCalls=0;this.startTracks=[];recognitions.push(this);}
+    start(track){this.startCalls+=1;this.startTracks.push(track);}
     stop(){this.onend?.();}
     abort(){this.aborted=true;}
     emitResult(text,isFinal=false){
@@ -2918,8 +2922,10 @@ try {
     createGain(){return {...node(),gain:{value:1}};}
     close(){this.closed=true;}
   }
-  let trackStopped=false,microphoneCalls=0,clock=0,activeSession=null,autosaveCancels=0;
-  const stream={getTracks:()=>[{stop(){trackStopped=true;}}]};
+  let trackStopped=false,microphoneCalls=0,clock=0,activeSession=null,autosaveCancels=0,lastAudioConstraints=null;
+  const microphoneTrack={kind:'audio',readyState:'live',label:'PD100X Podcast Microphone',stop(){trackStopped=true;this.readyState='ended';}};
+  const stream={getAudioTracks:()=>[microphoneTrack],getTracks:()=>[microphoneTrack]};
+  const microphoneStorage={value:'pd100x',getItem(){return this.value;},setItem(name,value){this.value=String(value);},removeItem(){this.value='';}};
   const fixtureRoot={isSecureContext:true,setTimeout,clearTimeout};
   const fixtureContext=vm.createContext({console,setTimeout,clearTimeout,globalThis:null});
   fixtureContext.globalThis=fixtureContext;
@@ -2927,7 +2933,8 @@ try {
   const browserController=fixtureContext.createEdgebookDictationController({
     root:fixtureRoot,
     document:voiceDocument,
-    navigator:{language:'en-IN',mediaDevices:{async getUserMedia(){microphoneCalls+=1;return stream;}}},
+    navigator:{language:'en-IN',mediaDevices:{async getUserMedia(constraints){microphoneCalls+=1;lastAudioConstraints=constraints;microphoneTrack.readyState='live';return stream;},async enumerateDevices(){return[{kind:'audioinput',deviceId:'pd100x',label:'PD100X Podcast Microphone'}];}}},
+    storage:microphoneStorage,
     SpeechRecognitionClass:FakeSpeechRecognition,
     WorkerClass:FakeWorker,
     AudioContextClass:FakeAudioContext,
@@ -2939,6 +2946,7 @@ try {
   await browserController.toggle('dj-notes');
   const nativeRecognition=recognitions[0];
   nativeRecognition?.onstart?.();
+  const browserMicStatus=voiceStatus.textContent;
   nativeRecognition?.emitResult('Price followed',false);
   if(voiceNotes.value!=='Existing note.\nPrice followed')failures.push('Chrome interim speech did not stream directly into the Daily Journal field');
   nativeRecognition?.onend?.();
@@ -2946,15 +2954,15 @@ try {
   nativeRecognition?.onstart?.();
   nativeRecognition?.emitResult('the plan',true);
   await browserController.stop();
-  if(!nativeRecognition||nativeRecognition.continuous!==true||nativeRecognition.interimResults!==true||nativeRecognition.lang!=='en-IN'||nativeRecognition.startCalls!==2||workers.length!==0||microphoneCalls!==0||voiceNotes.value!=='Existing note.\nPrice followed the plan') {
-    failures.push('Chrome live dictation was not the zero-download primary engine or did not preserve its final transcript');
+  if(!nativeRecognition||nativeRecognition.continuous!==true||nativeRecognition.interimResults!==true||nativeRecognition.lang!=='en-IN'||nativeRecognition.startCalls!==2||nativeRecognition.startTracks.some(track=>track!==microphoneTrack)||workers.length!==0||microphoneCalls!==1||lastAudioConstraints?.audio?.deviceId?.exact!=='pd100x'||voiceNotes.value!=='Existing note.\nPrice followed the plan'||!/PD100X/.test(browserMicStatus)) {
+    failures.push('Chrome live dictation did not use one explicitly selected microphone track or preserve its final transcript');
   }
 
-  voiceNotes.value='Existing note.';
+  voiceNotes.value='Existing note.';microphoneCalls=0;trackStopped=false;microphoneTrack.readyState='live';
   const hybridController=fixtureContext.createEdgebookDictationController({
     root:fixtureRoot,
     document:voiceDocument,
-    navigator:{language:'en-IN',mediaDevices:{async getUserMedia(){microphoneCalls+=1;return stream;}}},
+    navigator:{language:'en-IN',mediaDevices:{async getUserMedia(){microphoneCalls+=1;microphoneTrack.readyState='live';return stream;}}},
     SpeechRecognitionClass:FakeSpeechRecognition,
     WorkerClass:FakeWorker,
     AudioContextClass:FakeAudioContext,
@@ -2971,14 +2979,14 @@ try {
   if(!hybridWorker||voiceNotes.value!=='Existing note.\nBrowser words were preserved'||!/on-device/i.test(voiceStatus.textContent))failures.push('Browser-service failure did not preserve streamed words and enter the Whisper fallback');
   hybridWorker?.emit({type:'model-ready',model:'onnx-community/whisper-tiny.en'});
   await new Promise(resolve=>setImmediate(resolve));
-  if(microphoneCalls!==1||!processor?.onaudioprocess)failures.push('Automatic Whisper fallback did not resume microphone capture after the browser speech service failed');
+  if(microphoneCalls!==1||!processor?.onaudioprocess||failedRecognition?.startTracks?.[0]!==microphoneTrack)failures.push('Automatic Whisper fallback did not keep the same captured microphone track after the browser speech service failed');
   hybridController.destroy();
 
-  workers.length=0;microphoneCalls=0;trackStopped=false;voiceNotes.value='Existing note.';processor=null;activeSession=null;autosaveCancels=0;
+  workers.length=0;microphoneCalls=0;trackStopped=false;microphoneTrack.readyState='live';voiceNotes.value='Existing note.';processor=null;activeSession=null;autosaveCancels=0;
   const controller=fixtureContext.createEdgebookDictationController({
     root:fixtureRoot,
     document:voiceDocument,
-    navigator:{mediaDevices:{async getUserMedia(){microphoneCalls+=1;return stream;}}},
+    navigator:{mediaDevices:{async getUserMedia(){microphoneCalls+=1;microphoneTrack.readyState='live';return stream;}}},
     performance:{now:()=>clock},
     WorkerClass:FakeWorker,
     AudioContextClass:FakeAudioContext,
