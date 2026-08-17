@@ -774,8 +774,9 @@ requireMatch(whisperWorkerSource,/preferredDevice\s*!==\s*'webgpu'[\s\S]{0,160}?
 requireMatch(whisperWorkerSource,/resampleTo16Khz/,'deterministic Whisper input resampling');
 requireMatch(whisperWorkerSource,/prepareWhisperAudio[\s\S]{0,1200}?requestHasSpeech/,'Whisper audio centering, bounded gain, and worker-side speech gate');
 requireMatch(whisperWorkerSource,/task:\s*['"]transcribe['"][\s\S]{0,140}?do_sample:\s*false[\s\S]{0,140}?condition_on_prev_tokens:\s*false/,'deterministic English-only Whisper transcription settings');
-requireMatch(dictationControllerSource,/MIN_FINAL_SPEECH_MS\s*=\s*640[\s\S]{0,180}?MIN_INTERIM_SPEECH_MS\s*=\s*900/,'short noise is withheld from final and live Whisper requests');
-requireMatch(dictationControllerSource,/silence\s*>=\s*SILENCE_MS\s*&&\s*current\.speechMs\s*<\s*MIN_FINAL_SPEECH_MS[\s\S]{0,100}?resetSegment\(current\)/,'short noise burst resets without transcription');
+requireMatch(dictationControllerSource,/MIN_AUTO_SPEECH_MS\s*=\s*300[\s\S]{0,180}?MIN_MANUAL_CAPTURE_MS\s*=\s*350/,'adaptive live speech detection and minimum manual recording gate');
+requireMatch(dictationControllerSource,/current\.chunks\.push\(chunk\)[\s\S]{0,500}?current\.energySquaredSum\s*\+=\s*sum/,'full microphone utterance is retained even when local voice detection is uncertain');
+requireMatch(dictationControllerSource,/submitSegment\(current,\s*true,\s*true\)/,'manual stop always submits a sufficiently long captured utterance');
 requireMatch(dictationControllerSource,/function isLikelySilenceHallucination[\s\S]{0,900}?SILENCE_HALLUCINATIONS\.has/,'known silence hallucinations are rejected only with conflicting audio evidence');
 requireMatch(whisperWorkerSource,/const finalRequests\s*=\s*\[\][\s\S]{0,7000}?finalRequests\.shift\(\)\s*\|\|\s*latestInterimRequest/,'ordered final transcript queue with coalesced interim inference');
 requireMatch(whisperWorkerSource,/if\s*\(next\.final\)\s*finalRequests\.push\(next\)[\s\S]{0,100}?latestInterimRequest\s*=\s*next/,'final transcript segments cannot be displaced by newer interim audio');
@@ -786,12 +787,14 @@ try {
   const workerAudioStart = whisperWorkerSource.indexOf('function normalizeAudio');
   const workerAudioEnd = whisperWorkerSource.indexOf('async function drainQueue', workerAudioStart);
   if (workerAudioStart < 0 || workerAudioEnd < 0) throw new Error('worker audio helpers not found');
-  vm.runInNewContext(`${whisperWorkerSource.slice(workerAudioStart, workerAudioEnd)}globalThis.voiceAudio={prepareWhisperAudio,requestHasSpeech};`, workerAudioContext);
+  vm.runInNewContext(`${whisperWorkerSource.slice(workerAudioStart, workerAudioEnd)}globalThis.voiceAudio={prepareWhisperAudio,audioEvidence,requestHasSpeech};`, workerAudioContext);
   const waveform = Float32Array.from({ length: 3200 }, (_, index) => Math.sin(index / 7) * .08 + .02);
   const prepared = workerAudioContext.voiceAudio.prepareWhisperAudio(waveform);
   const silent = workerAudioContext.voiceAudio.prepareWhisperAudio(new Float32Array(3200).fill(.02));
+  const quietSpeech = Float32Array.from({ length: 6400 }, (_, index) => Math.sin(index / 7) * .0025);
+  const quietEvidence = workerAudioContext.voiceAudio.audioEvidence(quietSpeech);
   const peak = Math.max(...prepared.map(Math.abs));
-  if (prepared.length !== waveform.length || silent.length !== 0 || peak < .25 || peak > 1 || !workerAudioContext.voiceAudio.requestHasSpeech({ speechMs: 900, peakRms: .04, voicedRatio: .5 }) || workerAudioContext.voiceAudio.requestHasSpeech({ speechMs: 300, peakRms: .04, voicedRatio: .5 })) {
+  if (prepared.length !== waveform.length || silent.length !== 0 || peak < .25 || peak > 1 || !workerAudioContext.voiceAudio.requestHasSpeech({ forced:true,audioDurationMs:400 }, quietEvidence) || workerAudioContext.voiceAudio.requestHasSpeech({ forced:true,audioDurationMs:400 }, {peak:0,rms:0})) {
     failures.push('Whisper worker audio normalization or independent speech gate is ineffective');
   }
 } catch (error) {
@@ -804,8 +807,8 @@ for (const [start,end,readMarker,label] of [
   ['async function hmSaveNote','async function hmAddScreenshots','const ta =','heatmap-note save'],
   ['async function djSaveForm','// also auto-save on textarea blur','djCollectForm()','Daily Journal save'],
 ]) {
-  const saveSource=sourceBetween(start,end),stopIndex=saveSource.indexOf('stopDictation({quiet:true,immediate:true})'),readIndex=saveSource.indexOf(readMarker);
-  if(stopIndex<0||readIndex<0||stopIndex>readIndex)failures.push(`Missing: ${label} freezes dictation before reading the field`);
+  const saveSource=sourceBetween(start,end),stopIndex=saveSource.indexOf('await stopDictation({quiet:true})'),readIndex=saveSource.indexOf(readMarker);
+  if(stopIndex<0||readIndex<0||stopIndex>readIndex)failures.push(`Missing: ${label} finalizes dictation before reading the field`);
 }
 requireMatch(sourceBetween('function renderHeatmap','function buildHmGridWithInsert'),/stopDictation\(\{quiet:true,immediate:true\}\)/,'heatmap redraw privacy teardown');
 const equityProjectionSource = sourceBetween('function equityTradeTimestamp', 'function signedMoney');
@@ -2942,9 +2945,21 @@ try {
   clock=6100;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quiet}});
   const hallucinationRequest=worker.messages.findLast(message=>message.type==='transcribe'&&message.final&&message.requestId!==finalRequest?.requestId);
   if(!hallucinationRequest)failures.push('Long speech fixture did not create a second final segment');
-  else worker.emit({type:'transcript',sessionId:hallucinationRequest.sessionId,requestId:hallucinationRequest.requestId,segmentId:hallucinationRequest.segmentId,final:true,text:'You',speechMs:hallucinationRequest.speechMs,peakRms:hallucinationRequest.peakRms,voicedRatio:hallucinationRequest.voicedRatio});
+  else worker.emit({type:'transcript',sessionId:hallucinationRequest.sessionId,requestId:hallucinationRequest.requestId,segmentId:hallucinationRequest.segmentId,final:true,text:'You',speechMs:hallucinationRequest.speechMs,audioDurationMs:hallucinationRequest.audioDurationMs,peakRms:hallucinationRequest.peakRms,voicedRatio:hallucinationRequest.voicedRatio,captureRms:hallucinationRequest.captureRms,forced:hallucinationRequest.forced});
   if(voiceNotes.value!=='Existing note.\nWaited for confirmation')failures.push('Implausible repeated “you” silence hallucination was written into the journal field');
-  controller.stop({immediate:true});
+  const quietVoice=Float32Array.from({length:4096},(_,index)=>Math.sin(index/7)*.0025);
+  for(const nextClock of [6400,6660,6920,7180]){clock=nextClock;processor.onaudioprocess({inputBuffer:{getChannelData:()=>quietVoice}});}
+  const quietInterim=worker.messages.findLast(message=>message.type==='transcribe'&&!message.final&&message.forced===true);
+  if(!quietInterim)failures.push('Quiet full utterance did not produce live on-device text while recording');
+  else worker.emit({type:'transcript',sessionId:quietInterim.sessionId,requestId:quietInterim.requestId,segmentId:quietInterim.segmentId,final:false,text:'Quiet speech',speechMs:quietInterim.speechMs,peakRms:quietInterim.peakRms,voicedRatio:quietInterim.voicedRatio,captureRms:quietInterim.captureRms,audioDurationMs:quietInterim.audioDurationMs,forced:true});
+  if(voiceNotes.value!=='Existing note.\nWaited for confirmation Quiet speech')failures.push('Quiet live transcript was not shown in the Daily Journal field');
+  const quietStopPromise=controller.stop();
+  if(activeSession===null)failures.push('Graceful dictation stop did not wait for the final Whisper result');
+  const quietFinal=worker.messages.findLast(message=>message.type==='transcribe'&&message.final&&message.requestId!==hallucinationRequest?.requestId);
+  if(!quietFinal||quietFinal.forced!==true||quietFinal.captureRms<=0)failures.push('Manual stop did not submit a quiet full utterance when local voice detection was uncertain');
+  else worker.emit({type:'transcript',sessionId:quietFinal.sessionId,requestId:quietFinal.requestId,segmentId:quietFinal.segmentId,final:true,text:'Quiet speech is preserved',speechMs:quietFinal.speechMs,peakRms:quietFinal.peakRms,voicedRatio:quietFinal.voicedRatio,captureRms:quietFinal.captureRms,forced:true});
+  await quietStopPromise;
+  if(voiceNotes.value!=='Existing note.\nWaited for confirmation Quiet speech is preserved')failures.push('Quiet manually-stopped speech did not reach the Daily Journal field');
   if(!trackStopped||activeSession!==null||voiceButton.attributes['aria-pressed']!=='false'||!/review it.*saving/i.test(voiceStatus.textContent))failures.push('On-device dictation did not stop microphone capture and return to review-before-save');
   voiceNotes.value='Manual edit';
   await controller.toggle('dj-notes');
@@ -2982,6 +2997,30 @@ try {
   if(saveCalls!==1)failures.push('Daily Journal autosave did not resume after dictation ended and the user blurred again');
 } catch(error){
   failures.push(`Daily-journal autosave/dictation fixture failed: ${error.message}`);
+}
+
+try {
+  let releaseTranscript, journalWrites=0;
+  const transcriptFinished=new Promise(resolve=>{releaseTranscript=resolve;});
+  const saveJournalContext={
+    stopDictation:()=>transcriptFinished,
+    djDate:'2026-08-17',
+    djCollectForm:()=>({notes:'final on-device transcript'}),
+    async djSaveEntry(){journalWrites+=1;return true;},
+    document:{getElementById:()=>null},
+    renderDjFeed(){},
+    showToast(){},
+  };
+  saveJournalContext.globalThis=saveJournalContext;
+  vm.runInNewContext(`${sourceBetween('async function djSaveForm','// also auto-save on textarea blur')}globalThis.voiceSave={djSaveForm};`,saveJournalContext,{timeout:500});
+  const savePromise=saveJournalContext.voiceSave.djSaveForm();
+  await Promise.resolve();
+  if(journalWrites!==0)failures.push('Daily Journal saved before the active on-device transcript finished');
+  releaseTranscript({text:'final on-device transcript',target:'dj-notes'});
+  await savePromise;
+  if(journalWrites!==1)failures.push('Daily Journal did not save after the active on-device transcript finished');
+} catch(error){
+  failures.push(`Daily-journal save/transcript ordering fixture failed: ${error.message}`);
 }
 
 const coachingFunctions = app.match(/function coachingLabel[\s\S]*?(?=\nasync function openAIReport)/)?.[0];

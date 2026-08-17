@@ -8021,7 +8021,7 @@ function tradeSaveFailureMessage(error){
 }
 
 async function saveTrade(){
-  stopDictation({quiet:true,immediate:true});
+  await stopDictation({quiet:true});
   if(_tradeSaveInFlight)return;
   _tradeSaveInFlight=true;
   updateTradeSaveButton();
@@ -8339,7 +8339,7 @@ function pickMoodEmoji(el,v){document.querySelectorAll('#mood-emoji-row .emoji-o
 function pickModalEmoji(el,v){document.querySelectorAll('#modal-emoji-row .emoji-opt').forEach(e=>e.classList.remove('selected'));el.classList.add('selected');modalEmoji=v;}
 function newMoodId(){return `mood_${globalThis.crypto?.randomUUID?.()||`${Date.now()}_${Math.random().toString(36).slice(2)}`}`;}
 async function saveMoodEntry(){
-  stopDictation({quiet:true,immediate:true});
+  await stopDictation({quiet:true});
   if(!moodEmoji){showToast('Select an emotion','error');return;}
   const mood={id:newMoodId(),type:document.getElementById('mood-type-sel').value,emotion:moodEmoji,confidence:parseInt(document.getElementById('mood-conf').value)||null,notes:document.getElementById('mood-notes-inp').value,time:nowIST(),date:TODAY};
   moods.unshift(mood);
@@ -8350,7 +8350,7 @@ async function saveMoodEntry(){
   showToast(synced?'Mood saved':'Mood saved on this device; VPS sync will retry',synced?'success':'info');
 }
 async function saveModalMood(){
-  stopDictation({quiet:true,immediate:true});
+  await stopDictation({quiet:true});
   if(!modalEmoji){showToast('Select an emotion','error');return;}
   const mood={id:newMoodId(),type:document.getElementById('mm-type').value,emotion:modalEmoji,confidence:parseInt(document.getElementById('mm-conf').value)||null,notes:document.getElementById('mm-notes').value,time:nowIST(),date:TODAY};
   moods.unshift(mood);
@@ -11310,7 +11310,7 @@ function renderHmInsert(t, container){
 }
 
 async function hmSaveNote(id){
-  stopDictation({quiet:true,immediate:true});
+  await stopDictation({quiet:true});
   const domToken=safeDomId(id);
   const ta = document.getElementById(`hm-note-${domToken}`);
   if(!ta) return;
@@ -12897,7 +12897,7 @@ function djAutoSave(){
 }
 
 async function djSaveForm(){
-  stopDictation({quiet:true,immediate:true});
+  await stopDictation({quiet:true});
   const synced=await djSaveEntry(djDate, djCollectForm());
   const ind = document.getElementById('dj-saved-indicator');
   if(ind){ ind.textContent=synced?'Saved':'Saved locally · sync pending'; ind.style.display='flex'; setTimeout(()=>ind.style.display='none',2500); }

@@ -115,18 +115,38 @@ function prepareWhisperAudio(input) {
     centered[index] = value;
     peak = Math.max(peak, Math.abs(value));
   }
-  if (peak < .004) return new Float32Array(0);
+  if (peak < .0015) return new Float32Array(0);
   const gain = peak < .35 ? Math.min(4, .35 / peak) : 1;
   if (gain === 1) return centered;
   for (let index = 0; index < centered.length; index += 1) centered[index] = Math.max(-1, Math.min(1, centered[index] * gain));
   return centered;
 }
 
-function requestHasSpeech(request) {
+function audioEvidence(input) {
+  if (!input.length) return { peak: 0, rms: 0 };
+  let mean = 0;
+  for (let index = 0; index < input.length; index += 1) mean += input[index];
+  mean /= input.length;
+  let peak = 0;
+  let squared = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    const centered = input[index] - mean;
+    peak = Math.max(peak, Math.abs(centered));
+    squared += centered * centered;
+  }
+  return { peak, rms: Math.sqrt(squared / input.length) };
+}
+
+function requestHasSpeech(request, evidence = {}) {
   const speechMs = Number(request.speechMs) || 0;
   const peakRms = Number(request.peakRms) || 0;
   const voicedRatio = Number(request.voicedRatio) || 0;
-  return speechMs >= 640 && peakRms >= .012 && voicedRatio >= .08;
+  const captureRms = Number(request.captureRms) || 0;
+  const audioDurationMs = Number(request.audioDurationMs) || 0;
+  const realSignal = Number(evidence.peak) >= .0015 && Number(evidence.rms) >= .00035;
+  if (!realSignal || audioDurationMs < 300) return false;
+  if (request.forced === true) return true;
+  return speechMs >= 220 || voicedRatio >= .025 || peakRms >= .004 || captureRms >= .001;
 }
 
 async function drainQueue() {
@@ -138,9 +158,11 @@ async function drainQueue() {
   try {
     const transcriber = await loadTranscriber();
     if (request.sessionId !== activeSessionId) return;
-    const audio = prepareWhisperAudio(resampleTo16Khz(normalizeAudio(request.audio), request.sampleRate));
-    if (!requestHasSpeech(request) || audio.length < 4800) {
-      post('transcript', { ...request, text: '' });
+    const resampled = resampleTo16Khz(normalizeAudio(request.audio), request.sampleRate);
+    const evidence = audioEvidence(resampled);
+    const audio = prepareWhisperAudio(resampled);
+    if (!requestHasSpeech(request, evidence) || audio.length < 4800) {
+      post('transcript', { ...request, audio: undefined, text: '', reason: 'audio-too-quiet', evidence });
       return;
     }
     const result = await transcriber(audio, {
@@ -152,7 +174,8 @@ async function drainQueue() {
       condition_on_prev_tokens: false,
     });
     if (request.sessionId === activeSessionId) {
-      post('transcript', { ...request, audio: undefined, text: String(result?.text || '').replace(/\s+/g, ' ').trim() });
+      const text = String(result?.text || '').replace(/\s+/g, ' ').trim();
+      post('transcript', { ...request, audio: undefined, text, reason: text ? '' : 'no-words-recognized', evidence });
     }
   } catch (error) {
     if (request.sessionId === activeSessionId) {
@@ -192,6 +215,8 @@ globalThis.addEventListener('message', event => {
     audioDurationMs: Number(message.audioDurationMs) || 0,
     peakRms: Number(message.peakRms) || 0,
     voicedRatio: Number(message.voicedRatio) || 0,
+    captureRms: Number(message.captureRms) || 0,
+    forced: message.forced === true,
     audio: message.audio,
   };
   // Preserve every final segment in order while coalescing only disposable

@@ -15,11 +15,12 @@
     ['mm-notes', { label: 'mood check-in notes', context: 'mood' }],
   ]);
 
-  const INTERIM_INTERVAL_MS = 1900;
+  const INTERIM_INTERVAL_MS = 1400;
   const SILENCE_MS = 900;
   const MAX_SEGMENT_MS = 18000;
-  const MIN_FINAL_SPEECH_MS = 640;
-  const MIN_INTERIM_SPEECH_MS = 900;
+  const MIN_AUTO_SPEECH_MS = 300;
+  const MIN_INTERIM_CAPTURE_MS = 900;
+  const MIN_MANUAL_CAPTURE_MS = 350;
   const SILENCE_HALLUCINATIONS = new Set(['you', 'thank you', 'thanks for watching', 'bye', 'goodbye']);
 
   function createController(options = {}) {
@@ -46,6 +47,12 @@
     function setSession(value) {
       session = value;
       onSessionChange(value);
+    }
+
+    function resolveCompletion(current) {
+      if (current.completionResolved) return;
+      current.completionResolved = true;
+      current.resolveCompletion?.({ text: current.finalText.trim(), target: current.target });
     }
 
     function targetSpec(target) {
@@ -183,6 +190,7 @@
       current.element.readOnly = current.wasReadOnly;
       refreshControls();
       setStatus(current.target, message, state);
+      resolveCompletion(current);
     }
 
     function concatenateAudio(chunks, totalLength) {
@@ -208,20 +216,27 @@
       current.peakRms = 0;
       current.voicedChunks = 0;
       current.totalChunks = 0;
+      current.energySquaredSum = 0;
+      current.energySampleCount = 0;
     }
 
-    function submitSegment(current, final = false) {
-      const minimumSpeech = final ? MIN_FINAL_SPEECH_MS : MIN_INTERIM_SPEECH_MS;
-      if (session !== current || !current.sampleCount || !current.speechStarted || current.speechMs < minimumSpeech) return false;
+    function submitSegment(current, final = false, forced = false) {
+      if (session !== current || !current.sampleCount) return false;
+      const audioDurationMs = current.sampleCount / current.sampleRate * 1000;
+      const detectedSpeech = current.speechStarted && current.speechMs >= MIN_AUTO_SPEECH_MS;
+      if (forced) {
+        if (audioDurationMs < MIN_MANUAL_CAPTURE_MS) return false;
+      } else if (!detectedSpeech || (!final && audioDurationMs < MIN_INTERIM_CAPTURE_MS)) return false;
       const audio = concatenateAudio(current.chunks, current.sampleCount);
       const segmentId = current.segmentId;
       const requestId = ++workerRequest;
-      const audioDurationMs = current.sampleCount / current.sampleRate * 1000;
       const activity = {
         speechMs: Math.round(current.speechMs),
         audioDurationMs: Math.round(audioDurationMs),
         peakRms: current.peakRms,
         voicedRatio: current.totalChunks ? current.voicedChunks / current.totalChunks : 0,
+        captureRms: current.energySampleCount ? Math.sqrt(current.energySquaredSum / current.energySampleCount) : 0,
+        forced,
       };
       if (final) {
         current.pendingFinals += 1;
@@ -243,10 +258,12 @@
       if (!normalized) return false;
       const words = normalized.split(/\s+/).filter(Boolean);
       const speechMs = Number(message.speechMs) || 0;
+      const audioDurationMs = Number(message.audioDurationMs) || 0;
       const voicedRatio = Number(message.voicedRatio) || 0;
       const peakRms = Number(message.peakRms) || 0;
-      const weakAudio = speechMs < MIN_FINAL_SPEECH_MS || voicedRatio < .1 || peakRms < .014;
-      const implausiblySparse = speechMs >= 1500 && words.length === 1;
+      const captureRms = Number(message.captureRms) || 0;
+      const weakAudio = (speechMs < MIN_AUTO_SPEECH_MS && message.forced !== true) || (voicedRatio < .04 && peakRms < .006 && captureRms < .0015);
+      const implausiblySparse = audioDurationMs >= 1500 && words.length === 1;
       return SILENCE_HALLUCINATIONS.has(normalized) && (weakAudio || implausiblySparse);
     }
 
@@ -258,24 +275,19 @@
       for (let index = 0; index < chunk.length; index += 1) sum += chunk[index] * chunk[index];
       const rms = Math.sqrt(sum / Math.max(1, chunk.length));
       if (!current.speechStarted) current.noiseFloor = current.noiseFloor * .94 + rms * .06;
-      const speaking = rms > Math.max(.011, current.noiseFloor * 2.35);
+      const speaking = rms > Math.max(.0035, current.noiseFloor * 1.6);
       const chunkMs = chunk.length / current.sampleRate * 1000;
       updateMeter(current, rms, speaking);
-      if (!current.speechStarted) {
-        current.preRoll.push(chunk);
-        while (current.preRoll.length > 4) current.preRoll.shift();
-        if (!speaking) return;
-        current.speechStarted = true;
-        current.chunks = current.preRoll.slice();
-        current.sampleCount = current.chunks.reduce((total, value) => total + value.length, 0);
-        current.preRoll = [];
-        current.segmentStartedAt = now;
-      } else {
-        current.chunks.push(chunk);
-        current.sampleCount += chunk.length;
-      }
+      if (!current.sampleCount) current.segmentStartedAt = now;
+      current.chunks.push(chunk);
+      current.sampleCount += chunk.length;
       current.totalChunks += 1;
       current.peakRms = Math.max(current.peakRms, rms);
+      current.energySquaredSum += sum;
+      current.energySampleCount += chunk.length;
+      if (!current.speechStarted && speaking) {
+        current.speechStarted = true;
+      }
       if (speaking) {
         current.lastVoiceAt = now;
         current.speechMs += chunkMs;
@@ -284,13 +296,14 @@
       }
       const elapsed = now - current.segmentStartedAt;
       const silence = current.lastVoiceAt ? now - current.lastVoiceAt : 0;
-      if (silence >= SILENCE_MS && current.speechMs < MIN_FINAL_SPEECH_MS) {
-        resetSegment(current);
-        setStatus(current.target, 'Listening on this device ··· speak naturally.', 'is-listening');
-        return;
+      const captureDurationMs = current.sampleCount / current.sampleRate * 1000;
+      const captureRms = current.energySampleCount ? Math.sqrt(current.energySquaredSum / current.energySampleCount) : 0;
+      const lowLevelSignal = current.peakRms >= .0015 && captureRms >= .00035;
+      if ((current.speechMs >= MIN_AUTO_SPEECH_MS || lowLevelSignal) && captureDurationMs >= MIN_INTERIM_CAPTURE_MS && Date.now() - current.lastInterimAt >= INTERIM_INTERVAL_MS) {
+        submitSegment(current, false, current.speechMs < MIN_AUTO_SPEECH_MS);
       }
-      if (current.speechMs >= MIN_INTERIM_SPEECH_MS && Date.now() - current.lastInterimAt >= INTERIM_INTERVAL_MS) submitSegment(current, false);
-      if (current.speechMs >= MIN_FINAL_SPEECH_MS && (silence >= SILENCE_MS || elapsed >= MAX_SEGMENT_MS)) submitSegment(current, true);
+      if (current.speechMs >= MIN_AUTO_SPEECH_MS && silence >= SILENCE_MS) submitSegment(current, true);
+      else if (elapsed >= MAX_SEGMENT_MS) submitSegment(current, true, true);
     }
 
     async function startCapture(current) {
@@ -374,11 +387,15 @@
       if (message.final) {
         current.pendingFinals = Math.max(0, current.pendingFinals - 1);
         if (text) current.finalText = `${current.finalText} ${text}`.trim();
+        if (!text && message.reason) current.lastEmptyReason = String(message.reason);
         if (rejectedHallucination) setStatus(current.target, 'Unclear audio was ignored — keep speaking naturally.', 'is-listening');
         if (message.segmentId !== current.segmentId) current.interimText = '';
         renderTranscript(current);
         if (current.stopRequested && current.pendingFinals === 0) {
-          finish(current, current.finalText.trim() ? reviewMessage(current.spec.context) : 'Listening stopped. No transcript was added.', current.finalText.trim() ? 'is-ready' : '');
+          const emptyMessage = current.lastEmptyReason === 'audio-too-quiet'
+            ? 'No words were captured because the microphone level was too low. Check the selected input and try again.'
+            : 'Speech was captured, but no words were recognized. Please try again and speak naturally.';
+          finish(current, current.finalText.trim() ? reviewMessage(current.spec.context) : emptyMessage, current.finalText.trim() ? 'is-ready' : '');
         }
       } else if (message.requestId >= current.latestRenderedRequest && message.segmentId === current.segmentId) {
         current.latestRenderedRequest = message.requestId;
@@ -413,7 +430,7 @@
 
     function stop({ quiet = false, immediate = false } = {}) {
       const current = session;
-      if (!current) return;
+      if (!current) return Promise.resolve({ text: '', target: '' });
       if (immediate) {
         promoteInterim(current);
         unschedule(current.watchdog);
@@ -424,27 +441,30 @@
         current.element.readOnly = current.wasReadOnly;
         refreshControls();
         if (!quiet) setStatus(current.target, current.finalText.trim() ? reviewMessage(current.spec.context) : 'Listening stopped. No transcript was added.', current.finalText.trim() ? 'is-ready' : '');
-        return;
+        resolveCompletion(current);
+        return current.completion;
       }
-      if (current.stopRequested) return;
+      if (current.stopRequested) return current.completion;
       current.stopRequested = true;
       current.phase = 'finishing';
       stopCapture(current);
       refreshControls();
       setStatus(current.target, 'Finishing on-device transcript…', 'is-listening');
-      submitSegment(current, true);
+      submitSegment(current, true, true);
       if (current.pendingFinals === 0) {
         const captured = Boolean(current.finalText.trim() || current.interimText.trim());
-        finish(current, captured ? reviewMessage(current.spec.context) : 'Listening stopped. No transcript was added.', captured ? 'is-ready' : '');
-        return;
+        finish(current, captured ? reviewMessage(current.spec.context) : 'The recording was too short to transcribe. Hold the microphone for a moment and speak naturally.', captured ? 'is-ready' : '');
+        return current.completion;
       }
       unschedule(current.watchdog);
       current.watchdog = schedule(() => {
         if (session === current) {
           promoteInterim(current);
-          finish(current, reviewMessage(current.spec.context), 'is-ready');
+          const captured = Boolean(current.finalText.trim());
+          finish(current, captured ? reviewMessage(current.spec.context) : 'Transcription took too long and no words were added. Please try again.', captured ? 'is-ready' : '');
         }
       }, 12000);
+      return current.completion;
     }
 
     async function toggle(target) {
@@ -456,7 +476,7 @@
         stop();
         return;
       }
-      if (session) stop({ quiet: true, immediate: true });
+      if (session) await stop({ quiet: true, immediate: true });
       if (!support.available) {
         refreshControls();
         setStatus(target, support.message);
@@ -464,6 +484,8 @@
         return;
       }
       if (spec.context === 'dailyjournal') cancelDailyAutosave();
+      let resolveCurrentCompletion;
+      const completion = new Promise(resolve => { resolveCurrentCompletion = resolve; });
       const current = {
         id: `dictation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         target,
@@ -496,7 +518,13 @@
         peakRms: 0,
         voicedChunks: 0,
         totalChunks: 0,
+        energySquaredSum: 0,
+        energySampleCount: 0,
         pendingFinals: 0,
+        lastEmptyReason: '',
+        completion,
+        resolveCompletion: resolveCurrentCompletion,
+        completionResolved: false,
         latestInterimRequest: 0,
         latestRenderedRequest: 0,
       };
@@ -509,6 +537,7 @@
         element.removeEventListener('input', current.onUserInput);
         refreshControls();
         setStatus(target, 'Dictation stopped so your edit is preserved. Review the text before saving.', 'is-ready');
+        resolveCompletion(current);
       };
       setSession(current);
       element.addEventListener('input', current.onUserInput);
