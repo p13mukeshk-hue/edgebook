@@ -7096,7 +7096,7 @@ function updateTradeSaveButton(){
     : '<i class="fa-solid fa-floppy-disk"></i> Save trade';
 }
 
-/* One privacy-scoped on-device Whisper controller serves every narrative field. */
+/* One hybrid Chrome-streaming / private Whisper-fallback controller serves every narrative field. */
 const dictationController=globalThis.createEdgebookDictationController({
   escapeHtml,
   showToast,

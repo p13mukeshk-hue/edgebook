@@ -739,9 +739,9 @@ try {
   failures.push(`Theme chart redraw fixture failed: ${error.message}`);
 }
 
-// Dictation is one privacy-scoped, review-first on-device Whisper controller
-// for every narrative field. It never depends on the browser speech service.
-const dictationSource = sourceBetween('/* One privacy-scoped on-device Whisper controller', 'const CTRADER_OWNED_FORM_IDS');
+// Dictation is one review-first hybrid controller for every narrative field:
+// native Chrome/Edge streaming first, private on-device Whisper as fallback.
+const dictationSource = sourceBetween('/* One hybrid Chrome-streaming / private Whisper-fallback controller', 'const CTRADER_OWNED_FORM_IDS');
 for (const target of ['t-psych-prethought','t-psych-execution','t-psych-review','t-notes']) {
   requireMatch(app,new RegExp(`data-dictation-target=["']${target}["'][\\s\\S]{0,160}?toggleDictation\\('${target}'\\)`),`trade dictation control for ${target}`);
 }
@@ -757,6 +757,11 @@ requireMatch(app,/if\(cf\.type==='text'\)[^\n]*dictationControlHtml\(id,cf\.labe
 requireMatch(app,/dictationControlHtml\(`hm-note-\$\{domToken\}`,'heatmap note'\)/,'dynamic heatmap dictation control');
 requireMatch(app, /\.trade-voice-wave b\{[^}]*transition:height 70ms/, 'audio-level-driven live dictation waveform');
 requireMatch(dictationControllerSource,/root\.isSecureContext\s*!==\s*true/,'secure-context dictation gate');
+requireMatch(dictationControllerSource,/root\.SpeechRecognition\s*\|\|\s*root\.webkitSpeechRecognition/,'Chrome and Edge live speech recognition selection');
+requireMatch(dictationControllerSource,/recognition\.continuous\s*=\s*true[\s\S]{0,120}?recognition\.interimResults\s*=\s*true/,'continuous browser speech with genuine interim text');
+requireMatch(dictationControllerSource,/recognition\.onresult[\s\S]{0,900}?renderTranscript\(current\)/,'browser results stream directly into the active field');
+requireMatch(dictationControllerSource,/code\s*===\s*'network'[\s\S]{0,240}?switchToWhisper\(current/,'automatic browser-service to on-device fallback');
+requireMatch(dictationControllerSource,/recognition\.onend[\s\S]{0,700}?scheduleBrowserRestart\(current\)/,'long browser dictation automatically reconnects after service boundaries');
 requireMatch(dictationControllerSource,/navigator\?\.mediaDevices\?\.getUserMedia/,'microphone capability gate');
 requireMatch(dictationControllerSource,/baseText:\s*element\.value/,'dictation preserves existing text');
 requireMatch(dictationControllerSource,/function promoteInterim[\s\S]{0,240}?renderTranscript/,'interim transcript promotion before teardown');
@@ -779,9 +784,11 @@ requireMatch(dictationControllerSource,/MIN_AUTO_SPEECH_MS\s*=\s*300[\s\S]{0,180
 requireMatch(dictationControllerSource,/current\.chunks\.push\(chunk\)[\s\S]{0,500}?current\.energySquaredSum\s*\+=\s*sum/,'full microphone utterance is retained even when local voice detection is uncertain');
 requireMatch(dictationControllerSource,/submitSegment\(current,\s*true,\s*true\)/,'manual stop always submits a sufficiently long captured utterance');
 requireMatch(dictationControllerSource,/function isLikelySilenceHallucination[\s\S]{0,900}?SILENCE_HALLUCINATIONS\.has/,'known silence hallucinations are rejected only with conflicting audio evidence');
+requireMatch(dictationControllerSource,/audioDurationMs\s*>=\s*MIN_INTERIM_CAPTURE_MS\s*&&\s*words\.length\s*===\s*1/,'isolated early Whisper hallucinations are rejected before entering a field');
+requireMatch(dictationControllerSource,/function scheduleWhisperFinalizationStatus[\s\S]{0,900}?no recorded words will be discarded/,'long on-device recordings wait for every final audio segment');
 requireMatch(whisperWorkerSource,/const finalRequests\s*=\s*\[\][\s\S]{0,7000}?finalRequests\.shift\(\)\s*\|\|\s*latestInterimRequest/,'ordered final transcript queue with coalesced interim inference');
 requireMatch(whisperWorkerSource,/if\s*\(next\.final\)\s*finalRequests\.push\(next\)[\s\S]{0,100}?latestInterimRequest\s*=\s*next/,'final transcript segments cannot be displaced by newer interim audio');
-rejectMatch(`${app}\n${dictationControllerSource}`,/SpeechRecognition|webkitSpeechRecognition|processLocally|private English speech pack/,'unreliable browser speech service dependency');
+rejectMatch(`${app}\n${dictationControllerSource}`,/processLocally|private English speech pack/,'browser-managed speech-pack installation dependency');
 rejectMatch(dictationControllerSource,/saveTrade\s*\(|djSaveForm\s*\(|saveMoodEntry\s*\(|hmSaveNote\s*\(/,'automatic persistence from dictation');
 try {
   const workerAudioContext = { Float32Array, ArrayBuffer, Number, Math };
@@ -2889,6 +2896,17 @@ try {
     emit(message){this.listeners.message?.({data:message});}
     terminate(){this.terminated=true;}
   }
+  const recognitions=[];
+  class FakeSpeechRecognition {
+    constructor(){this.startCalls=0;recognitions.push(this);}
+    start(){this.startCalls+=1;}
+    stop(){this.onend?.();}
+    abort(){this.aborted=true;}
+    emitResult(text,isFinal=false){
+      const result=[{transcript:text}];result.isFinal=isFinal;
+      this.onresult?.({resultIndex:0,results:[result]});
+    }
+  }
   const node=()=>({connect(){},disconnect(){}});
   let processor=null;
   class FakeAudioContext {
@@ -2906,6 +2924,57 @@ try {
   const fixtureContext=vm.createContext({console,setTimeout,clearTimeout,globalThis:null});
   fixtureContext.globalThis=fixtureContext;
   vm.runInContext(dictationControllerSource,fixtureContext,{timeout:500});
+  const browserController=fixtureContext.createEdgebookDictationController({
+    root:fixtureRoot,
+    document:voiceDocument,
+    navigator:{language:'en-IN',mediaDevices:{async getUserMedia(){microphoneCalls+=1;return stream;}}},
+    SpeechRecognitionClass:FakeSpeechRecognition,
+    WorkerClass:FakeWorker,
+    AudioContextClass:FakeAudioContext,
+    escapeHtml:value=>String(value),
+    showToast(){},
+    onSessionChange(value){activeSession=value;},
+    cancelDailyAutosave(){autosaveCancels+=1;},
+  });
+  await browserController.toggle('dj-notes');
+  const nativeRecognition=recognitions[0];
+  nativeRecognition?.onstart?.();
+  nativeRecognition?.emitResult('Price followed',false);
+  if(voiceNotes.value!=='Existing note.\nPrice followed')failures.push('Chrome interim speech did not stream directly into the Daily Journal field');
+  nativeRecognition?.onend?.();
+  await new Promise(resolve=>setTimeout(resolve,280));
+  nativeRecognition?.onstart?.();
+  nativeRecognition?.emitResult('the plan',true);
+  await browserController.stop();
+  if(!nativeRecognition||nativeRecognition.continuous!==true||nativeRecognition.interimResults!==true||nativeRecognition.lang!=='en-IN'||nativeRecognition.startCalls!==2||workers.length!==0||microphoneCalls!==0||voiceNotes.value!=='Existing note.\nPrice followed the plan') {
+    failures.push('Chrome live dictation was not the zero-download primary engine or did not preserve its final transcript');
+  }
+
+  voiceNotes.value='Existing note.';
+  const hybridController=fixtureContext.createEdgebookDictationController({
+    root:fixtureRoot,
+    document:voiceDocument,
+    navigator:{language:'en-IN',mediaDevices:{async getUserMedia(){microphoneCalls+=1;return stream;}}},
+    SpeechRecognitionClass:FakeSpeechRecognition,
+    WorkerClass:FakeWorker,
+    AudioContextClass:FakeAudioContext,
+    escapeHtml:value=>String(value),
+    showToast(){},
+    onSessionChange(value){activeSession=value;},
+  });
+  await hybridController.toggle('dj-notes');
+  const failedRecognition=recognitions.at(-1);
+  failedRecognition?.onstart?.();
+  failedRecognition?.emitResult('Browser words were preserved',false);
+  failedRecognition?.onerror?.({error:'network'});
+  const hybridWorker=workers[0];
+  if(!hybridWorker||voiceNotes.value!=='Existing note.\nBrowser words were preserved'||!/on-device/i.test(voiceStatus.textContent))failures.push('Browser-service failure did not preserve streamed words and enter the Whisper fallback');
+  hybridWorker?.emit({type:'model-ready',model:'onnx-community/whisper-tiny.en'});
+  await new Promise(resolve=>setImmediate(resolve));
+  if(microphoneCalls!==1||!processor?.onaudioprocess)failures.push('Automatic Whisper fallback did not resume microphone capture after the browser speech service failed');
+  hybridController.destroy();
+
+  workers.length=0;microphoneCalls=0;trackStopped=false;voiceNotes.value='Existing note.';processor=null;activeSession=null;autosaveCancels=0;
   const controller=fixtureContext.createEdgebookDictationController({
     root:fixtureRoot,
     document:voiceDocument,
