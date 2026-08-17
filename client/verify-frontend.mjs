@@ -331,15 +331,15 @@ requireMatch(tradeSaveSource, /await loadManualDuplicateCandidates\(\)[\s\S]*?fi
 requireMatch(duplicateResolutionSource, /duplicateNumericClose\(existing\.entry,incoming\.entry,\.005\)[\s\S]*?duplicateNumericClose\(existing\.exit,incoming\.exit,\.005\)[\s\S]*?duplicateNumericClose\(existing\.size,incoming\.size,\.02\)/, 'manual duplicate check covers near entry exit and size values');
 requireMatch(dataAdapter, /async create\(trade\)[\s\S]*?isAmbiguousCreateError\(error\)[\s\S]*?api\.get\([\s\S]*?encodeURIComponent\(trade\.id\)[\s\S]*?tradeCreateFingerprint\(current\) === tradeCreateFingerprint\(trade\)/, 'lost trade-create response reconciliation');
 requireMatch(dataAdapter, /tradeCreateFingerprint[\s\S]*?pnl:[\s\S]*?entryTime:[\s\S]*?psychology:[\s\S]*?brokerData:/, 'complete normalized trade-create recovery fingerprint');
-requireMatch(app, /function calFinancialForDay[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?estimatedGross[\s\S]*?provisional/, 'calendar shared verified-net and estimated-gross aggregation');
-requireMatch(app, /function renderCalStats[\s\S]*?Overall realised[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'calendar financial provenance summary');
-requireMatch(app, /function hmFilteredTrades[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?function renderHeatmap[\s\S]*?Overall P&L[\s\S]*?Est\. gross[\s\S]*?Provisional total/, 'heatmap shared realized-close financial ledger');
-requireMatch(app, /function djDayStats[\s\S]*?financialPresentationLedgerForTrades[\s\S]*?verifiedNet[\s\S]*?estimatedGross/, 'daily journal shared day-level financial aggregation');
+requireMatch(app, /function calFinancialForDay[\s\S]*?financialDisplayViewForTrades[\s\S]*?estimatedGross[\s\S]*?provisional/, 'calendar shared mixed-provisional financial aggregation');
+requireMatch(app, /function renderCalStats[\s\S]*?Overall month P&L[\s\S]*?Est\. gross[\s\S]*?Mixed provisional/, 'calendar explicit complete-versus-provisional provenance summary');
+requireMatch(app, /function hmFilteredTrades[\s\S]*?financialDisplayViewForTrades[\s\S]*?function renderHeatmap[\s\S]*?Overall range P&L[\s\S]*?Est\. gross[\s\S]*?Mixed provisional/, 'heatmap shared mixed-provisional realized-close ledger');
+requireMatch(app, /function djDayStats[\s\S]*?financialDisplayViewForTrades[\s\S]*?verifiedNet[\s\S]*?estimatedGross/, 'daily journal shared mixed-provisional day-level aggregation');
 requireMatch(app, /function tradeJournalCsv[\s\S]*?P&L Status[\s\S]*?Calculated Gross[\s\S]*?Fees Included/, 'CSV financial provenance columns');
 requireMatch(app, /function tradeJournalCsv[\s\S]*?Duration Seconds/, 'CSV exact trade-duration columns');
 requireMatch(app, /const TABLE_HEADS[\s\S]*?Entry time[\s\S]*?Duration/, 'dashboard and journal trade-duration column');
 requireMatch(app, /Average hold:[\s\S]*?timed trade/, 'analytics average holding-duration metric');
-requireMatch(app, /analytics-pnl-coverage[\s\S]*?calculated gross P&L[\s\S]*?Estimates remain excluded from outcome analytics/, 'verified-only analytics estimate disclosure');
+requireMatch(app, /analytics-pnl-coverage[\s\S]*?Mixed provisional analytics[\s\S]*?calculated gross estimate[\s\S]*?included provisionally/, 'mixed-provisional analytics estimate disclosure');
 requireMatch(duplicateResolutionSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'duplicate resolution waits for persistence');
 requireMatch(jsonImportSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite/, 'JSON import waits for persistence');
 requireMatch(csvImportCommitSource, /const saved=await DataStore\.saveTrades\(trades\);[\s\S]*?if\(!saved\)[\s\S]*?recoverTradesAfterFailedWrite[\s\S]*?return;[\s\S]*?closeModal/, 'CSV import waits for persistence before closing');
@@ -529,7 +529,7 @@ requireMatch(app, /function equityTradeTimestamp\b/, 'equity close timestamp pro
 requireMatch(app, /cubicInterpolationMode:['"]monotone['"]/, 'monotone equity line interpolation');
 requireMatch(app, /pointRadius:context=>context\.raw\?\.synthetic\?0:\(displayedEquityPoints\.length===1\?4:0\)[\s\S]{0,220}?pointHoverRadius:4/, 'visible first equity point with decluttered multi-point curve');
 requireMatch(app, /maxTicksLimit:7[\s\S]{0,180}?equityDateTick/, 'bounded date ticks on equity curve');
-requireMatch(app, /Cumulative P&L:\s*\$\{signedMoney\(point\.y/, 'cumulative P&L equity tooltip');
+requireMatch(app, /Cumulative \$\{view\.degraded\?['"]provisional ['"]:['"]['"]\}P&L:\s*\$\{signedMoney\(point\.y/, 'authority-aware cumulative P&L equity tooltip');
 requireMatch(app, /aggregateEquityDaily\(rawEquityPoints\)/, 'daily-close smoothing for date equity view');
 requireMatch(app, /ensureEquityStartAnchor\(displayedEquityPoints,chartAxisMode\)/, 'zero baseline anchor for the first equity close');
 requireMatch(app, /visibleEquityValues=displayedEquityPoints\.map[\s\S]{0,160}?equityAxisDomain\(visibleEquityValues\)/, 'dynamic equity Y-domain from visible points');
@@ -543,7 +543,8 @@ requireMatch(app, /id=["']equity-empty["'][\s\S]{0,100}?Log a completed trade/, 
 rejectMatch(app, /labels:closed\.map\(\(_,i\)=>['"]T['"]\+\(i\+1\)\)/, 'opaque T-number equity labels');
 
 const dashboardMetricsSource = sourceBetween('function updateMetrics', 'function acctTagCell');
-requireMatch(dashboardMetricsSource, /pnlEl\.textContent=coverage\.overallComplete\?signedMoney\(net,c,coverage\.moneyDigits\):['"]—['"]/, 'dashboard Overall P&L KPI uses provider precision and fails closed for incomplete currency conversion');
+requireMatch(dashboardMetricsSource, /pnlEl\.textContent=Number\.isFinite\(net\)\?signedMoney\(net,c,coverage\.moneyDigits\):['"]—['"][\s\S]*?pnlLabel\.textContent=view\.analysisLabel/, 'dashboard KPI uses the authority-labelled best-available financial view');
+requireMatch(app, /label:['"]Overall P&L['"],value:coverage\.overallComplete\?signedMoney\(coverage\.overallNet/, 'dashboard keeps exact Overall P&L separately gated');
 rejectMatch(dashboardMetricsSource, /pnlEl\.textContent=\(net>=0\?['"]\+['"]:['"]['"]\)\+c\+Math\.abs\(net\)/, 'dashboard Net P&L KPI sign-dropping formatter');
 try {
   const signedMoneyContext = {};
@@ -614,7 +615,7 @@ try {
 for (const insightCanvas of ['symbol-chart', 'outcome-chart', 'direction-chart', 'day-chart']) {
   requireMatch(app, new RegExp(`id=["']${insightCanvas}["']`), `dashboard insight canvas ${insightCanvas}`);
 }
-requireMatch(app, /function renderDashboardInsights[\s\S]*?realizedLedgerForTrades\(src\)/, 'dashboard insights use the actual-date realised-event ledger');
+requireMatch(app, /function renderDashboardInsights\(ledgerRows,closed,displayC,palette,view\)[\s\S]*?const ledger=ledgerRows\.filter/, 'dashboard insights use the shared authority-labelled event ledger');
 requireMatch(app, /const day=String\(event\.ledgerDate\|\|''\)\.slice\(0,10\)/, 'day consistency canonicalizes timestamp dates');
 requireMatch(app, /\.insight-ring-wrap canvas\{width:100%!important;height:100%!important\}/, 'dashboard ring canvases have bounded empty-state dimensions');
 requireMatch(app, /\.insight-ring-wrap\{[^}]*width:118px;height:118px/, 'prominent dashboard outcome rings');
@@ -623,7 +624,7 @@ requireMatch(app, /class=["']insight-mini-card insight-ring-card["'][\s\S]{0,220
 requireMatch(app, /bySymbol[\s\S]{0,500}?Math\.abs\(b\.pnl\)-Math\.abs\(a\.pnl\)/, 'signed symbol P&L ranking retains gains and losses');
 requireMatch(app, /outcomeCounts=\[outcomes\.filter\(value=>value>0\)[\s\S]{0,160}?value===0/, 'outcome mix includes break-even trades');
 requireMatch(app, /dayCounts=\[dayValues\.filter\(value=>value>\.005\)[\s\S]{0,180}?Math\.abs\(value\)<=\.005/, 'day consistency includes profitable losing and flat days');
-requireMatch(app, /function renderDashboardInsights\([^)]*palette\)[\s\S]*?backgroundColor:\[palette\.positive,palette\.negative,palette\.neutral\]/, 'dashboard doughnuts use semantic theme colors');
+requireMatch(app, /function renderDashboardInsights\([^)]*palette,view\)[\s\S]*?backgroundColor:\[palette\.positive,palette\.negative,palette\.neutral\]/, 'dashboard doughnuts use semantic theme colors');
 requireMatch(app, /symbolRows\.map\(row=>row\.pnl>=0\?palette\.positiveStrong:palette\.negativeStrong\)/, 'symbol P&L bars use semantic theme colors');
 requireMatch(app, /directionNames\.map\(name=>directionStats\[name\]\.pnl>=0\?palette\.positiveStrong:palette\.negativeStrong\)/, 'direction P&L bars use semantic theme colors');
 requireMatch(app, /grid:\{color:context=>Number\(context\.tick\?\.value\)===0\?palette\.zeroGrid:palette\.grid/, 'dashboard chart grids use semantic theme colors');
@@ -873,22 +874,22 @@ try {
     '{renderDashboardInsights}',
   );
   const realised = [
-    { symbol: 'XAUUSD', ledgerDate: '2026-08-01T00:00:00.000Z', ledgerPnl: 120, direction: 'Long', accountId: 'a' },
-    { symbol: 'BTCUSD', ledgerDate: '2026-08-02', ledgerPnl: -200, direction: 'Short', accountId: 'a' },
-    { symbol: 'XAUUSD', ledgerDate: '2026-08-02', ledgerPnl: -20, direction: 'Long', accountId: 'a' },
-    { symbol: 'EURUSD', ledgerDate: '2026-08-03', ledgerPnl: 0, direction: 'Short', accountId: 'a' },
+    { symbol: 'XAUUSD', ledgerDate: '2026-08-01T00:00:00.000Z', displayPnl: 120, direction: 'Long', accountId: 'a' },
+    { symbol: 'BTCUSD', ledgerDate: '2026-08-02', displayPnl: -200, direction: 'Short', accountId: 'a' },
+    { symbol: 'XAUUSD', ledgerDate: '2026-08-02', displayPnl: -20, direction: 'Long', accountId: 'a' },
+    { symbol: 'EURUSD', ledgerDate: '2026-08-03', displayPnl: 0, direction: 'Short', accountId: 'a' },
   ];
   const closedOutcomes = [
-    { pnl: 100, direction: 'Long', accountId: 'a' },
-    { pnl: -200, direction: 'Short', accountId: 'a' },
-    { pnl: 0, direction: 'Short', accountId: 'a' },
+    { _displayPnl: 100, direction: 'Long', accountId: 'a' },
+    { _displayPnl: -200, direction: 'Short', accountId: 'a' },
+    { _displayPnl: 0, direction: 'Short', accountId: 'a' },
   ];
-  insightRenderer.renderDashboardInsights(realised, closedOutcomes, '$', false, insightPalette);
+  insightRenderer.renderDashboardInsights(realised, closedOutcomes, '$', insightPalette, { degraded: true });
   const symbolConfig = renderedInsightCharts.get('symbol-chart')?.config;
   const outcomeConfig = renderedInsightCharts.get('outcome-chart')?.config;
   const directionConfig = renderedInsightCharts.get('direction-chart')?.config;
   const dayConfig = renderedInsightCharts.get('day-chart')?.config;
-  if (symbolConfig?.data?.labels?.[0] !== 'BTCUSD' || symbolConfig?.data?.datasets?.[0]?.data?.[0] !== -200 || !insightDocument.getElementById('symbol-summary').textContent.includes('net -$100')) {
+  if (symbolConfig?.data?.labels?.[0] !== 'BTCUSD' || symbolConfig?.data?.datasets?.[0]?.data?.[0] !== -200 || !insightDocument.getElementById('symbol-summary').textContent.includes('mixed provisional total -$100')) {
     failures.push('P&L-by-symbol insight omitted or misranked a losing symbol');
   }
   if (outcomeConfig?.data?.datasets?.[0]?.data?.join(',') !== '1,1,1' || insightDocument.getElementById('outcome-rate').textContent !== '33%') {
@@ -2019,7 +2020,7 @@ try {
   failures.push(`Calendar navigation fixture failed: ${error.message}`);
 }
 
-requireMatch(app, /const closed=financialIncomplete\?\[\]:financialScopeForTrades\(src\)\.included[^;]*?\.sort\(compareTradeChronology\)/, 'explicit canonical analytics trade chronology sort');
+requireMatch(app, /const closed=view\.closedRows\.map\([^;]*?\)\.sort\(compareTradeChronology\)/, 'explicit mixed-provisional analytics trade chronology sort');
 requireMatch(app, /deterministic bootstrap/i, 'deterministic bootstrap analytics label');
 rejectMatch(app, /Your real edge|Revenge trading|60[–-]70%|trades to 95%/i, 'fabricated analytics claim');
 
@@ -2667,7 +2668,7 @@ try {
   const groupDocument = makeFakeDocument();
   groupDocument.getElementById('hm-acct').value = 'all';
   const heatmapGroupSource = sourceBetween('function renderHeatmap', 'function buildHmGridWithInsert');
-  const maliciousHeatmapTrade = { strategy: maliciousMarkup, pnl: 10, ledgerPnl:10, financialIsEstimate:false, accountId: null };
+  const maliciousHeatmapTrade = { strategy: maliciousMarkup, pnl: 10, ledgerPnl:10, displayPnl:10, financialIsEstimate:false, accountId: null };
   const { exports: heatmapGroup } = evaluateSecurityFixture(
     `${securityHelperSource}\n${positionSemanticsSource}\n${heatmapGroupSource}`,
     {
@@ -2687,6 +2688,8 @@ try {
       tradePnlInAccountCurrency: (trade, value = trade?.pnl) => Number(value),
       financialScopeForTrades: source => ({ included: source.map(trade => ({trade,presentation:{amount:Number(trade.pnl)}})) }),
       financialCoverageForTrades: () => ({ overallComplete: true, overallIncompleteCount: 0, disconnectedConnectionCount: 0 }),
+      financialDisplayViewForTrades: () => ({ degraded:false,estimatedCount:0,coverage:{overallComplete:true,overallNet:10,overallIncompleteCount:0,disconnectedConnectionCount:0} }),
+      financialDisplayViewNotice: () => '',
       financialCoverageIssueText: () => '',
       financialCoverageSnapshotText: () => '',
       FxRates: { toUSD: value => value },
@@ -2895,6 +2898,7 @@ const coachingFunctions = app.match(/function coachingLabel[\s\S]*?(?=\nasync fu
 if (!coachingFunctions) {
   failures.push('Local coaching functions could not be isolated for runtime verification');
 } else {
+  let coachingDegraded = false;
   const coachingContext = {
     tradesForContext: () => [
       { date: '2026-08-01', entryTime: '09:30', pnl: 120, accountId: 'acct_1', strategy: 'Breakout', emotion: 'Calm' },
@@ -2914,6 +2918,14 @@ if (!coachingFunctions) {
     financialCoverageForTrades: () => ({ overallComplete: true, conversionUnavailableCount: 0 }),
     financialCoverageIssueText: coverage => coverage.overallComplete ? '' : 'one broker value is unavailable',
     financialScopeForTrades: source => ({ included: source.map(trade => ({ trade, presentation: { amount:Number(trade.pnl) } })) }),
+    financialDisplayViewForTrades: source => ({
+      degraded: coachingDegraded,
+      estimatedCount: coachingDegraded ? 1 : 0,
+      conversionUnavailableCount: 0,
+      coverage: { overallComplete: !coachingDegraded },
+      closedRows: source.map(trade => ({ trade, displayPnl: Number(trade.pnl), financialDisplayKind: coachingDegraded ? 'estimated_gross' : 'manual_reported' })),
+    }),
+    financialDisplayViewNotice: () => 'Exact broker Overall P&L remains withheld; mixed provisional values are shown.',
   };
   vm.createContext(coachingContext);
   try {
@@ -2926,9 +2938,9 @@ if (!coachingFunctions) {
     if (coachingContext.reports[0] !== coachingContext.repeatReport) {
       failures.push('Local coaching report generation is not deterministic');
     }
-    coachingContext.financialCoverageForTrades = () => ({ overallComplete: false, conversionUnavailableCount: 1 });
+    coachingDegraded = true;
     vm.runInContext(`globalThis.incompleteReport=buildLocalCoachingReport('edge');`, coachingContext);
-    if (!/withheld[\s\S]*partial sample/i.test(coachingContext.incompleteReport)) failures.push('Local coaching report calculated a partial sample with an unavailable currency conversion');
+    if (!/mixed provisional[\s\S]*exact broker Overall P&L remains withheld/i.test(coachingContext.incompleteReport)) failures.push('Local coaching report did not label degraded metrics while keeping exact Overall withheld');
   } catch (error) {
     failures.push(`Local coaching report runtime failed: ${error.message}`);
   }
@@ -3565,7 +3577,7 @@ try {
       isRealIsoDate: value => /^\d{4}-\d{2}-\d{2}$/.test(String(value)),
       tradeJournalDate: trade => String(trade?.date || '').slice(0, 10),
     },
-    '{tradeFinancialPresentation,financialScopeForTrades,financialPresentationLedgerForTrades,financialCoverageForTrades,financialCoverageIssueText,cTraderExactPnlBreakdown}',
+    '{tradeFinancialPresentation,financialScopeForTrades,financialPresentationLedgerForTrades,financialCoverageForTrades,financialCoverageIssueText,financialDisplayViewForTrades,financialDisplayViewNotice,cTraderExactPnlBreakdown}',
   );
   const baseExact = {
     id: 'provider-exact', accountId: 'broker-account', source: 'ctrader', symbol: 'XAUUSD', pnl: 12.5, isOpen: false,
@@ -3662,6 +3674,49 @@ try {
   coverage = financial.financialCoverageForTrades([estimateOnly], { allAccounts: true, accountId: 'all' });
   if (coverage.overallComplete || coverage.overallNet !== null || coverage.estimatedCount !== 1) failures.push('All-estimate broker rows masqueraded as zero Overall P&L');
 
+  // Production-incident regression: the 25K account has five journal values
+  // and eight calculated-gross values while exact provider net is unavailable.
+  // Every visible trade must contribute one best-available value to labelled
+  // provisional views, without relaxing the exact Overall P&L gate.
+  setHealthyConnection();
+  const incidentManualValues = [20, 10, -30, -25, -27.5];
+  const incidentEstimateValues = [-5, -6, -7, -8, -9, -4, -3, -6.34];
+  const incidentManual = incidentManualValues.map((pnl, index) => ({
+    ...manual,
+    id: `incident-manual-${index + 1}`,
+    pnl,
+    exact: { pnl: pnl.toFixed(2) },
+    exitAt: `2026-08-${String(index + 1).padStart(2, '0')}T06:00:00.000Z`,
+    date: `2026-08-${String(index + 1).padStart(2, '0')}`,
+  }));
+  const incidentEstimates = incidentEstimateValues.map((gross, index) => ({
+    ...estimateOnly,
+    id: `incident-estimate-${index + 1}`,
+    exitAt: `2026-08-${String(index + 6).padStart(2, '0')}T06:00:00.000Z`,
+    date: `2026-08-${String(index + 6).padStart(2, '0')}`,
+    brokerData: {
+      ...estimateOnly.brokerData,
+      calculatedGrossPnl: gross.toFixed(2),
+      calculatedGrossEvents: [{ executionId: `incident-close-${index + 1}`, executedAt: `2026-08-${String(index + 6).padStart(2, '0')}T06:00:00.000Z`, grossPnl: gross.toFixed(2) }],
+    },
+  }));
+  const incidentSource = [...incidentManual, ...incidentEstimates];
+  const incidentCoverage = financial.financialCoverageForTrades(incidentSource, { allAccounts: true, accountId: 'all' });
+  const incidentView = financial.financialDisplayViewForTrades(incidentSource, { allAccounts: true, accountId: 'all' });
+  const incidentNotice = financial.financialDisplayViewNotice(incidentView);
+  const incidentNet = incidentView.analysisRows.reduce((sum, row) => sum + row.displayPnl, 0);
+  const incidentLedgerNet = incidentView.analysisLedger.reduce((sum, row) => sum + row.displayPnl, 0);
+  const incidentWins = incidentView.closedRows.filter(row => row.displayPnl > 0).length;
+  const incidentLosses = incidentView.closedRows.filter(row => row.displayPnl < 0).length;
+  const incidentRowIds = new Set(incidentView.analysisRows.map(row => row.trade.id));
+  const incidentLedgerIds = new Set(incidentView.analysisLedger.map(row => row.id));
+  if (incidentCoverage.overallComplete || incidentCoverage.overallNet !== null) failures.push('Incident fixture relaxed exact Overall P&L authority');
+  if (incidentView.analysisLabel !== 'Mixed provisional P&L' || incidentView.analysisRows.length !== 13 || incidentView.analysisLedger.length !== 13 || incidentView.closedRows.length !== 13) failures.push(`Incident fixture did not expose all 13 visible trades once (${JSON.stringify({label:incidentView.analysisLabel,rows:incidentView.analysisRows.length,ledger:incidentView.analysisLedger.length,closed:incidentView.closedRows.length})})`);
+  if (incidentRowIds.size !== 13 || incidentLedgerIds.size !== 13) failures.push('Incident provisional view double-counted a visible trade');
+  if (Math.abs(incidentManualValues.reduce((sum, value) => sum + value, 0) - -52.5) > 1e-9 || Math.abs(incidentEstimateValues.reduce((sum, value) => sum + value, 0) - -48.34) > 1e-9 || Math.abs(incidentNet - -100.84) > 1e-9 || Math.abs(incidentLedgerNet - -100.84) > 1e-9) failures.push(`Incident provisional sums did not reconcile (${JSON.stringify({incidentNet,incidentLedgerNet})})`);
+  if (incidentWins !== 2 || incidentLosses !== 11 || incidentView.journalCount !== 5 || incidentView.estimatedCount !== 8) failures.push(`Incident provisional outcomes/provenance did not reconcile (${JSON.stringify({incidentWins,incidentLosses,journal:incidentView.journalCount,estimated:incidentView.estimatedCount})})`);
+  if (!/Exact broker Overall P&L remains withheld/.test(incidentNotice) || !/fees and swap excluded/.test(incidentNotice) || !/may overlap unresolved broker rows/.test(incidentNotice)) failures.push('Incident provisional notice omitted exact-authority, fee, or overlap disclosure');
+
   vpsState.connections = [];vpsState.statuses = new Map();vpsState.live = { reviews: new Map(), errors: new Map(), loading: new Set() };
   coverage = financial.financialCoverageForTrades([baseExact], { allAccounts: true, accountId: 'all' });
   if (coverage.overallComplete || coverage.accountStatusUnknownCount !== 1) failures.push('Existing broker row with unloaded connection/status state presented Overall P&L as complete');
@@ -3680,24 +3735,29 @@ try {
   const { exports: djStats } = evaluateSecurityFixture(
     djStatsSource,
     {
-      trades: [],
-      financialPresentationLedgerForTrades: () => [
-        { id: 'usd', ledgerDate: '2026-08-17', ledgerPnl: 10, financialIsEstimate: false, currency: 'USD' },
-        { id: 'unsupported', ledgerDate: '2026-08-17', ledgerPnl: -4, financialIsEstimate: false, currency: 'XYZ' },
+      trades: [
+        { id: 'usd', date: '2026-08-17', currency: 'USD' },
+        { id: 'unsupported', date: '2026-08-17', currency: 'XYZ' },
       ],
+      financialDisplayViewForTrades: () => ({
+        analysisLedger: [{ id: 'usd', ledgerDate: '2026-08-17', ledgerPnl: 10, displayPnl: 10, financialIsEstimate: false, financialKind: 'manual_reported', currency: 'USD' }],
+        coverage: { overallComplete: false, overallNet: null, overallIncompleteCount: 1 },
+        degraded: true,
+        conversionUnavailableCount: 1,
+        analysisLabel: 'Available provisional subtotal',
+      }),
       financialPresentationDate: (instant, timeZone, fallback) => fallback || null,
       tradeJournalDate: trade => trade?.date || '',
-      financialCoverageForTrades: () => ({ overallComplete: true, overallIncompleteCount: 0 }),
-      financialCoverageIssueText: () => '',
+      financialDisplayViewNotice: () => 'Exact broker Overall P&L remains withheld; one conversion is unavailable.',
       financialCoverageSnapshotText: () => '',
-      tradePnlToUSD: trade => trade.currency === 'USD' ? trade.pnl : Number.NaN,
     },
     '{djDayStats}',
   );
   const stats = djStats.djDayStats('2026-08-17');
-  if (!stats.incomplete || stats.unavailableCount !== 1 || stats.net !== null || stats.wr !== null || stats.best !== null || stats.count !== 2) failures.push('Daily Journal reported a partial current-FX day total/outcome sample');
-  requireMatch(app, /renderDashboardInsights\(financialIncomplete\?\[\]:src,closed/, 'dashboard insight charts fail closed on incomplete financial coverage');
-  requireMatch(app, /completedPnlVals = coverage\.overallComplete\?/, 'dashboard outcome cards fail closed on unavailable currency conversion');
+  if (!stats.incomplete || stats.unavailableCount < 1 || stats.net !== 10 || stats.wr !== 100 || stats.best?.id !== 'usd' || stats.count !== 2 || !/Exact broker Overall P&L remains withheld/.test(stats.issue)) failures.push('Daily Journal did not expose a labelled available subtotal while preserving conversion incompleteness');
+  requireMatch(app, /renderDashboardInsights\(equityRows,closed,displayC,palette,view\)/, 'dashboard insight charts consume the shared provisional ledger');
+  requireMatch(app, /const completedPnlVals = completed\.map\(pnlInDisplay\)\.filter\(Number\.isFinite\)/, 'dashboard outcome cards consume valued provisional outcomes');
+  requireMatch(app, /label:['"]Overall P&L['"],value:coverage\.overallComplete\?/, 'exact Overall P&L remains fail-closed while provisional views render');
 } catch (error) {
   failures.push(`Financial conversion fail-closed fixture failed: ${error.message}`);
 }

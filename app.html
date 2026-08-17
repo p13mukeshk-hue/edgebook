@@ -4804,7 +4804,7 @@ function ctraderConnectionCard(connection,status){
   if(awaitingReview)warningMessages.push(`${awaitingReview} cTrader position${awaitingReview===1?' is':'s are'} safely retained as broker executions but excluded from the journal and analytics because cTrader did not provide enough verified size or opening data. Edgebook did not guess financial values; these positions stay out of totals until cTrader exposes complete data or a verified review workflow is available.`);
   if(pendingExactMoneyRetries)warningMessages.push(`${pendingExactMoneyRetries} broker close${pendingExactMoneyRetries===1?' is':'s are'} awaiting exact money. Edgebook has excluded unresolved amounts from authoritative totals; automatic retries are active. No manual entry is needed.`);
   if(cashFlowScaleIncomplete)warningMessages.push(`Broker account-adjustment money scaling is incomplete (${cashFlowScale.scaledRows??'unknown'} scaled, ${cashFlowScale.unscaledRows??'unknown'} unscaled, ${cashFlowScale.pendingRetries} automatic retries pending). Raw provider units remain available, but adjustment subtotals and Excel monetary reconciliation are withheld. No manual entry is needed.`);
-  if(tradeHistoryIncomplete)warningMessages.push('Broker trade history is not yet verified complete from the provider registration boundary, so Overall P&L and dependent analytics are withheld. Edgebook will keep syncing automatically.');
+  if(tradeHistoryIncomplete)warningMessages.push('Broker trade history is not yet verified complete from the provider registration boundary, so exact Overall P&L is withheld. Clearly labelled mixed provisional views remain available while Edgebook keeps syncing automatically.');
   if(liveReviewUnavailable)warningMessages.push(`The live duplicate-reconciliation review ${liveLoading?'is still loading':liveError?'could not be loaded':'has not yet been loaded'}. Edgebook does not assume that zero candidates are pending, so Overall P&L remains withheld.`);
   const warningText=warningMessages.join(' ');
   const historySummary=status?.historicalImport||status?.historicalImportSummary||current?.historicalImport||current?.historicalImportSummary||null;
@@ -7357,6 +7357,81 @@ function financialCoverageSnapshotText(coverage){
   if(!coverage?.disconnectedConnectionCount)return '';
   return `${coverage.disconnectedConnectionCount} mapped broker connection${coverage.disconnectedConnectionCount===1?' is':'s are'} disconnected; displayed exact rows are a stored historical snapshot, not a currently synced account view.`;
 }
+function financialFallbackLedgerEvents(trade,presentation){
+  const timeZone=String(trade?.brokerData?.providerTradeDateTimeZone||'UTC');
+  const date=financialPresentationDate(trade?.exitAt,timeZone,trade?.exitDate||tradeJournalDate(trade));
+  return date?[{executionId:`trade:${trade?.id||trade?.recordId||''}:journal-snapshot`,date,pnl:presentation.amount,executedAt:trade?.exitAt||null,ledgerFallback:true}]:[];
+}
+function financialDisplayViewForTrades(source,{allAccounts=false,accountId=null}={}){
+  const coverage=financialCoverageForTrades(source,{allAccounts,accountId}),degraded=!coverage.overallComplete;
+  const acceptedCandidates=[...coverage.scope.included,...(degraded?coverage.scope.manualExcluded.map(row=>({...row,journalFallback:true})):[])];
+  const estimatedCandidates=degraded?coverage.scope.estimated:[];
+  const projectRows=candidates=>{
+    const available=[],unavailable=[];
+    for(const row of candidates){
+      const displayPnl=tradeFinancialAmount(row.trade,{allAccounts,amount:row.presentation.amount});
+      const projected={...row,displayPnl,financialDisplayKind:row.presentation.kind,financialIsBrokerExact:row.presentation.isBrokerNet===true,financialIsJournal:row.presentation.kind==='manual_reported',financialIsEstimate:row.presentation.isEstimate===true};
+      (Number.isFinite(displayPnl)?available:unavailable).push(projected);
+    }
+    return {available,unavailable};
+  };
+  const accepted=projectRows(acceptedCandidates),estimated=projectRows(estimatedCandidates);
+  const projectLedger=candidates=>{
+    const ledger=[],undated=[];
+    for(const row of candidates){
+      const events=row.presentation.isEstimate?calculatedGrossLedgerEvents(row.trade):row.journalFallback?financialFallbackLedgerEvents(row.trade,row.presentation):tradeRealizedEvents(row.trade);
+      if(!events.length){undated.push(row);continue;}
+      for(const event of events){
+        const displayPnl=tradeFinancialAmount(row.trade,{allAccounts,amount:Number(event.pnl)});
+        if(!Number.isFinite(displayPnl))continue;
+        ledger.push({...row.trade,ledgerDate:event.date,ledgerPnl:Number(event.pnl),displayPnl,realizedEvent:event,financialKind:row.presentation.kind,financialDisplayKind:row.presentation.kind,financialIsBrokerExact:row.presentation.isBrokerNet===true,financialIsJournal:row.presentation.kind==='manual_reported',financialIsEstimate:row.presentation.isEstimate===true});
+      }
+    }
+    return {ledger,undated};
+  };
+  const acceptedLedger=projectLedger(acceptedCandidates),estimatedLedger=projectLedger(estimatedCandidates);
+  const acceptedRows=accepted.available,estimatedRows=estimated.available;
+  const acceptedNet=acceptedRows.length?acceptedRows.reduce((sum,row)=>sum+row.displayPnl,0):null;
+  const estimatedGross=estimatedRows.length?estimatedRows.reduce((sum,row)=>sum+row.displayPnl,0):null;
+  const useEstimatedOnly=degraded&&!acceptedRows.length&&estimatedRows.length>0;
+  const analysisRows=degraded?[...acceptedRows,...estimatedRows]:acceptedRows;
+  const analysisLedger=degraded?[...acceptedLedger.ledger,...estimatedLedger.ledger]:acceptedLedger.ledger;
+  const closedRows=analysisRows.filter(row=>!tradeIsOpen(row.trade));
+  const conversionUnavailableCount=degraded?accepted.unavailable.length+estimated.unavailable.length:accepted.unavailable.length;
+  const analysisNet=analysisRows.length?analysisRows.reduce((sum,row)=>sum+row.displayPnl,0):null;
+  const brokerExactCount=acceptedRows.filter(row=>row.financialIsBrokerExact).length,journalCount=acceptedRows.filter(row=>row.financialIsJournal).length;
+  const analysisLabel=!degraded?'Overall P&L'
+    :conversionUnavailableCount?'Available provisional subtotal'
+    :estimatedRows.length?(acceptedRows.length?'Mixed provisional P&L':'Estimated gross snapshot')
+    :brokerExactCount&&journalCount?'Mixed provisional P&L'
+    :brokerExactCount?'Available broker snapshot'
+    :journalCount?'Journal snapshot P&L'
+    :'Provisional P&L unavailable';
+  return {
+    coverage,degraded,useEstimatedOnly,analysisLabel,
+    acceptedRows,estimatedRows,analysisRows,closedRows,
+    acceptedLedger:acceptedLedger.ledger,estimatedLedger:estimatedLedger.ledger,analysisLedger,
+    acceptedNet,estimatedGross,analysisNet,
+    brokerExactCount,journalCount,
+    estimatedCount:estimatedRows.length,
+    conversionUnavailableCount,acceptedConversionUnavailableCount:accepted.unavailable.length,estimatedConversionUnavailableCount:estimated.unavailable.length,
+    undatedCount:(degraded?[...acceptedLedger.undated,...estimatedLedger.undated]:acceptedLedger.undated).length,
+    unavailableValueCount:coverage.scope.unavailable.length,
+  };
+}
+function financialDisplayViewNotice(view){
+  if(!view?.degraded)return financialCoverageSnapshotText(view?.coverage);
+  const parts=[];
+  if(view.brokerExactCount)parts.push(`${view.brokerExactCount} broker-exact value${view.brokerExactCount===1?'':'s'}`);
+  if(view.journalCount)parts.push(`${view.journalCount} journal-reported value${view.journalCount===1?'':'s'}`);
+  if(view.estimatedCount)parts.push(`${view.estimatedCount} calculated gross estimate${view.estimatedCount===1?'':'s'} (fees and swap excluded)`);
+  const visible=parts.length?parts.join(' plus '):'no currently valued rows';
+  const exclusions=[];
+  if(view.conversionUnavailableCount)exclusions.push(`${view.conversionUnavailableCount} value${view.conversionUnavailableCount===1?'':'s'} without a safe currency conversion`);
+  if(view.undatedCount)exclusions.push(`${view.undatedCount} valued row${view.undatedCount===1?'':'s'} without a usable close date`);
+  const reconciliation=view.journalCount&&view.coverage?.brokerTrackedAccountCount?' Journal-reported rows may overlap unresolved broker rows until reconciliation completes.':'';
+  return `Exact broker Overall P&L remains withheld: ${financialCoverageIssueText(view.coverage)||'financial coverage is incomplete'}. The visible ${view.analysisLabel.toLowerCase()} uses ${visible}; it is a clearly labelled working provisional view, not exact broker net or live equity.${reconciliation}${exclusions.length?` Excluded from this view: ${exclusions.join(' and ')}.`:''}`;
+}
 function cTraderExactPnlBreakdown(trade){
   if(!isCTraderTrade(trade)||!tradeHasPnl(trade))return null;
   const data=trade?.brokerData||{},coverage=data.pnlComponentsCoverage||{};
@@ -8246,7 +8321,7 @@ function refreshAll(){
   if(activePage!=='mood') renderMoodHistory();
 }
 
-function renderDashboardFinancialSummary(coverage,{currency,accountId,isAll}){
+function renderDashboardFinancialSummary(coverage,{currency,accountId,isAll,view}){
   const element=document.getElementById('dashboard-financial-summary');if(!element)return;
   const adjustments=loadedAccountCashFlows(accountId),tradeAdjustments=adjustments.rows.filter(flow=>flow.category==='trading_related_adjustment');
   const convertedAdjustments=tradeAdjustments.map(flow=>{
@@ -8262,6 +8337,7 @@ function renderDashboardFinancialSummary(coverage,{currency,accountId,isAll}){
   const hasComponents=coverage.overallComplete&&coverage.providerExactCount>0&&coverage.manualReportedCount===0&&coverage.componentExactCount===coverage.providerExactCount&&coverage.componentConversionComplete;
   const items=[
     {label:'Overall P&L',value:coverage.overallComplete?signedMoney(coverage.overallNet,currency,coverage.moneyDigits):'—',amount:coverage.overallComplete?coverage.overallNet:null},
+    ...(view?.degraded?[{label:view.analysisLabel,value:Number.isFinite(view.analysisNet)?signedMoney(view.analysisNet,currency,coverage.moneyDigits):'—',amount:Number.isFinite(view.analysisNet)?view.analysisNet:null}]:[]),
     {label:'Gross P&L',value:hasComponents?signedMoney(coverage.grossProfit,currency,coverage.moneyDigits):'—',amount:hasComponents?coverage.grossProfit:null},
     {label:'Commission',value:hasComponents?signedMoney(coverage.commission,currency,coverage.moneyDigits):'—',amount:hasComponents?coverage.commission:null},
     {label:'Swap',value:hasComponents?signedMoney(coverage.swap,currency,coverage.moneyDigits):'—',amount:hasComponents?coverage.swap:null},
@@ -8269,10 +8345,10 @@ function renderDashboardFinancialSummary(coverage,{currency,accountId,isAll}){
     {label:'Trade-related acct. adj.',value:adjustmentSubtotalAvailable?signedMoney(adjustmentTotal,currency,coverage.moneyDigits):'—',amount:adjustmentSubtotalAvailable?adjustmentTotal:null},
   ];
   const manualNote=coverage.excludedManualCount?`${coverage.excludedManualCount} manual/unreconciled value${coverage.excludedManualCount===1?' is':'s are'} kept visible in the journal but excluded from broker Overall P&L${coverage.excludedManualConversionUnavailableCount?' (amount cannot be converted safely).':` (${signedMoney(coverage.excludedManualNet,currency,2)}).`}`:'';
-  const estimateNote=coverage.estimatedCount?`${coverage.estimatedCount} calculated gross estimate${coverage.estimatedCount===1?' is':'s are'} provisional and excluded${coverage.estimatedConversionUnavailableCount?' (amount cannot be converted safely).':` (${signedMoney(coverage.estimatedGross,currency,2)}).`}`:'';
+  const estimateNote=coverage.estimatedCount?`${coverage.estimatedCount} calculated gross estimate${coverage.estimatedCount===1?' is':'s are'} provisional and excluded from exact broker Overall P&L${coverage.estimatedConversionUnavailableCount?' (amount cannot be converted safely).':` (${signedMoney(coverage.estimatedGross,currency,2)}); they remain included in the labelled mixed provisional view.`}`:'';
   const componentNote=!hasComponents&&coverage.providerExactCount?`Full component reconciliation is unavailable: ${coverage.componentExactCount} of ${coverage.providerExactCount} broker-exact net trade${coverage.providerExactCount===1?' has':'s have'} complete gross/fee components. Component cards stay blank rather than implying they reconcile to Overall P&L.`:'';
   const conversionNote=coverage.conversionUnavailableCount?`${coverage.conversionUnavailableCount} included value${coverage.conversionUnavailableCount===1?' has':'s have'} unsupported or mismatched currency, so no partial Overall P&L is shown.`:'';
-  const incompleteNote=!coverage.overallComplete?`Overall P&L is withheld rather than showing a known-only subtotal: ${financialCoverageIssueText(coverage)||'financial coverage is incomplete'}.`:'';
+  const incompleteNote=!coverage.overallComplete?financialDisplayViewNotice(view):'';
   const snapshotNote=financialCoverageSnapshotText(coverage);
   const overallScopeNote=coverage.brokerTrackedAccountCount
     ? coverage.manualReportedCount
@@ -8290,14 +8366,14 @@ function updateMetrics(){
   const pid=activePageAcct['dashboard']||'all';
   const isAll = pid==='all';
   const c = isAll ? '$' : acctCur(pid);
-  const coverage=financialCoverageForTrades(src,{allAccounts:isAll,accountId:pid});
-  const rows=coverage.scope.included;
-  const pnlInDisplay = row => tradeFinancialAmount(row.trade,{allAccounts:isAll,amount:row.presentation.amount});
+  const view=financialDisplayViewForTrades(src,{allAccounts:isAll,accountId:pid}),coverage=view.coverage;
+  const rows=view.analysisRows;
+  const pnlInDisplay = row => row.displayPnl;
   const realized = rows;
   const completed = rows.filter(row=>!tradeIsOpen(row.trade));
-  const realizedPnlVals = coverage.overallComplete?realized.map(pnlInDisplay).filter(Number.isFinite):[];
-  const completedPnlVals = coverage.overallComplete?completed.map(pnlInDisplay).filter(Number.isFinite):[];
-  const net = coverage.overallNet;
+  const realizedPnlVals = realized.map(pnlInDisplay).filter(Number.isFinite);
+  const completedPnlVals = completed.map(pnlInDisplay).filter(Number.isFinite);
+  const net = view.analysisNet;
   const wins = completedPnlVals.filter(v=>v>0), losses = completedPnlVals.filter(v=>v<0);
   const avgW = wins.length ? wins.reduce((a,v)=>a+v,0)/wins.length : null;
   const avgL = losses.length ? losses.reduce((a,v)=>a+v,0)/losses.length : null;
@@ -8306,18 +8382,18 @@ function updateMetrics(){
   const open = src.filter(tradeIsOpen);
 
   const pnlEl=document.getElementById('m-pnl');
-  pnlEl.textContent=coverage.overallComplete?signedMoney(net,c,coverage.moneyDigits):'—';
-  pnlEl.className='mc-value '+(!coverage.overallComplete?'neu':net>0?'pos':net<0?'neg':'neu');
-  const pnlLabel=document.getElementById('m-pnl-label');if(pnlLabel)pnlLabel.textContent='Overall P&L';
+  pnlEl.textContent=Number.isFinite(net)?signedMoney(net,c,coverage.moneyDigits):'—';
+  pnlEl.className='mc-value '+(!Number.isFinite(net)?'neu':net>0?'pos':net<0?'neg':'neu');
+  const pnlLabel=document.getElementById('m-pnl-label');if(pnlLabel)pnlLabel.textContent=view.analysisLabel;
   const rateNote = isAll ? ' · est. current-FX USD' : '';
-  const exactNote=coverage.providerExactCount?`${coverage.providerExactCount} broker-exact trade${coverage.providerExactCount===1?'':'s'}`:'';
-  const manualOnlyNote=coverage.manualReportedCount?`${coverage.manualReportedCount} journal-reported trade${coverage.manualReportedCount===1?'':'s'}`:'';
-  const estimateNote=coverage.estimatedCount?` · ${coverage.estimatedCount} est. gross excluded`:'';
-  const incompleteNote=!coverage.overallComplete?` · incomplete: ${financialCoverageIssueText(coverage)||'financial coverage is not complete'}`:'';
+  const exactNote=view.brokerExactCount?`${view.brokerExactCount} broker-exact trade${view.brokerExactCount===1?'':'s'}`:'';
+  const manualOnlyNote=view.journalCount?`${view.journalCount} journal-reported trade${view.journalCount===1?'':'s'}`:'';
+  const estimateNote=view.estimatedCount?` · ${view.estimatedCount} calculated-gross trade${view.estimatedCount===1?'':'s'} included provisionally (fees excluded)`:'';
+  const incompleteNote=view.degraded?` · exact Overall withheld · mixed provisional view`:'';
   const snapshotNote=coverage.disconnectedConnectionCount?` · historical snapshot: ${coverage.disconnectedConnectionCount} broker connection${coverage.disconnectedConnectionCount===1?'':'s'} disconnected`:'';
   document.getElementById('m-pnl-change').textContent=([exactNote,manualOnlyNote].filter(Boolean).join(' + ')||'No exact or journal-reported P&L yet')+rateNote+estimateNote+incompleteNote+snapshotNote;
   document.getElementById('m-wr').textContent=completedPnlVals.length?Math.round(wins.length/completedPnlVals.length*100)+'%':'—';
-  document.getElementById('m-wr-sub').textContent=coverage.overallComplete?(completedPnlVals.length?wins.length+' W / '+losses.length+' L':'closed-position outcomes'):'financial coverage incomplete';
+  document.getElementById('m-wr-sub').textContent=completedPnlVals.length?`${wins.length} W / ${losses.length} L${view.degraded?' · mixed provisional outcomes':''}`:view.degraded?'No valued provisional outcomes':'closed-position outcomes';
   document.getElementById('m-total').textContent=src.length;
   document.getElementById('m-open-sub').textContent=open.length+' open';
   document.getElementById('m-avgw').textContent=avgW!==null?'+'+c+avgW.toFixed(0):'—';
@@ -8326,7 +8402,7 @@ function updateMetrics(){
   const ctx=activePageAcct['dashboard'];
   const equityNote = isAll ? 'All accounts · est. current-FX USD' : `P&L — ${acctName(ctx)}`;
   document.getElementById('equity-sub').textContent=equityNote;
-  renderDashboardFinancialSummary(coverage,{currency:c,accountId:pid,isAll});
+  renderDashboardFinancialSummary(coverage,{currency:c,accountId:pid,isAll,view});
 }
 
 function acctTagCell(t){
@@ -8440,7 +8516,7 @@ function tradeRow(t){
       : pnl >= 0
       ? `<span class="pnl-pos" title="${escapeHtml(bd)}" style="cursor:help">+${pnlC}${pnl.toFixed(2)}</span>`
       : `<span class="pnl-neg" title="${escapeHtml(bd)}" style="cursor:help">-${pnlC}${Math.abs(pnl).toFixed(2)}</span>`;
-  const calculatedGrossTitle='Calculated gross price movement only; commissions, swap and other fees are excluded. This value is not included in Net P&L or analytics.';
+  const calculatedGrossTitle='Calculated gross price movement only; commissions, swap and other fees are excluded. It is excluded from exact broker Overall P&L, but included in clearly labelled mixed provisional views while exact net is pending.';
   const authorityBadge=financialPresentation?.kind==='manual_reported'?'<span class="pnl-estimate-badge" title="Journal-reported P&L; not broker-exact">journal</span>':'';
   const displayedPnlStr=pnl===null&&calculatedGross
     ? `<span class="pnl-gross-estimate" title="${calculatedGrossTitle}"><span class="${calculatedGross.sign>0?'pnl-pos':calculatedGross.sign<0?'pnl-neg':'pnl-neu'}">${isOpen?'Open · ':''}${escapeHtml(calculatedGrossText(calculatedGross))}</span><span class="pnl-estimate-badge" aria-label="Calculated gross estimate; fees and swap excluded">est.</span></span>`
@@ -8693,15 +8769,8 @@ function buildCoachingMetrics(){
   const accountId=activePageAcct.analytics||'all';
   const allAccounts=accountId==='all';
   const symbol=allAccounts?'$':acctCur(accountId);
-  const coverage=financialCoverageForTrades(source,{allAccounts,accountId});
-  const pnlValue=trade=>{
-    const raw=Number(trade.pnl);
-    if(!Number.isFinite(raw))return null;
-    if(!allAccounts)return tradePnlInAccountCurrency(trade,raw);
-    const converted=tradePnlToUSD(trade,raw);
-    return Number.isFinite(converted)?converted:null;
-  };
-  const closed=coverage.overallComplete?financialScopeForTrades(source).included.filter(row=>!tradeIsOpen(row.trade)).map(row=>({...row.trade,_coachingPnl:pnlValue(row.trade)})).filter(trade=>Number.isFinite(trade._coachingPnl)).sort(compareTradeChronology):[];
+  const view=financialDisplayViewForTrades(source,{allAccounts,accountId}),coverage=view.coverage;
+  const closed=view.closedRows.map(row=>({...row.trade,_coachingPnl:row.displayPnl,_financialDisplayKind:row.financialDisplayKind})).sort(compareTradeChronology);
   const wins=closed.filter(trade=>trade._coachingPnl>0),losses=closed.filter(trade=>trade._coachingPnl<0);
   const grossWin=wins.reduce((sum,trade)=>sum+trade._coachingPnl,0);
   const grossLoss=Math.abs(losses.reduce((sum,trade)=>sum+trade._coachingPnl,0));
@@ -8726,20 +8795,10 @@ function buildCoachingMetrics(){
     equity+=trade._coachingPnl;peak=Math.max(peak,equity);const drawdown=Math.max(0,peak-equity);maxDrawdown=Math.max(maxDrawdown,drawdown);if(startingEquity>0&&peak>0)maxDrawdownPct=Math.max(maxDrawdownPct,drawdown/peak*100);
     currentLossStreak=trade._coachingPnl<0?currentLossStreak+1:0;maxLossStreak=Math.max(maxLossStreak,currentLossStreak);
   }
-  return {closed,n:closed.length,wins:wins.length,losses:losses.length,totalPnl,avgWin,avgLoss,winRate:closed.length?Math.round(wins.length/closed.length*100):0,rr:avgLoss?avgWin/avgLoss:avgWin>0?Infinity:null,profitFactor:grossLoss?grossWin/grossLoss:grossWin>0?Infinity:null,expectancy:closed.length?totalPnl/closed.length:0,maxDrawdown,maxDrawdownPct,maxLossStreak,strategies:rankGroups(strategies),emotions:rankGroups(emotions),timeBuckets:rankGroups(timeBuckets),symbol,allAccounts,financialIncomplete:!coverage.overallComplete,financialIssue:financialCoverageIssueText(coverage),conversionUnavailableCount:coverage.conversionUnavailableCount};
+  return {closed,n:closed.length,wins:wins.length,losses:losses.length,totalPnl,avgWin,avgLoss,winRate:closed.length?Math.round(wins.length/closed.length*100):0,rr:avgLoss?avgWin/avgLoss:avgWin>0?Infinity:null,profitFactor:grossLoss?grossWin/grossLoss:grossWin>0?Infinity:null,expectancy:closed.length?totalPnl/closed.length:0,maxDrawdown,maxDrawdownPct,maxLossStreak,strategies:rankGroups(strategies),emotions:rankGroups(emotions),timeBuckets:rankGroups(timeBuckets),symbol,allAccounts,financialIncomplete:view.degraded,financialIssue:financialDisplayViewNotice(view),conversionUnavailableCount:view.conversionUnavailableCount,estimatedCount:view.estimatedCount};
 }
 function buildLocalCoachingReport(type){
   const m=buildCoachingMetrics();
-  if(m.financialIncomplete)return `## KEY INSIGHT
-This coaching report is withheld because financial coverage is incomplete: ${m.financialIssue||'one or more broker values are not yet verified'}. Edgebook will not calculate coaching metrics from a partial sample.
-## WHAT IS MISSING
-Overall P&L must have complete broker history, resolved reconciliation candidates, recovered exact money and safe currency conversion before coaching resumes.
-## 3 ACTIONS
-1. Check the amber broker-connection status and let automatic exact-money retries finish.
-2. Resolve any live or historical duplicate candidates; do not type broker P&L manually.
-3. Re-run this report only after Overall P&L is marked complete.
-## NEXT CHECKPOINT
-The report will resume when every included financial row and connected-history checkpoint is verified.`;
   if(!m.n)return `## KEY INSIGHT
 No closed trades are available for this view, so Edgebook cannot calculate a reliable coaching signal yet.
 ## WHAT IS MISSING
@@ -8752,7 +8811,8 @@ Log closed trades with entry time, strategy and emotion tags. The report is calc
 The first useful directional signal normally appears after 20 consistently tagged trades.`;
   const money=value=>coachingMoney(value,m.symbol);
   const confidence=m.n>=100?'strong':m.n>=50?'moderate':m.n>=20?'early':'very early';
-  const baseInsight=`Across ${m.n} closed trades, win rate is ${m.winRate}%, expectancy is ${money(m.expectancy)} per trade and net P&L is ${money(m.totalPnl)}. This is a ${confidence} sample.`;
+  const provisional=m.financialIncomplete?` These are mixed provisional metrics${m.estimatedCount?` and include ${m.estimatedCount} calculated-gross outcome${m.estimatedCount===1?'':'s'} with fees excluded`:''}; exact broker Overall P&L remains withheld.`:'';
+  const baseInsight=`Across ${m.n} closed trades, win rate is ${m.winRate}%, expectancy is ${money(m.expectancy)} per trade and ${m.financialIncomplete?'mixed provisional':'net'} P&L is ${money(m.totalPnl)}. This is a ${confidence} sample.${provisional}`;
   const bestStrategy=m.strategies[0],worstStrategy=m.strategies.at(-1);
   const bestEmotion=m.emotions[0],worstEmotion=m.emotions.at(-1);
   const bestTime=m.timeBuckets[0],worstTime=m.timeBuckets.at(-1);
@@ -9604,12 +9664,9 @@ function setDashboardInsightEmpty(name,isEmpty){
 function insightLegendHtml(rows){
   return rows.map(row=>`<div class="insight-legend-row"><span class="insight-legend-name"><span class="insight-legend-dot" style="background:${safeAccountColor(row.color)}"></span>${escapeHtml(row.label)}</span><span class="insight-legend-val">${escapeHtml(row.value)}</span></div>`).join('');
 }
-function renderDashboardInsights(src,closed,displayC,isAll,palette){
+function renderDashboardInsights(ledgerRows,closed,displayC,palette,view){
   ['asset','symbol','outcome','direction','day'].forEach(key=>{if(CH[key]){CH[key].destroy();CH[key]=null;}});
-  const ledger=realizedLedgerForTrades(src).map(event=>{
-    const value=isAll?tradePnlToUSD(event,event.ledgerPnl):tradePnlInAccountCurrency(event,event.ledgerPnl);
-    return {...event,displayPnl:Number(value)};
-  }).filter(event=>Number.isFinite(event.displayPnl));
+  const ledger=ledgerRows.filter(event=>Number.isFinite(event.displayPnl));
 
   // Signed P&L by symbol. Unlike the previous doughnut, losses are retained.
   const bySymbol=new Map();
@@ -9619,13 +9676,13 @@ function renderDashboardInsights(src,closed,displayC,isAll,palette){
   });
   const symbolRows=[...bySymbol].map(([symbol,pnl])=>({symbol,pnl})).sort((a,b)=>Math.abs(b.pnl)-Math.abs(a.pnl)||a.symbol.localeCompare(b.symbol)).slice(0,5);
   setDashboardInsightEmpty('symbol',!symbolRows.length);
-  document.getElementById('symbol-summary').textContent=symbolRows.length?`${bySymbol.size} symbol${bySymbol.size===1?'':'s'} · net ${signedMoney(ledger.reduce((sum,event)=>sum+event.displayPnl,0),displayC,0)}`:'';
+  document.getElementById('symbol-summary').textContent=symbolRows.length?`${bySymbol.size} symbol${bySymbol.size===1?'':'s'} · ${view?.degraded?'mixed provisional total':'net'} ${signedMoney(ledger.reduce((sum,event)=>sum+event.displayPnl,0),displayC,0)}`:'';
   if(symbolRows.length){
     CH.symbol=new Chart(document.getElementById('symbol-chart'),{type:'bar',data:{labels:symbolRows.map(row=>row.symbol),datasets:[{data:symbolRows.map(row=>Number(row.pnl.toFixed(2))),backgroundColor:symbolRows.map(row=>row.pnl>=0?palette.positiveStrong:palette.negativeStrong),borderRadius:4,barThickness:9}]},options:{...CBO,indexAxis:'y',animation:{duration:320},plugins:{legend:{display:false},tooltip:{...dashboardTooltipOptions(palette),callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)}`}}},scales:{x:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?palette.zeroGrid:palette.grid},ticks:{color:palette.tick,font:{size:9,weight:500},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}},y:{grid:{display:false},ticks:{color:palette.tick,font:{size:9,weight:500},autoSkip:false}}}}});
   }
 
   // Completed-trade outcomes; a doughnut is appropriate because these are counts.
-  const outcomes=closed.map(trade=>Number(isAll?tradePnlToUSD(trade):tradePnlInAccountCurrency(trade))).filter(Number.isFinite);
+  const outcomes=closed.map(trade=>Number(trade._displayPnl)).filter(Number.isFinite);
   const outcomeCounts=[outcomes.filter(value=>value>0).length,outcomes.filter(value=>value<0).length,outcomes.filter(value=>value===0).length];
   const outcomeTotal=outcomeCounts.reduce((sum,value)=>sum+value,0),winRate=outcomeTotal?Math.round(outcomeCounts[0]/outcomeTotal*100):null;
   setDashboardInsightEmpty('outcome',!outcomeTotal);
@@ -9643,12 +9700,12 @@ function renderDashboardInsights(src,closed,displayC,isAll,palette){
   const directionNames=['Long','Short'];
   const directionStats=Object.fromEntries(directionNames.map(name=>[name,{pnl:0,count:0,wins:0}]));
   ledger.forEach(event=>{const name=event.direction==='Short'?'Short':'Long';directionStats[name].pnl+=event.displayPnl;});
-  closed.forEach(trade=>{const name=trade.direction==='Short'?'Short':'Long',value=Number(isAll?tradePnlToUSD(trade):tradePnlInAccountCurrency(trade));if(!Number.isFinite(value))return;directionStats[name].count++;if(value>0)directionStats[name].wins++;});
+  closed.forEach(trade=>{const name=trade.direction==='Short'?'Short':'Long',value=Number(trade._displayPnl);if(!Number.isFinite(value))return;directionStats[name].count++;if(value>0)directionStats[name].wins++;});
   const hasDirection=ledger.length>0;
   setDashboardInsightEmpty('direction',!hasDirection);
-  document.getElementById('direction-summary').textContent=hasDirection?directionNames.map(name=>`${name} ${directionStats[name].count?Math.round(directionStats[name].wins/directionStats[name].count*100):0}% WR`).join(' · '):'';
+  document.getElementById('direction-summary').textContent=hasDirection?directionNames.map(name=>`${name} ${directionStats[name].count?Math.round(directionStats[name].wins/directionStats[name].count*100):0}% WR`).join(' · ')+(view?.degraded?' · provisional':''):'';
   if(hasDirection){
-    CH.direction=new Chart(document.getElementById('direction-chart'),{type:'bar',data:{labels:directionNames,datasets:[{data:directionNames.map(name=>Number(directionStats[name].pnl.toFixed(2))),backgroundColor:directionNames.map(name=>directionStats[name].pnl>=0?palette.positiveStrong:palette.negativeStrong),borderRadius:5,maxBarThickness:38}]},options:{...CBO,animation:{duration:320},plugins:{legend:{display:false},tooltip:{...dashboardTooltipOptions(palette),callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)} realised`}}},scales:{x:{grid:{display:false},ticks:{color:palette.tick,font:{size:9,weight:500}}},y:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?palette.zeroGrid:palette.grid},ticks:{color:palette.tick,font:{size:9,weight:500},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}}}}});
+    CH.direction=new Chart(document.getElementById('direction-chart'),{type:'bar',data:{labels:directionNames,datasets:[{data:directionNames.map(name=>Number(directionStats[name].pnl.toFixed(2))),backgroundColor:directionNames.map(name=>directionStats[name].pnl>=0?palette.positiveStrong:palette.negativeStrong),borderRadius:5,maxBarThickness:38}]},options:{...CBO,animation:{duration:320},plugins:{legend:{display:false},tooltip:{...dashboardTooltipOptions(palette),callbacks:{label:context=>` ${signedMoney(context.raw,displayC,2)} ${view?.degraded?'provisional':'realised'}`}}},scales:{x:{grid:{display:false},ticks:{color:palette.tick,font:{size:9,weight:500}}},y:{beginAtZero:true,grid:{color:context=>Number(context.tick?.value)===0?palette.zeroGrid:palette.grid},ticks:{color:palette.tick,font:{size:9,weight:500},maxTicksLimit:4,callback:value=>equityMoneyTick(value,displayC)}}}}});
   }
 
   // Realised-event ledger keeps partial closes on their actual trading day.
@@ -9678,17 +9735,14 @@ function renderCharts(){
   const displayC = isAll ? '$' : acctCur(pid);
   const palette=dashboardChartPalette();
 
-  const toPnlDisplay = (t,amount=t?.pnl) => isAll ? tradePnlToUSD(t,amount) : tradePnlInAccountCurrency(t,amount);
-  const scope=financialScopeForTrades(src);
-  const coverage=financialCoverageForTrades(src,{allAccounts:isAll,accountId:pid});
-  const financialIncomplete=!coverage.overallComplete;
-  const closed=financialIncomplete?[]:scope.included.filter(row=>!tradeIsOpen(row.trade)).map(row=>row.trade).filter(t=>Number.isFinite(toPnlDisplay(t))).sort(compareTradeChronology);
-  const equityRows=(financialIncomplete?[]:realizedLedgerForTrades(src).filter(event=>Number.isFinite(toPnlDisplay(event,event.ledgerPnl)))).sort((left,right)=>{
+  const view=financialDisplayViewForTrades(src,{allAccounts:isAll,accountId:pid}),coverage=view.coverage;
+  const closed=view.closedRows.map(row=>({...row.trade,_displayPnl:row.displayPnl,_financialDisplayKind:row.financialDisplayKind})).sort(compareTradeChronology);
+  const equityRows=[...view.analysisLedger].sort((left,right)=>{
     const byTime=String(left.realizedEvent?.executedAt||left.ledgerDate||'').localeCompare(String(right.realizedEvent?.executedAt||right.ledgerDate||''));
     return byTime||String(left.realizedEvent?.executionId||'').localeCompare(String(right.realizedEvent?.executionId||''));
   });
   let run=0;
-  const pnlSeq=equityRows.map(t=>{run+=toPnlDisplay(t,t.ledgerPnl);return parseFloat(run.toFixed(2));});
+  const pnlSeq=equityRows.map(t=>{run+=t.displayPnl;return parseFloat(run.toFixed(2));});
   if(CH.equity) CH.equity.destroy();
   const equityCanvas=document.getElementById('equity-chart'),emptyState=document.getElementById('equity-empty');
   const hasEquityData=equityRows.length>0;
@@ -9697,8 +9751,10 @@ function renderCharts(){
   const chartAxisMode=equityAxisMode==='date'&&timestampCount?'date':'trade';
   updateEquityAxisButtons(hasEquityData?chartAxisMode:equityAxisMode,hasEquityData?Boolean(timestampCount):true);
   const equityBaseNote=(isAll?'All accounts · est. current-FX USD':`P&L — ${acctName(pid)}`)+(coverage.disconnectedConnectionCount?' · stored historical snapshot; broker disconnected':'');
-  const estimateNote=coverage.estimatedCount?` · ${coverage.estimatedCount} est. gross excluded`:'';
-  document.getElementById('equity-sub').textContent=financialIncomplete?`${equityBaseNote} · chart withheld: ${financialCoverageIssueText(coverage)||'financial coverage is incomplete'}`:hasEquityData?`${equityBaseNote} · ${chartAxisMode==='date'?'daily close':'per realised close'}${estimateNote}`:coverage.estimatedCount?`No exact or journal-reported realised P&L yet${estimateNote}`:'No realised closes yet';
+  const estimateNote=view.estimatedCount?` · includes ${view.estimatedCount} est. gross (fees excluded)`:'';
+  const equitySub=document.getElementById('equity-sub');
+  equitySub.textContent=hasEquityData?`${equityBaseNote} · ${view.degraded?'mixed provisional curve; exact Overall withheld':'canonical realised P&L'} · ${chartAxisMode==='date'?'daily close':'per realised close'}${estimateNote}`:'No valued realised closes yet';
+  equitySub.title=financialDisplayViewNotice(view)||'';
   let priorTimestamp=null;
   const rawEquityPoints=equityRows.map((trade,index)=>{
     const timestamp=equityTradeTimestamp(trade);
@@ -9706,7 +9762,7 @@ function renderCharts(){
     if(!Number.isFinite(plotTimestamp))plotTimestamp=priorTimestamp===null?Date.now()+index:priorTimestamp+1;
     if(priorTimestamp!==null&&plotTimestamp<=priorTimestamp)plotTimestamp=priorTimestamp+1;
     priorTimestamp=plotTimestamp;
-    return {x:chartAxisMode==='date'?plotTimestamp:index+1,y:pnlSeq[index],tradeNumber:index+1,trade,timestamp:plotTimestamp,tradePnl:Number(toPnlDisplay(trade,trade.ledgerPnl))};
+    return {x:chartAxisMode==='date'?plotTimestamp:index+1,y:pnlSeq[index],tradeNumber:index+1,trade,timestamp:plotTimestamp,tradePnl:Number(trade.displayPnl)};
   });
   const displayedEquityPoints=chartAxisMode==='date'?aggregateEquityDaily(rawEquityPoints):rawEquityPoints;
   const plotEquityPoints=ensureEquityStartAnchor(displayedEquityPoints,chartAxisMode);
@@ -9743,7 +9799,7 @@ function renderCharts(){
           filter:item=>!item.raw?.synthetic,
           callbacks:{
             title:items=>{const point=items[0]?.raw;return chartAxisMode==='date'?equityDateTooltip(point?.timestamp):`Realised close #${point?.tradeNumber||''}`;},
-            label:context=>{const point=context.raw,trade=point.trade||{};return chartAxisMode==='date'?[`${point.tradeCount} realised close${point.tradeCount===1?'':'s'} · #${point.firstTradeNumber}${point.lastTradeNumber!==point.firstTradeNumber?`–#${point.lastTradeNumber}`:''}`,`Day P&L: ${signedMoney(point.dayPnl,displayC,2)}`,`Closing P&L: ${signedMoney(point.y,displayC,2)}`]:[`Realised close #${point.tradeNumber}${trade.symbol?` · ${trade.symbol}`:''}`,`Close P&L: ${signedMoney(point.tradePnl,displayC,2)}`,`Cumulative P&L: ${signedMoney(point.y,displayC,2)}`];}
+            label:context=>{const point=context.raw,trade=point.trade||{},basis=trade.financialIsEstimate?'Estimated gross (fees excluded)':trade.financialIsBrokerExact?'Broker-exact net':'Journal-reported P&L';return chartAxisMode==='date'?[`${point.tradeCount} realised close${point.tradeCount===1?'':'s'} · #${point.firstTradeNumber}${point.lastTradeNumber!==point.firstTradeNumber?`–#${point.lastTradeNumber}`:''}`,`Day value: ${signedMoney(point.dayPnl,displayC,2)}`,`Closing ${view.degraded?'provisional ':''}P&L: ${signedMoney(point.y,displayC,2)}`]:[`Realised close #${point.tradeNumber}${trade.symbol?` · ${trade.symbol}`:''}`,`${basis}: ${signedMoney(point.tradePnl,displayC,2)}`,`Cumulative ${view.degraded?'provisional ':''}P&L: ${signedMoney(point.y,displayC,2)}`];}
           }
         }
       },
@@ -9760,34 +9816,33 @@ function renderCharts(){
           min:yDomain.min,
           max:yDomain.max,
           grid:{color:context=>Number(context.tick?.value)===0?palette.zeroGrid:palette.grid,lineWidth:context=>Number(context.tick?.value)===0?1.25:1},
-          title:{display:true,text:`Cumulative P&L (${isAll?'USD':displayC})`,color:palette.tick,font:{size:10,weight:500}},
+          title:{display:true,text:`Cumulative ${view.degraded?'mixed provisional ':'realised '}P&L (${isAll?'USD':displayC})`,color:palette.tick,font:{size:10,weight:500}},
           ticks:{color:palette.tick,font:{size:10,weight:500},maxTicksLimit:7,callback:value=>equityMoneyTick(value,displayC)}
         }
       }
     }
   });
 
-  renderDashboardInsights(financialIncomplete?[]:src,closed,displayC,isAll,palette);
+  renderDashboardInsights(equityRows,closed,displayC,palette,view);
 }
 
 function renderAnalyticsCharts(){
   const pageAccount=activePageAcct['analytics']||'all',src=tradesForContext('analytics');
   const isAll=pageAccount==='all';
-  const toPnl=t=>isAll?tradePnlToUSD(t):tradePnlInAccountCurrency(t);
   const dispC=isAll?'$':acctCur(pageAccount);
-  const coverage=financialCoverageForTrades(src,{allAccounts:isAll,accountId:pageAccount});
-  const financialIncomplete=!coverage.overallComplete;
-  const closed=financialIncomplete?[]:financialScopeForTrades(src).included.filter(row=>!tradeIsOpen(row.trade)).map(row=>row.trade).filter(t=>Number.isFinite(toPnl(t))).sort(compareTradeChronology);
+  const view=financialDisplayViewForTrades(src,{allAccounts:isAll,accountId:pageAccount}),coverage=view.coverage;
+  const toPnl=t=>Number(t?._analysisPnl);
+  const closed=view.closedRows.map(row=>({...row.trade,_analysisPnl:row.displayPnl,_financialDisplayKind:row.financialDisplayKind})).sort(compareTradeChronology);
   const n=closed.length;
-  const openRealizedTradeCount=new Set(realizedLedgerForTrades(src).filter(event=>tradeIsOpen(event)).map(event=>String(event.recordId||event.id||event.externalTradeKey))).size;
+  const openRealizedTradeCount=new Set(view.analysisLedger.filter(event=>tradeIsOpen(event)).map(event=>String(event.recordId||event.id||event.externalTradeKey))).size;
   const coverageEl=document.getElementById('analytics-pnl-coverage');
   if(coverageEl){
     const notes=[];
-    if(financialIncomplete)notes.push(`Outcome analytics are withheld rather than calculated from a partial sample: ${financialCoverageIssueText(coverage)||'financial coverage is incomplete'}.`);
+    if(view.degraded)notes.push(`Mixed provisional analytics are shown from one best-available value per visible trade. ${financialDisplayViewNotice(view)}`);
     if(coverage.disconnectedConnectionCount)notes.push(financialCoverageSnapshotText(coverage));
-    if(coverage.estimatedCount)notes.push(`${coverage.estimatedCount} trade${coverage.estimatedCount===1?' has':'s have'} calculated gross P&L${coverage.estimatedConversionUnavailableCount?'':` (${signedMoney(coverage.estimatedGross,dispC,2)})`} pending exact broker net. Estimates remain excluded from outcome analytics.`);
+    if(view.estimatedCount)notes.push(`${view.estimatedCount} calculated gross estimate${view.estimatedCount===1?' is':'s are'} included provisionally; commission, swap and conversion fees may change those outcomes.`);
     if(openRealizedTradeCount)notes.push(`${openRealizedTradeCount} still-open position${openRealizedTradeCount===1?' has':'s have'} exact realised partial-close P&L included in Overall/equity but excluded from these closed-position outcome statistics.`);
-    if(isAll&&!financialIncomplete)notes.push('All-account money values use an estimated current-FX USD translation.');
+    if(isAll)notes.push('All-account money values use an estimated current-FX USD translation.');
     coverageEl.style.display=notes.length?'block':'none';coverageEl.textContent=notes.join(' ');
   }
 
@@ -10593,17 +10648,12 @@ function calIsAllAccounts(){ return (document.getElementById('cal-acct-filter')?
 function calFinancialForDay(dateStr){
   const isAll = calIsAllAccounts();
   const accountId=document.getElementById('cal-acct-filter')?.value||'all',source=calTradesFiltered();
-  const projected=financialPresentationLedgerForTrades(source)
-    .filter(t=>t.ledgerDate===dateStr)
-    .map(t=>({...t,displayPnl:isAll?tradePnlToUSD(t,t.ledgerPnl):tradePnlInAccountCurrency(t,t.ledgerPnl)}));
-  const daySource=source.filter(trade=>financialPresentationDate(trade?.exitAt,String(trade?.brokerData?.providerTradeDateTimeZone||'UTC'),tradeJournalDate(trade))===dateStr);
-  const coverage=financialCoverageForTrades(daySource,{allAccounts:isAll,accountId});
-  const conversionUnavailableCount=projected.filter(t=>!Number.isFinite(t.displayPnl)).length,ledger=projected.filter(t=>Number.isFinite(t.displayPnl));
-  const incomplete=conversionUnavailableCount>0||!coverage.overallComplete;
+  const view=financialDisplayViewForTrades(source,{allAccounts:isAll,accountId}),coverage=view.coverage;
+  const ledger=view.analysisLedger.filter(t=>t.ledgerDate===dateStr);
   const verified=ledger.filter(t=>!t.financialIsEstimate),estimated=ledger.filter(t=>t.financialIsEstimate);
   const total=list=>list.reduce((sum,t)=>sum+t.displayPnl,0);
-  const verifiedNet=incomplete?null:total(verified),estimatedGross=incomplete?null:total(estimated);
-  return {ledger,verifiedNet,estimatedGross,provisional:incomplete?null:verifiedNet+estimatedGross,verifiedCount:verified.length,estimatedCount:estimated.length,unavailableCount:conversionUnavailableCount+coverage.overallIncompleteCount,incomplete,coverage,issue:financialCoverageIssueText(coverage),snapshot:financialCoverageSnapshotText(coverage)};
+  const verifiedNet=verified.length?total(verified):null,estimatedGross=estimated.length?total(estimated):null,provisional=ledger.length?total(ledger):null;
+  return {ledger,verifiedNet,estimatedGross,provisional,verifiedCount:verified.length,estimatedCount:estimated.length,unavailableCount:view.conversionUnavailableCount+coverage.overallIncompleteCount,incomplete:view.degraded,degraded:view.degraded,coverage,view,displayLabel:view.analysisLabel,issue:financialDisplayViewNotice(view),snapshot:financialCoverageSnapshotText(coverage)};
 }
 function calPnlForDay(dateStr){
   return calFinancialForDay(dateStr).provisional;
@@ -10616,8 +10666,9 @@ function calCurrencySymbol(){
 }
 function calTradesForDay(dateStr){
   const source=calTradesFiltered();
+  const accountId=document.getElementById('cal-acct-filter')?.value||'all',isAll=accountId==='all';
   const rows=new Map();
-  financialPresentationLedgerForTrades(source).filter(t=>t.ledgerDate===dateStr).forEach(t=>{
+  financialDisplayViewForTrades(source,{allAccounts:isAll,accountId}).analysisLedger.filter(t=>t.ledgerDate===dateStr).forEach(t=>{
     const key=t.recordId||t.id||t.externalTradeKey;
     const current=rows.get(key);
     if(current){
@@ -10658,7 +10709,7 @@ function renderCalMonth(){
   let maxAbs=0;
   for(let d=1;d<=daysInMonth;d++){
     const ds=`${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    maxAbs=Math.max(maxAbs,Math.abs(calPnlForDay(ds)));
+    const value=calPnlForDay(ds);if(Number.isFinite(value))maxAbs=Math.max(maxAbs,Math.abs(value));
   }
   let html=`<div class="cal-grid-wrap"><div class="cal-dow">${DOWS.map(d=>`<div class="cal-dow-label">${d}</div>`).join('')}</div><div class="cal-days">`;
   for(let i=0;i<firstDow;i++) html+=`<div class="cal-day empty"></div>`;
@@ -10666,12 +10717,12 @@ function renderCalMonth(){
     const ds=`${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const financial=calFinancialForDay(ds),pnl=financial.provisional;
     const ts=calTradesForDay(ds);
-    const heat=ts.length&&!financial.incomplete?heatClass(pnl,maxAbs):'heat-0';
+    const heat=ts.length&&Number.isFinite(pnl)?heatClass(pnl,maxAbs):'heat-0';
     const isToday=ds===todayStr;
     const isSel=calSelectedDay===d;
     html+=`<div class="cal-day ${heat}${isToday?' today':''}${isSel?' selected':''}" onclick="calSelectDay(${d})" style="${isSel?'outline:2px solid var(--accent);outline-offset:-1px':''}">
       <div class="cal-day-num">${d}</div>
-      ${ts.length?`<div class="cal-day-pnl" title="${financial.incomplete?`P&L withheld because financial coverage is incomplete${financial.issue?`: ${escapeHtml(financial.issue)}`:''}.`:financial.estimatedCount?'Includes calculated gross estimates; fees and swap are excluded.':`Canonical realised P&L${financial.snapshot?` · ${escapeHtml(financial.snapshot)}`:''}`}">${financial.incomplete?'—':escapeHtml(signedMoney(pnl,calCurrencySymbol()))}${financial.estimatedCount&&!financial.incomplete?' <span class="pnl-estimate-badge">est.</span>':''}</div><div class="cal-day-cnt">${ts.length} realised close${ts.length>1?'s':''}</div>`:''}
+      ${ts.length?`<div class="cal-day-pnl" title="${escapeHtml(financial.issue||'Canonical realised P&L')}">${Number.isFinite(pnl)?escapeHtml(signedMoney(pnl,calCurrencySymbol())):'—'}${financial.degraded?' <span class="pnl-estimate-badge">prov.</span>':financial.estimatedCount?' <span class="pnl-estimate-badge">est.</span>':''}</div><div class="cal-day-cnt">${ts.length} realised close${ts.length>1?'s':''}</div>`:''}
     </div>`;
   }
   html+=`</div></div>`;
@@ -10690,10 +10741,10 @@ function renderCalWeek(){
     const financial=calFinancialForDay(ds),pnl=financial.provisional;
     const ts=calTradesForDay(ds);
     const isToday=ds===todayStr;
-    html+=`<div class="week-day ${ts.length&&!financial.incomplete&&pnl!==0?(pnl>0?'heat-wp':'heat-wn'):''}" onclick="calSelectDay(${d.getDate()},${d.getMonth()},${d.getFullYear()})" style="${isToday?'border-color:var(--accent)':''}">
+    html+=`<div class="week-day ${ts.length&&Number.isFinite(pnl)&&pnl!==0?(pnl>0?'heat-wp':'heat-wn'):''}" onclick="calSelectDay(${d.getDate()},${d.getMonth()},${d.getFullYear()})" style="${isToday?'border-color:var(--accent)':''}">
       <div class="week-day-label">${DOWS[i]}</div>
       <div class="week-day-date" style="${isToday?'color:var(--accent)':''}">${d.getDate()}</div>
-      ${ts.length?`<div style="font-size:13px;font-weight:700;color:${financial.incomplete?'var(--text3)':pnl>0?'var(--green)':pnl<0?'var(--red)':'var(--text3)'};" title="${financial.incomplete?'P&L withheld because financial coverage is incomplete.':financial.estimatedCount?'Includes calculated gross estimates; fees and swap are excluded.':`Canonical realised P&L${financial.snapshot?` · ${escapeHtml(financial.snapshot)}`:''}`}">${financial.incomplete?'—':escapeHtml(signedMoney(pnl,calCurrencySymbol()))}${financial.estimatedCount&&!financial.incomplete?' <span class="pnl-estimate-badge">est.</span>':''}</div><div style="font-size:10px;color:var(--text3);margin-top:2px">${ts.length} realised close${ts.length>1?'s':''}</div>`:'<div style="font-size:11px;color:var(--text3);margin-top:4px">No realised closes</div>'}
+      ${ts.length?`<div style="font-size:13px;font-weight:700;color:${!Number.isFinite(pnl)?'var(--text3)':pnl>0?'var(--green)':pnl<0?'var(--red)':'var(--text3)'};" title="${escapeHtml(financial.issue||'Canonical realised P&L')}">${Number.isFinite(pnl)?escapeHtml(signedMoney(pnl,calCurrencySymbol())):'—'}${financial.degraded?' <span class="pnl-estimate-badge">prov.</span>':financial.estimatedCount?' <span class="pnl-estimate-badge">est.</span>':''}</div><div style="font-size:10px;color:var(--text3);margin-top:2px">${ts.length} realised close${ts.length>1?'s':''}</div>`:'<div style="font-size:11px;color:var(--text3);margin-top:4px">No realised closes</div>'}
     </div>`;
   }
   html+=`</div>`;
@@ -10717,12 +10768,14 @@ function calSelectDay(d,month=calMonth,year=calYear){
   detail.innerHTML=`<div class="cal-detail">
     <div class="cal-detail-head">
       <span>${MONTHS[calMonth]} ${d}, ${calYear} · ${ts.length} trade${ts.length>1?'s':''}</span>
-      <span style="color:${financial.incomplete?'var(--text3)':pnl>0?'var(--green)':pnl<0?'var(--red)':'var(--text3)'};" title="${financial.incomplete?'Day total withheld because financial coverage is incomplete.':financial.estimatedCount?'Day total includes calculated gross estimates; fees and swap are excluded.':`Canonical realised P&L${financial.snapshot?` · ${escapeHtml(financial.snapshot)}`:''}`}">${financial.incomplete?'—':escapeHtml(signedMoney(pnl,calCurrencySymbol()))}${financial.estimatedCount&&!financial.incomplete?' <span class="pnl-estimate-badge">est.</span>':''}${pnlNote}</span>
+      <span style="color:${!Number.isFinite(pnl)?'var(--text3)':pnl>0?'var(--green)':pnl<0?'var(--red)':'var(--text3)'};" title="${escapeHtml(financial.issue||'Canonical realised P&L')}">${Number.isFinite(pnl)?escapeHtml(signedMoney(pnl,calCurrencySymbol())):'—'}${financial.degraded?' <span class="pnl-estimate-badge">prov.</span>':financial.estimatedCount?' <span class="pnl-estimate-badge">est.</span>':''}${pnlNote}</span>
     </div>
     ${ts.map(t=>{
+      const rowAuthority=t._calendarEstimateCount?'Calculated gross estimate; commissions, swap and other fees are excluded.':t.financialKind==='broker_exact_net'?'Broker-exact net P&L.':'Journal-reported P&L; not broker exact.';
+      const rowBadge=t._calendarEstimateCount?' <span class="pnl-estimate-badge">est.</span>':t.financialKind==='manual_reported'?' <span class="pnl-estimate-badge">journal</span>':'';
       const pnlStr=tradeIsOpen(t)
         ? (t._calendarRealized?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};">Open · realized ${escapeHtml(signedMoney(t.pnl,tradeMoneyPrefix(t)))}</span>`:'<span style="color:var(--text3)">Open</span>')
-        : (t._calendarRealized?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};" title="${t._calendarEstimateCount?'Calculated gross estimate; fees and swap are excluded.':'Canonical realised P&L'}">${escapeHtml(signedMoney(t.pnl,tradeMoneyPrefix(t)))}${t._calendarEstimateCount?' <span class="pnl-estimate-badge">est.</span>':''}</span>`:'<span style="color:var(--text3)">No P&L</span>');
+        : (t._calendarRealized?`<span style="color:${t.pnl>0?'var(--green)':t.pnl<0?'var(--red)':'var(--text3)'};" title="${rowAuthority}">${escapeHtml(signedMoney(t.pnl,tradeMoneyPrefix(t)))}${rowBadge}</span>`:'<span style="color:var(--text3)">No P&L</span>');
       const thumb=(()=>{const src=getThumbSrc(t);return src?`<span class="ss-cell-thumb" onclick="openLightbox(${inlineStringArg(t.id)},0)" style="margin-right:6px"><img src="${escapeHtml(src)}" alt="chart"></span>`:''})();
       return `<div class="cal-trade-row">
         <span>${thumb}<span style="font-weight:500">${escapeHtml(t.symbol)}</span><span style="font-size:10px;color:var(--text3);margin-left:6px">${escapeHtml(t.instrument||ASSET_LABELS[t.asset]||t.asset)} · ${escapeHtml(t.optionType||t.direction)}</span></span>
@@ -10736,31 +10789,27 @@ function calSelectDay(d,month=calMonth,year=calYear){
 
 function renderCalStats(){
   const isAll = calIsAllAccounts();
-  const toPnl = t => isAll ? tradePnlToUSD(t,t.ledgerPnl) : tradePnlInAccountCurrency(t,t.ledgerPnl);
   const cs = calCurrencySymbol();
   const allTrades=calTradesFiltered();
   const monthStr=`${calYear}-${String(calMonth+1).padStart(2,'0')}`;
-  const projected=financialPresentationLedgerForTrades(allTrades)
-    .filter(t=>t.ledgerDate.startsWith(monthStr))
-    .map(t=>({...t,displayPnl:toPnl(t)}));
-  const monthSource=allTrades.filter(trade=>String(financialPresentationDate(trade?.exitAt,String(trade?.brokerData?.providerTradeDateTimeZone||'UTC'),tradeJournalDate(trade))||'').startsWith(monthStr));
-  const coverage=financialCoverageForTrades(monthSource,{allAccounts:isAll,accountId:document.getElementById('cal-acct-filter')?.value||'all'});
-  const conversionUnavailableCount=projected.filter(t=>!Number.isFinite(t.displayPnl)).length,ledger=projected.filter(t=>Number.isFinite(t.displayPnl));
-  const incomplete=conversionUnavailableCount>0||!coverage.overallComplete,unavailableCount=conversionUnavailableCount+coverage.overallIncompleteCount;
-  const verifiedNet=incomplete?null:ledger.filter(t=>!t.financialIsEstimate).reduce((s,t)=>s+t.displayPnl,0);
-  const estimatedGross=incomplete?null:ledger.filter(t=>t.financialIsEstimate).reduce((s,t)=>s+t.displayPnl,0);
-  const provisional=incomplete?null:verifiedNet+estimatedGross;
+  const accountId=document.getElementById('cal-acct-filter')?.value||'all';
+  const view=financialDisplayViewForTrades(allTrades,{allAccounts:isAll,accountId}),coverage=view.coverage;
+  const ledger=view.analysisLedger.filter(t=>t.ledgerDate.startsWith(monthStr));
+  const verifiedRows=ledger.filter(t=>!t.financialIsEstimate),estimatedRows=ledger.filter(t=>t.financialIsEstimate);
+  const verifiedNet=verifiedRows.length?verifiedRows.reduce((s,t)=>s+t.displayPnl,0):null;
+  const estimatedGross=estimatedRows.length?estimatedRows.reduce((s,t)=>s+t.displayPnl,0):null;
+  const provisional=ledger.length?ledger.reduce((s,t)=>s+t.displayPnl,0):null;
   const byDay={};
   ledger.forEach(t=>{byDay[t.ledgerDate]=(byDay[t.ledgerDate]||0)+t.displayPnl;});
   const days=Object.values(byDay);
   const winDays=days.filter(p=>p>0).length;
   const lossDays=days.filter(p=>p<0).length;
   document.getElementById('cal-stats-row').innerHTML=[
-    {label:'Overall realised',val:signedMoney(verifiedNet,cs),cls:verifiedNet>0?'pos':verifiedNet<0?'neg':'',title:incomplete?`Financial coverage is incomplete; no known-only subtotal is shown. ${financialCoverageIssueText(coverage)}`:[isAll?'Estimated current-FX USD translation.':'',financialCoverageSnapshotText(coverage)].filter(Boolean).join(' ')},
+    {label:'Overall month P&L',val:coverage.overallComplete?signedMoney(provisional,cs):'—',cls:provisional>0?'pos':provisional<0?'neg':'',title:coverage.overallComplete?'Complete canonical realised scope for the displayed month; broker-tracked accounts use exact broker net, while manual-only accounts use journal-reported P&L.':financialCoverageIssueText(coverage)},
     {label:'Est. gross',val:signedMoney(estimatedGross,cs),cls:estimatedGross>0?'pos':estimatedGross<0?'neg':'',title:'Calculated gross only; fees and swap are excluded.'},
-    {label:'Provisional total',val:signedMoney(provisional,cs),cls:provisional>0?'pos':provisional<0?'neg':'',title:incomplete?'No partial total is shown while financial coverage is incomplete.':'Overall realised P&L plus calculated gross estimates.'},
-    {label:'Win days',val:incomplete?'—':winDays,cls:'pos'},
-    {label:'Loss days',val:incomplete?'—':lossDays,cls:'neg'},
+    {label:view.degraded?'Mixed provisional':'Overall realised',val:signedMoney(provisional,cs),cls:provisional>0?'pos':provisional<0?'neg':'',title:financialDisplayViewNotice(view)||'Canonical realised P&L.'},
+    {label:'Win days',val:days.length?winDays:'—',cls:'pos',title:view.degraded?'Based on the mixed provisional ledger.':''},
+    {label:'Loss days',val:days.length?lossDays:'—',cls:'neg',title:view.degraded?'Based on the mixed provisional ledger.':''},
   ].map(s=>`<div class="cal-stat"${s.title?` title="${s.title}"`:''}><div class="cal-stat-label">${s.label}</div><div class="cal-stat-val ${s.cls}">${s.val}</div></div>`).join('');
 }
 
@@ -10808,7 +10857,8 @@ function setHmSize(size, btn){
 function hmFilteredTrades(){
   const acctId = document.getElementById('hm-acct')?.value||'all';
   const base = acctId==='all' ? [...trades] : trades.filter(t=>t.accountId===acctId);
-  let src = financialPresentationLedgerForTrades(base).map((event,index)=>({
+  const view=financialDisplayViewForTrades(base,{allAccounts:acctId==='all',accountId:acctId});
+  let src = view.analysisLedger.map((event,index)=>({
     ...event,date:event.ledgerDate,pnl:event.ledgerPnl,
     _hmCellKey:`${String(event.recordId||event.id||event.externalTradeKey||'trade')}:${String(event.realizedEvent?.executionId||event.ledgerDate||index)}`,
     _hmRealizedCell:true,_hmWasOpen:tradeIsOpen(event),
@@ -10902,31 +10952,27 @@ function renderHeatmap(){
   const isAll  = accountId==='all';
   const cs     = isAll ? '$' : acctCur(accountId);
   const basePositions=accountId==='all'?trades:trades.filter(t=>t.accountId===accountId);
-  const coverage=financialCoverageForTrades(basePositions,{allAccounts:isAll,accountId});
-  const displayPnl=t=>{
-    const raw=Number(t.ledgerPnl);if(!Number.isFinite(raw))return null;
-    const value=isAll?tradePnlToUSD(t,raw):tradePnlInAccountCurrency(t,raw);
-    return Number.isFinite(value)?value:null;
-  };
+  const view=financialDisplayViewForTrades(basePositions,{allAccounts:isAll,accountId}),coverage=view.coverage;
+  const displayPnl=t=>Number.isFinite(Number(t.displayPnl))?Number(t.displayPnl):null;
   const completedProjected=completed.map(t=>({t,value:displayPnl(t)})),verifiedProjected=verified.map(t=>({t,value:displayPnl(t)})),estimatedProjected=estimated.map(t=>({t,value:displayPnl(t)}));
   const conversionUnavailableCount=completedProjected.filter(item=>!Number.isFinite(item.value)).length;
-  const incomplete=!coverage.overallComplete||conversionUnavailableCount>0;
+  const incomplete=view.degraded||conversionUnavailableCount>0;
   const completedValues=completedProjected.filter(item=>Number.isFinite(item.value)).map(item=>item.value);
   const verifiedValues=verifiedProjected.filter(item=>Number.isFinite(item.value)).map(item=>item.value);
   const estimatedValues=estimatedProjected.filter(item=>Number.isFinite(item.value)).map(item=>item.value);
-  const maxAbs=!incomplete&&completedValues.length?Math.max(...completedValues.map(Math.abs)):0;
+  const maxAbs=completedValues.length?Math.max(...completedValues.map(Math.abs)):0;
 
   // Stats strip
-  const net=incomplete?null:verifiedValues.reduce((sum,value)=>sum+value,0),gross=incomplete?null:estimatedValues.reduce((sum,value)=>sum+value,0),provisional=incomplete?null:net+gross;
-  const verifiedClosed=incomplete?[]:financialScopeForTrades(basePositions).included.filter(row=>!tradeIsOpen(row.trade)).map(row=>Number(row.presentation.amount)).filter(Number.isFinite);
-  const wins=verifiedClosed.filter(value=>value>0),wr=verifiedClosed.length?Math.round(wins.length/verifiedClosed.length*100):0;
+  const net=verifiedValues.length?verifiedValues.reduce((sum,value)=>sum+value,0):null,gross=estimatedValues.length?estimatedValues.reduce((sum,value)=>sum+value,0):null,provisional=completedValues.length?completedValues.reduce((sum,value)=>sum+value,0):null;
+  const outcomeMap=new Map();completedProjected.filter(item=>Number.isFinite(item.value)).forEach(({t,value})=>{const key=String(t.recordId||t.id||t.externalTradeKey||t._hmCellKey);outcomeMap.set(key,(outcomeMap.get(key)||0)+value);});
+  const visibleOutcomes=[...outcomeMap.values()],wins=visibleOutcomes.filter(value=>value>0),wr=visibleOutcomes.length?Math.round(wins.length/visibleOutcomes.length*100):0;
 
   document.getElementById('hm-stats').innerHTML=[
     {label:'Realized closes',val:src.length,cls:''},
-    {label:'Closed-position WR',val:verifiedClosed.length?wr+'%':'—',cls:verifiedClosed.length?(wr>=50?'pos':'neg'):''},
-    {label:'Overall P&L',val:signedMoney(net,cs),cls:net>0?'pos':net<0?'neg':'',title:incomplete?`Financial coverage is incomplete; no known-only subtotal is shown. ${financialCoverageIssueText(coverage)}`:isAll?'Estimated current-FX USD translation.':''},
+    {label:view.degraded?'Provisional WR':'Closed-position WR',val:visibleOutcomes.length?wr+'%':'—',cls:visibleOutcomes.length?(wr>=50?'pos':'neg'):'',title:view.degraded?'Based on one best-available value per visible trade; estimated gross can change after fees.':''},
+    {label:'Overall range P&L',val:coverage.overallComplete?signedMoney(provisional,cs):'—',cls:provisional>0?'pos':provisional<0?'neg':'',title:coverage.overallComplete?'Complete canonical realised scope for the active heatmap range; broker-tracked accounts use exact broker net, while manual-only accounts use journal-reported P&L.':financialCoverageIssueText(coverage)},
     {label:'Est. gross',val:signedMoney(gross,cs),cls:gross>0?'pos':gross<0?'neg':'',title:'Calculated gross only; fees and swap are excluded.'},
-    {label:'Provisional total',val:signedMoney(provisional,cs),cls:provisional>0?'pos':provisional<0?'neg':'',title:incomplete?'No partial total is shown while financial coverage is incomplete.':'Overall realised P&L plus calculated gross estimates.'},
+    {label:view.degraded?'Mixed provisional':'Overall realised',val:signedMoney(provisional,cs),cls:provisional>0?'pos':provisional<0?'neg':'',title:financialDisplayViewNotice(view)||'Canonical realised P&L.'},
   ].map(s=>`<div class="hm-stat"${s.title?` title="${s.title}"`:''}><div class="hm-stat-label">${s.label}</div><div class="hm-stat-val ${s.cls}">${s.val}</div></div>`).join('');
 
   // Grid
@@ -10934,7 +10980,7 @@ function renderHeatmap(){
   wrap.innerHTML='';
 
   if(!src.length){
-    wrap.innerHTML=`<div class="empty-state"><i class="fa-solid fa-fire"></i><p>${incomplete?'Financial heatmap totals are withheld until broker coverage is complete.':'No realized closes match this filter.'}</p></div>`;
+    wrap.innerHTML='<div class="empty-state"><i class="fa-solid fa-fire"></i><p>No valued realized closes match this filter.</p></div>';
     hmSelected=null;
     return;
   }
@@ -10942,9 +10988,9 @@ function renderHeatmap(){
   const groupKey = {asset:t=>ASSET_LABELS[t.asset]||t.asset, strategy:t=>t.strategy||'No strategy', emotion:t=>t.emotion?.split(' ').slice(1).join(' ')||'Unknown', direction:t=>t.direction}[hmGroup];
 
   if(incomplete||coverage.disconnectedConnectionCount){
-    const notice=document.createElement('div');notice.className='a-insight';notice.style.marginBottom='10px';notice.textContent=[incomplete?`Heat colors, group totals and outcome statistics are withheld: ${financialCoverageIssueText(coverage)||'financial coverage is incomplete'}. Individual verified close rows remain visible for audit.`:'',financialCoverageSnapshotText(coverage)].filter(Boolean).join(' ');wrap.appendChild(notice);
+    const notice=document.createElement('div');notice.className='a-insight';notice.style.marginBottom='10px';notice.textContent=[view.degraded?`Heat colors and group totals use the mixed provisional ledger. ${financialDisplayViewNotice(view)}`:'',financialCoverageSnapshotText(coverage)].filter(Boolean).join(' ');wrap.appendChild(notice);
   }
-  const heatPnl=incomplete?()=>null:displayPnl;
+  const heatPnl=displayPnl;
   if(!groupKey){
     buildHmGridWithInsert(wrap,src,maxAbs,heatPnl);
   } else {
@@ -10957,7 +11003,7 @@ function renderHeatmap(){
       return pb-pa;
     });
     sorted.forEach(([label, ts])=>{
-      const groupValues=ts.map(displayPnl),groupNet=incomplete?null:groupValues.every(Number.isFinite)?groupValues.reduce((sum,value)=>sum+value,0):null;
+      const groupValues=ts.map(displayPnl),groupNet=groupValues.every(Number.isFinite)?groupValues.reduce((sum,value)=>sum+value,0):null;
       const groupEstimated=ts.some(t=>t.financialIsEstimate||t._hmFinancialPresentation?.isEstimate);
       const glabel = document.createElement('div');
       glabel.className='hm-group-label';
@@ -12035,7 +12081,7 @@ function buildDdAcctFilter(){
 function ddFilteredTrades(){
   const acctId = document.getElementById('dd-acct')?.value||'all';
   let src = acctId==='all' ? [...trades] : trades.filter(t=>t.accountId===acctId);
-  src = realizedLedgerForTrades(src).map(t=>({...t,pnl:t.ledgerPnl,date:t.ledgerDate}));
+  src = financialDisplayViewForTrades(src,{allAccounts:acctId==='all',accountId:acctId}).analysisLedger.map(t=>({...t,pnl:t.ledgerPnl,date:t.ledgerDate,_displayPnl:t.displayPnl}));
   src.sort((a,b)=>{
     const byTime=String(a.realizedEvent?.executedAt||a.date||'').localeCompare(String(b.realizedEvent?.executedAt||b.date||''));
     return byTime||String(a.realizedEvent?.executionId||'').localeCompare(String(b.realizedEvent?.executionId||''));
@@ -12053,6 +12099,7 @@ function ddFilteredTrades(){
 
 /* Convert trade P&L to display currency */
 function ddPnl(t){
+  if(Number.isFinite(Number(t?._displayPnl)))return Number(t._displayPnl);
   const acctId = document.getElementById('dd-acct')?.value||'all';
   const raw=Number(t.pnl);if(!Number.isFinite(raw))return null;
   const value=acctId==='all'?tradePnlToUSD(t,raw):tradePnlInAccountCurrency(t,raw);
@@ -12121,24 +12168,25 @@ function renderDrawdown(){
   const cs = isAll ? '$' : acctCur(acctId);
   const safeCs=escapeHtml(cs);
   const limits = getDdLimits();
-  const coverageSource=acctId==='all'?trades:trades.filter(t=>t.accountId===acctId),coverage=financialCoverageForTrades(coverageSource,{allAccounts:isAll,accountId:acctId});
+  const coverageSource=acctId==='all'?trades:trades.filter(t=>t.accountId===acctId),view=financialDisplayViewForTrades(coverageSource,{allAccounts:isAll,accountId:acctId}),coverage=view.coverage;
   const coverageEl=document.getElementById('drawdown-pnl-coverage');
   const pctButton=document.getElementById('dd-pct-btn'),absButton=document.getElementById('dd-abs-btn');
   if(isAll&&ddMode==='pct')ddMode='abs';
   if(pctButton){pctButton.disabled=isAll;pctButton.title=isAll?'Unavailable for All Accounts: no authoritative starting-equity bridge exists.':'Estimated from the configured journal account size; this is not broker equity drawdown.';pctButton.classList.toggle('active',ddMode==='pct');}
   if(absButton)absButton.classList.toggle('active',ddMode==='abs');
-  if(!coverage.overallComplete)src=[];
   if(coverageEl){
     const notes=[];
-    if(!coverage.overallComplete)notes.push(`The series is withheld rather than shown as a partial drawdown: ${financialCoverageIssueText(coverage)||'financial coverage is incomplete'}.`);
+    if(view.degraded)notes.push(`The visible drawdown is a mixed provisional P&L series, not exact broker equity drawdown. ${financialDisplayViewNotice(view)}`);
     if(coverage.disconnectedConnectionCount)notes.push(financialCoverageSnapshotText(coverage));
-    if(coverage.estimatedCount)notes.push(`${coverage.estimatedCount} calculated gross estimate${coverage.estimatedCount===1?' is':'s are'} excluded until an exact broker net is available.`);
-    notes.push(isAll?'Absolute mode shows canonical realised-P&L drawdown translated at estimated current FX. Percentage mode is disabled because no authoritative starting-equity bridge exists.':'Absolute mode shows canonical realised-P&L drawdown. Percentage mode is a journal estimate based on the configured account size, not broker equity.');
+    if(view.estimatedCount)notes.push(`${view.estimatedCount} calculated gross estimate${view.estimatedCount===1?' is':'s are'} included provisionally; fees, swap and conversion charges may change the final drawdown.`);
+    notes.push(view.degraded
+      ? (isAll?'Absolute mode shows mixed provisional P&L drawdown translated at estimated current FX. Percentage mode is disabled because no authoritative starting-equity bridge exists.':'Absolute mode shows mixed provisional P&L drawdown. Percentage mode is a journal estimate based on configured account size, not broker equity.')
+      : (isAll?'Absolute mode shows canonical realised-P&L drawdown translated at estimated current FX. Percentage mode is disabled because no authoritative starting-equity bridge exists.':'Absolute mode shows canonical realised-P&L drawdown. Percentage mode is a journal estimate based on the configured account size, not broker equity.'));
     coverageEl.style.display='block';coverageEl.textContent=notes.join(' ');
   }
 
   if(!src.length){
-    document.getElementById('dd-metrics').innerHTML=`<div style="padding:16px 20px;color:var(--text3);font-size:13px;grid-column:1/-1">${!coverage.overallComplete?'Drawdown withheld because financial coverage is incomplete.':'No realized P&L events found for this filter.'}</div>`;
+    document.getElementById('dd-metrics').innerHTML='<div style="padding:16px 20px;color:var(--text3);font-size:13px;grid-column:1/-1">No valued realized P&L events found for this filter.</div>';
     document.getElementById('dd-events').innerHTML='';
     if(ddChart){ ddChart.destroy(); ddChart=null; }
     return;
@@ -12446,21 +12494,22 @@ function djGoToday(){ djStopVoiceJournal({quiet:true}); djDate=TODAY; renderDail
 
 /* Auto P&L stats for a given date */
 function djDayStats(date){
-  const dayTrades = financialPresentationLedgerForTrades(trades)
+  const view=financialDisplayViewForTrades(trades,{allAccounts:true,accountId:'all'});
+  const dayTrades = view.analysisLedger
     .filter(t=>t.ledgerDate===date)
-    .map(t=>({...t,pnl:t.ledgerPnl,date:t.ledgerDate}));
+    .map(t=>({...t,pnl:t.displayPnl,date:t.ledgerDate}));
   const daySource=trades.filter(trade=>financialPresentationDate(trade?.exitAt,String(trade?.brokerData?.providerTradeDateTimeZone||'UTC'),tradeJournalDate(trade))===date);
-  const coverage=financialCoverageForTrades(daySource,{allAccounts:true,accountId:'all'});
-  const toUSD = t => tradePnlToUSD(t);
-  const projected=dayTrades.map(trade=>({trade,value:toUSD(trade)})),conversionUnavailableCount=projected.filter(item=>!Number.isFinite(item.value)).length,valued=projected.filter(item=>Number.isFinite(item.value));
-  const incomplete=conversionUnavailableCount>0||!coverage.overallComplete;
+  const coverage=view.coverage;
+  const valued=dayTrades.map(trade=>({trade,value:Number(trade.displayPnl)})).filter(item=>Number.isFinite(item.value));
+  const incomplete=view.degraded;
   const verified=valued.filter(item=>!item.trade.financialIsEstimate),estimated=valued.filter(item=>item.trade.financialIsEstimate);
-  const verifiedNet=incomplete?null:verified.reduce((sum,item)=>sum+item.value,0),estimatedGross=incomplete?null:estimated.reduce((sum,item)=>sum+item.value,0);
-  const wins=verified.filter(item=>item.value>0);
-  const best=!incomplete&&verified.length?verified.reduce((left,right)=>left.value>right.value?left:right).trade:null;
-  const wr=!incomplete&&verified.length?Math.round(wins.length/verified.length*100):null;
+  const verifiedNet=verified.length?verified.reduce((sum,item)=>sum+item.value,0):null,estimatedGross=estimated.length?estimated.reduce((sum,item)=>sum+item.value,0):null;
+  const wins=valued.filter(item=>item.value>0);
+  const best=valued.length?valued.reduce((left,right)=>left.value>right.value?left:right).trade:null;
+  const wr=valued.length?Math.round(wins.length/valued.length*100):null;
   const count=new Set([...dayTrades,...daySource].map(item=>String(item.recordId||item.id||item.externalTradeKey))).size;
-  return {net:incomplete?null:verifiedNet+estimatedGross,verifiedNet,estimatedGross,estimatedCount:estimated.length,count,wr,best,unavailableCount:conversionUnavailableCount+coverage.overallIncompleteCount,incomplete,issue:financialCoverageIssueText(coverage),snapshot:financialCoverageSnapshotText(coverage)};
+  const net=valued.length?valued.reduce((sum,item)=>sum+item.value,0):null;
+  return {net,verifiedNet,estimatedGross,estimatedCount:estimated.length,count,wr,best,unavailableCount:view.conversionUnavailableCount+coverage.overallIncompleteCount,incomplete,degraded:view.degraded,displayLabel:view.analysisLabel,issue:financialDisplayViewNotice(view),snapshot:financialCoverageSnapshotText(coverage)};
 }
 
 /* Format date nicely */
@@ -12480,9 +12529,11 @@ function renderDjEntry(){
   const c = cur();
 
   const pnlColor = stats.net>0?'var(--green)':stats.net<0?'var(--red)':'var(--text2)';
-  const bestAc = stats.best ? tradeMoneyPrefix(stats.best) : '$';
+  const bestAc = '$';
   const bestPnl = stats.best&&Number.isFinite(Number(stats.best.pnl))?Number(stats.best.pnl):null;
   const bestColor = bestPnl>0?'var(--green)':bestPnl<0?'var(--red)':'var(--text3)';
+  const bestAuthority=stats.best?.financialIsEstimate?'Calculated gross estimate; fees and swap are excluded.':stats.best?.financialKind==='broker_exact_net'?'Broker-exact net P&L.':'Journal-reported P&L; not broker exact.';
+  const bestBadge=stats.best?.financialIsEstimate?' <span class="pnl-estimate-badge">est.</span>':stats.best?.financialKind==='manual_reported'?' <span class="pnl-estimate-badge">journal</span>':'';
 
   document.getElementById('dj-entry-wrap').innerHTML = `
     <!-- topbar -->
@@ -12501,10 +12552,10 @@ function renderDjEntry(){
 
     <!-- P&L strip -->
     <div class="dj-pnl-strip">
-      <div class="dj-pnl-cell" title="${stats.incomplete?`P&L withheld because financial coverage is incomplete${stats.issue?`: ${escapeHtml(stats.issue)}`:''}.`:`Estimated current-FX USD translation.${stats.snapshot?` ${escapeHtml(stats.snapshot)}`:''}`}${stats.estimatedCount?' Includes calculated gross estimates; fees and swap are excluded.':''}"><div class="dj-pnl-label">Day total <span style="font-size:8px;opacity:.6">est. current-FX USD</span></div><div class="dj-pnl-val" style="color:${pnlColor}">${stats.count&&!stats.incomplete?signedMoney(stats.net,'$',2):'—'}${stats.estimatedCount&&!stats.incomplete?' <span class="pnl-estimate-badge">est.</span>':''}</div></div>
+      <div class="dj-pnl-cell" title="${escapeHtml(stats.issue||`Estimated current-FX USD translation.${stats.snapshot?` ${stats.snapshot}`:''}`)}${stats.estimatedCount?' Includes calculated gross estimates; fees and swap are excluded.':''}"><div class="dj-pnl-label">${stats.degraded?'Mixed provisional':'Day total'} <span style="font-size:8px;opacity:.6">est. current-FX USD</span></div><div class="dj-pnl-val" style="color:${pnlColor}">${stats.count&&Number.isFinite(stats.net)?signedMoney(stats.net,'$',2):'—'}${stats.degraded&&stats.count?' <span class="pnl-estimate-badge">prov.</span>':stats.estimatedCount?' <span class="pnl-estimate-badge">est.</span>':''}</div></div>
       <div class="dj-pnl-cell"><div class="dj-pnl-label">Positions</div><div class="dj-pnl-val">${stats.count||'—'}</div></div>
-      <div class="dj-pnl-cell"><div class="dj-pnl-label">Realised-event win rate</div><div class="dj-pnl-val" style="color:${stats.wr===null?'var(--text3)':stats.wr>=50?'var(--green)':'var(--red)'}">${stats.wr!==null?stats.wr+'%':'—'}</div></div>
-      <div class="dj-pnl-cell"><div class="dj-pnl-label">Best realised event</div><div class="dj-pnl-val" style="color:${bestColor}">${bestPnl!==null?escapeHtml(`${signedMoney(bestPnl,bestAc,2)} ${stats.best.symbol||''}`.trim()):'—'}</div></div>
+      <div class="dj-pnl-cell"><div class="dj-pnl-label">${stats.degraded?'Provisional':'Realised-event'} win rate</div><div class="dj-pnl-val" style="color:${stats.wr===null?'var(--text3)':stats.wr>=50?'var(--green)':'var(--red)'}">${stats.wr!==null?stats.wr+'%':'—'}</div></div>
+      <div class="dj-pnl-cell" title="${escapeHtml(bestAuthority)}"><div class="dj-pnl-label">Best ${stats.degraded?'provisional':'realised'} event</div><div class="dj-pnl-val" style="color:${bestColor}">${bestPnl!==null?escapeHtml(`${signedMoney(bestPnl,bestAc,2)} ${stats.best.symbol||''}`.trim())+bestBadge:'—'}</div></div>
     </div>
 
     <!-- 2-col body -->
@@ -12714,8 +12765,8 @@ function renderDjFeed(){
   feedEl.innerHTML = entries.map(e=>{
     const stats  = djDayStats(e.date);
     const isActive = e.date===djDate;
-    const pnlStr = stats.count ? (stats.incomplete?'P&L incomplete':signedMoney(stats.net,'$',0)+(stats.estimatedCount?' est.':'')) : null;
-    const pnlColor = stats.incomplete?'var(--text3)':stats.net>=0?'var(--green)':'var(--red)';
+    const pnlStr = stats.count&&Number.isFinite(stats.net) ? signedMoney(stats.net,'$',0)+(stats.degraded?' prov.':stats.estimatedCount?' est.':'') : null;
+    const pnlColor = !Number.isFinite(stats.net)?'var(--text3)':stats.net>=0?'var(--green)':'var(--red)';
     const dotColor = stats.net>0?'var(--green)':stats.net<0?'var(--red)':'var(--text3)';
     // preview: first non-empty text field
     const preview = e.notes||e.keyLesson||e.woulddoDiff||e.tomorrowIntentions||e.mistake||'No notes written.';
