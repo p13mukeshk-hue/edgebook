@@ -767,6 +767,9 @@ requireMatch(dictationControllerSource,/code\s*===\s*'network'[\s\S]{0,240}?swit
 requireMatch(dictationControllerSource,/recognition\.onend[\s\S]{0,700}?scheduleBrowserRestart\(current\)/,'long browser dictation automatically reconnects after service boundaries');
 requireMatch(dictationControllerSource,/navigator\?\.mediaDevices\?\.getUserMedia/,'microphone capability gate');
 requireMatch(app,/id="sp-voice"[\s\S]{0,1800}?id="voice-input-device"[\s\S]{0,900}?refreshVoiceInputDevices/,'voice settings expose explicit microphone detection and selection');
+requireMatch(app,/id="voice-input-connection"[\s\S]{0,400}?selected for Edgebook/,'voice settings identify the microphone selected for Edgebook');
+requireMatch(app,/onMicrophoneStateChange\(state\)[\s\S]{0,250}?renderVoiceInputConnectionState/,'voice settings subscribe to microphone connection state');
+requireMatch(app,/message=`\$\{voiceInputRuntimeState\.label[^\n]+connected now`/,'voice settings distinguish a live connected microphone from a saved selection');
 requireMatch(dictationControllerSource,/baseText:\s*element\.value/,'dictation preserves existing text');
 requireMatch(dictationControllerSource,/function promoteInterim[\s\S]{0,240}?renderTranscript/,'interim transcript promotion before teardown');
 requireMatch(dictationControllerSource,/track\.stop\(\)/,'immediate microphone privacy stop');
@@ -2923,13 +2926,15 @@ try {
     close(){this.closed=true;}
   }
   let trackStopped=false,microphoneCalls=0,clock=0,activeSession=null,autosaveCancels=0,lastAudioConstraints=null;
-  const microphoneTrack={kind:'audio',readyState:'live',label:'PD100X Podcast Microphone',stop(){trackStopped=true;this.readyState='ended';}};
+  const microphoneTrack={kind:'audio',readyState:'live',label:'PD100X Podcast Microphone',getSettings(){return{deviceId:'pd100x'};},stop(){trackStopped=true;this.readyState='ended';}};
   const stream={getAudioTracks:()=>[microphoneTrack],getTracks:()=>[microphoneTrack]};
-  const microphoneStorage={value:'pd100x',getItem(){return this.value;},setItem(name,value){this.value=String(value);},removeItem(){this.value='';}};
+  const microphoneValues=new Map([['edgebook.voice.inputDeviceId','pd100x']]);
+  const microphoneStorage={getItem(name){return microphoneValues.get(String(name))||'';},setItem(name,value){microphoneValues.set(String(name),String(value));},removeItem(name){microphoneValues.delete(String(name));}};
   const fixtureRoot={isSecureContext:true,setTimeout,clearTimeout};
   const fixtureContext=vm.createContext({console,setTimeout,clearTimeout,globalThis:null});
   fixtureContext.globalThis=fixtureContext;
   vm.runInContext(dictationControllerSource,fixtureContext,{timeout:500});
+  const microphoneStates=[];
   const browserController=fixtureContext.createEdgebookDictationController({
     root:fixtureRoot,
     document:voiceDocument,
@@ -2941,6 +2946,7 @@ try {
     escapeHtml:value=>String(value),
     showToast(){},
     onSessionChange(value){activeSession=value;},
+    onMicrophoneStateChange(state){microphoneStates.push({...state});},
     cancelDailyAutosave(){autosaveCancels+=1;},
   });
   await browserController.toggle('dj-notes');
@@ -2954,7 +2960,7 @@ try {
   nativeRecognition?.onstart?.();
   nativeRecognition?.emitResult('the plan',true);
   await browserController.stop();
-  if(!nativeRecognition||nativeRecognition.continuous!==true||nativeRecognition.interimResults!==true||nativeRecognition.lang!=='en-IN'||nativeRecognition.startCalls!==2||nativeRecognition.startTracks.some(track=>track!==microphoneTrack)||workers.length!==0||microphoneCalls!==1||lastAudioConstraints?.audio?.deviceId?.exact!=='pd100x'||voiceNotes.value!=='Existing note.\nPrice followed the plan'||!/PD100X/.test(browserMicStatus)) {
+  if(!nativeRecognition||nativeRecognition.continuous!==true||nativeRecognition.interimResults!==true||nativeRecognition.lang!=='en-IN'||nativeRecognition.startCalls!==2||nativeRecognition.startTracks.some(track=>track!==microphoneTrack)||workers.length!==0||microphoneCalls!==1||lastAudioConstraints?.audio?.deviceId?.exact!=='pd100x'||voiceNotes.value!=='Existing note.\nPrice followed the plan'||!/PD100X/.test(browserMicStatus)||!microphoneStates.some(state=>state.connected===true&&state.label==='PD100X Podcast Microphone'&&state.deviceId==='pd100x')||microphoneStates.at(-1)?.connected!==false||browserController.selectedMicrophoneLabel()!=='PD100X Podcast Microphone') {
     failures.push('Chrome live dictation did not use one explicitly selected microphone track or preserve its final transcript');
   }
 

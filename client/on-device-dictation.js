@@ -25,6 +25,7 @@
   const MIN_MANUAL_CAPTURE_MS = 350;
   const SILENCE_HALLUCINATIONS = new Set(['you', 'thank you', 'thanks for watching', 'bye', 'goodbye']);
   const MICROPHONE_STORAGE_KEY = 'edgebook.voice.inputDeviceId';
+  const MICROPHONE_LABEL_STORAGE_KEY = 'edgebook.voice.inputDeviceLabel';
 
   function createController(options = {}) {
     const root = options.root || global;
@@ -42,6 +43,7 @@
     const onSessionChange = options.onSessionChange || (() => {});
     const cancelDailyAutosave = options.cancelDailyAutosave || (() => {});
     const onMicrophonesChange = options.onMicrophonesChange || (() => {});
+    const onMicrophoneStateChange = options.onMicrophoneStateChange || (() => {});
     const storage = options.storage === undefined ? root.localStorage : options.storage;
     const schedule = options.setTimeout || root.setTimeout.bind(root);
     const unschedule = options.clearTimeout || root.clearTimeout.bind(root);
@@ -63,6 +65,20 @@
       try {
         if (value) storage?.setItem?.(MICROPHONE_STORAGE_KEY, value);
         else storage?.removeItem?.(MICROPHONE_STORAGE_KEY);
+      } catch {}
+      return value;
+    }
+
+    function storedMicrophoneLabel() {
+      try { return String(storage?.getItem?.(MICROPHONE_LABEL_STORAGE_KEY) || '').replace(/\s+/g, ' ').trim().slice(0, 120); }
+      catch { return ''; }
+    }
+
+    function saveMicrophoneLabel(label = '') {
+      const value = String(label || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+      try {
+        if (value) storage?.setItem?.(MICROPHONE_LABEL_STORAGE_KEY, value);
+        else storage?.removeItem?.(MICROPHONE_LABEL_STORAGE_KEY);
       } catch {}
       return value;
     }
@@ -89,7 +105,10 @@
         microphoneChoices = devices
           .filter(device => device?.kind === 'audioinput' && device.deviceId)
           .map((device, index) => ({ deviceId: String(device.deviceId), label: cleanMicrophoneLabel(device.label || `Microphone ${index + 1}`) }));
-        onMicrophonesChange(microphoneChoices.slice(), storedMicrophoneId());
+        const selectedId = storedMicrophoneId();
+        const selectedChoice = microphoneChoices.find(choice => choice.deviceId === selectedId);
+        if (selectedChoice) saveMicrophoneLabel(selectedChoice.label);
+        onMicrophonesChange(microphoneChoices.slice(), selectedId);
       } catch {}
       return microphoneChoices;
     }
@@ -103,6 +122,7 @@
         const retryDefault = preferredDeviceId && (error?.name === 'NotFoundError' || error?.name === 'OverconstrainedError');
         if (!retryDefault) throw error;
         saveMicrophoneId('');
+        saveMicrophoneLabel('');
         stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(''), video: false });
       }
       const track = stream.getAudioTracks?.()[0] || stream.getTracks?.()[0] || null;
@@ -115,6 +135,8 @@
       current.stream = stream;
       current.browserTrack = track;
       current.microphoneLabel = cleanMicrophoneLabel(track.label);
+      saveMicrophoneLabel(current.microphoneLabel);
+      onMicrophoneStateChange({ connected: true, label: current.microphoneLabel, deviceId: String(track.getSettings?.().deviceId || preferredDeviceId || '') });
       void updateMicrophoneChoices();
       return track;
     }
@@ -263,6 +285,7 @@
         try { track.stop(); } catch {}
       }
       try { current.audioContext?.close(); } catch {}
+      if (current.stream || current.browserTrack) onMicrophoneStateChange({ connected: false, label: current.microphoneLabel || '', deviceId: '' });
       Object.assign(current, { processor: null, source: null, analyser: null, silentGain: null, stream: null, browserTrack: null, audioContext: null });
     }
 
@@ -831,6 +854,7 @@
         catch (error) {
           if (!selected || (error?.name !== 'NotFoundError' && error?.name !== 'OverconstrainedError')) throw error;
           saveMicrophoneId('');
+          saveMicrophoneLabel('');
           temporaryStream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(''), video: false });
         }
       }
@@ -840,8 +864,11 @@
 
     function selectMicrophone(deviceId = '') {
       const selected = saveMicrophoneId(deviceId);
+      const selectedChoice = microphoneChoices.find(choice => choice.deviceId === selected);
+      const label = selected ? saveMicrophoneLabel(selectedChoice?.label || storedMicrophoneLabel()) : saveMicrophoneLabel('');
       if (session) stop({ quiet: true, immediate: true });
       onMicrophonesChange(microphoneChoices.slice(), selected);
+      onMicrophoneStateChange({ connected: false, label, deviceId: selected });
       return selected;
     }
 
@@ -855,6 +882,7 @@
       discoverMicrophones,
       microphoneChoices: () => microphoneChoices.slice(),
       selectedMicrophoneId: storedMicrophoneId,
+      selectedMicrophoneLabel: storedMicrophoneLabel,
       selectMicrophone,
       toggle,
       stop,

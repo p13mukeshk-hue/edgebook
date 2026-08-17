@@ -492,6 +492,13 @@ tr:hover td{background:rgba(255,255,255,0.018)}
 .dictation-inline>.trade-voice-btn{margin-left:auto}
 .dictation-status{min-height:14px;font-size:10px;line-height:1.4;color:var(--text3)}
 .dictation-status.is-listening{color:var(--red);font-weight:600}.dictation-status.is-ready{color:var(--green)}
+.voice-input-connection{display:inline-flex;align-items:center;gap:7px;max-width:100%;margin:2px 0 7px;padding:6px 9px;border:1px solid var(--border);border-radius:9px;background:var(--bg3);color:var(--text3);font-size:11px;font-weight:600;line-height:1.35}
+.voice-input-connection i{font-size:10px;flex:0 0 auto}.voice-input-connection span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.voice-input-connection.is-selected{border-color:rgba(62,207,142,.3);background:rgba(62,207,142,.07);color:var(--green)}
+.voice-input-connection.is-connected{border-color:rgba(62,207,142,.55);background:rgba(62,207,142,.12);color:var(--green);box-shadow:0 0 0 3px rgba(62,207,142,.05)}
+.voice-input-connection.is-connected i{animation:voiceConnectionPulse 1.35s ease-in-out infinite}
+.voice-input-connection.is-warning{border-color:rgba(244,180,67,.35);background:rgba(244,180,67,.08);color:var(--amber)}
+@keyframes voiceConnectionPulse{0%,100%{opacity:.55;transform:scale(.86)}50%{opacity:1;transform:scale(1.08)}}
 @keyframes tradeVoicePrepare{0%,100%{height:2px;opacity:.45}50%{height:11px;opacity:1}}
 .modal-footer{padding:16px 28px 24px;display:flex;gap:10px;justify-content:flex-end;position:sticky;bottom:0;background:var(--bg2);border-top:1px solid var(--border)}
 .btn-ghost{padding:10px 18px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;color:var(--text2);font-family:var(--font-body);font-size:13px;font-weight:500;cursor:pointer;transition:.15s}
@@ -1931,6 +1938,7 @@ html[data-auth-mode="firebase"] .ctrader-vps-only{display:none!important}
               <div class="s-section">
                 <div class="s-section-label">Audio input</div>
                 <div class="s-row"><div class="s-row-left"><div class="s-row-label">Microphone</div><div class="s-row-desc">The selected live audio track is used consistently in Log trade, Daily Journal, mood notes, heatmap notes and custom fields.</div></div><div class="s-row-right" style="gap:8px"><select class="s-select" id="voice-input-device" aria-label="Voice dictation microphone" onchange="setVoiceInputDevice(this.value)"><option value="">System default microphone</option></select><button type="button" class="btn-ghost" onclick="refreshVoiceInputDevices()" style="white-space:nowrap"><i class="fa-solid fa-rotate"></i> Detect</button></div></div>
+                <div id="voice-input-connection" class="voice-input-connection" role="status" aria-live="polite"><i class="fa-solid fa-link"></i><span>System default microphone · selected for Edgebook</span></div>
                 <div id="voice-input-status" role="status" aria-live="polite" style="font-size:11px;line-height:1.5;color:var(--text3);padding:2px 0 8px">Click Detect once to allow microphone access and list this computer's inputs.</div>
               </div>
               <div class="s-section" style="margin-top:16px">
@@ -7112,11 +7120,13 @@ function updateTradeSaveButton(){
 }
 
 /* One hybrid Chrome-streaming / private Whisper-fallback controller serves every narrative field. */
+let voiceInputRuntimeState={connected:false,label:'',deviceId:''};
 const dictationController=globalThis.createEdgebookDictationController({
   escapeHtml,
   showToast,
-  onSessionChange(value){dictationSession=value;},
+  onSessionChange(value){dictationSession=value;renderVoiceInputConnectionState();},
   onMicrophonesChange(choices,selected){renderVoiceInputChoices(choices,selected);},
+  onMicrophoneStateChange(state){voiceInputRuntimeState={connected:state?.connected===true,label:String(state?.label||''),deviceId:String(state?.deviceId||'')};renderVoiceInputConnectionState();},
   cancelDailyAutosave(){
     if(typeof djAutoSaveTimer!=='undefined'){clearTimeout(djAutoSaveTimer);djAutoSaveTimer=null;}
   },
@@ -7139,6 +7149,32 @@ function renderVoiceInputChoices(choices=[],selected=''){
     unavailable.value=wanted;unavailable.textContent='Previously selected microphone';select.appendChild(unavailable);
   }
   select.value=wanted;
+  renderVoiceInputConnectionState();
+}
+function renderVoiceInputConnectionState(){
+  const badge=document.getElementById('voice-input-connection');
+  if(!badge)return;
+  const icon=badge.querySelector('i');
+  const text=badge.querySelector('span');
+  const choices=dictationController?.microphoneChoices?.()||[];
+  const selectedId=String(dictationController?.selectedMicrophoneId?.()||'');
+  const selectedChoice=choices.find(choice=>String(choice?.deviceId||'')===selectedId);
+  const savedLabel=String(selectedChoice?.label||dictationController?.selectedMicrophoneLabel?.()||'').trim();
+  let className='voice-input-connection is-selected';
+  let iconName='fa-solid fa-link';
+  let message=`${savedLabel||'System default microphone'} · selected for Edgebook`;
+  if(voiceInputRuntimeState.connected){
+    className='voice-input-connection is-connected';
+    iconName='fa-solid fa-microphone-lines';
+    message=`${voiceInputRuntimeState.label||savedLabel||'Microphone'} · connected now`;
+  }else if(selectedId&&choices.length&&!selectedChoice){
+    className='voice-input-connection is-warning';
+    iconName='fa-solid fa-triangle-exclamation';
+    message=`${savedLabel||'Selected microphone'} · not currently detected`;
+  }
+  badge.className=className;
+  if(icon)icon.className=iconName;
+  if(text)text.textContent=message;
 }
 async function refreshVoiceInputDevices(){
   const status=document.getElementById('voice-input-status');
@@ -7158,6 +7194,7 @@ function setVoiceInputDevice(deviceId){
   const status=document.getElementById('voice-input-status');
   const label=select?.selectedOptions?.[0]?.textContent||'System default microphone';
   if(status)status.textContent=`Saved: ${label}. The next recording will use this exact input.`;
+  renderVoiceInputConnectionState();
   return selected;
 }
 function dictationTargetSpec(target){return dictationController.targetSpec(target);}
@@ -7173,7 +7210,7 @@ function stopTradeVoice(options={}){if(dictationSession?.spec.context==='trade')
 function refreshTradeVoiceControls(){refreshDictationControls();}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')stopDictation({quiet:true,immediate:true});});
 window.addEventListener('pagehide',()=>stopDictation({quiet:true,immediate:true}));
-document.addEventListener('DOMContentLoaded',()=>{refreshDictationControls();renderVoiceInputChoices(dictationController.microphoneChoices(),dictationController.selectedMicrophoneId());});
+document.addEventListener('DOMContentLoaded',()=>{refreshDictationControls();renderVoiceInputChoices(dictationController.microphoneChoices(),dictationController.selectedMicrophoneId());renderVoiceInputConnectionState();});
 
 const CTRADER_OWNED_FORM_IDS=['t-asset','t-sym-select','t-sym','t-dir','t-instrument','t-position','t-strike','t-account','t-entry','t-exit','t-size','t-time'];
 function isCTraderTrade(trade){return String(trade?.sourceSystem||trade?.source||trade?.broker||'').toLowerCase()==='ctrader';}
