@@ -1795,10 +1795,15 @@ describe("CTraderMcpSyncEngine", () => {
         grossProfit: 250_000, swap: -10_000, commission: -5_000, pnlConversionFee: 1_000, moneyDigits: 4,
       },
     });
+    const rejected = deal({
+      dealId: "1003", tradeSide: "BUY", dealType: "ENTRY", dealStatus: "INTERNALLY_REJECTED",
+      filledVolume: "0", volume: "200", executionPrice: 0,
+      executionTimestamp: new Date("2026-08-10T10:59:59.000Z").getTime(),
+    });
     const newerCursorTimestamp = new Date("2026-08-11T10:00:00.000Z").getTime();
-    const { engine, readClient, clientQueries } = harness([], {
+    const { engine, readClient, clientQueries, storedExecutions } = harness([], {
       pnlRefreshPositionIds: ["9001"],
-      positionDetailsResponse: { deals: [opening, closing] },
+      positionDetailsResponse: { deals: [opening, rejected, closing] },
       syncCursor: {
         historyWindowComplete: true,
         syncedThroughTimestamp: newerCursorTimestamp,
@@ -1810,6 +1815,8 @@ describe("CTraderMcpSyncEngine", () => {
     await engine.syncConnection(connectionId);
 
     expect(readClient.getPositionDetails).toHaveBeenCalledWith("9001");
+    expect(storedExecutions.map((execution) => (execution.payload as { edgebookMcpDeal?: { dealId?: string } })
+      .edgebookMcpDeal?.dealId)).not.toContain("1003");
     const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
     expect(tradeInsert?.values[13]).toBe("23.4");
     const connectionUpdate = clientQueries.find((query) => query.sql.includes("UPDATE broker_connections SET"));

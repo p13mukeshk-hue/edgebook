@@ -376,6 +376,23 @@ function positiveInteger(value: unknown, field: string): bigint {
   return parsed;
 }
 
+function zeroIntegerLike(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false;
+  if (typeof value === "bigint") return value === 0n;
+  if (typeof value === "number") return Number.isSafeInteger(value) && value === 0;
+  if (typeof value === "string") return /^0+$/.test(value.trim());
+  return false;
+}
+
+function isExplicitNonFilledZeroVolumeDeal(value: unknown): boolean {
+  const raw = objectValue(value);
+  const status = firstValue(raw, ["dealStatus", "deal_status", "status"]);
+  if (status === null) return false;
+  const normalizedStatus = String(status).trim().toUpperCase();
+  if (normalizedStatus === "" || normalizedStatus === "FILLED" || normalizedStatus === "2") return false;
+  return zeroIntegerLike(firstValue(raw, ["filledVolumeCents", "filledVolume", "filled_volume"]));
+}
+
 function normalizedVolume(
   raw: JsonRecord,
   storedCanonical: boolean,
@@ -2895,6 +2912,7 @@ export class CTraderMcpSyncEngine {
       );
       const rows = unwrapArray(raw, ["deals", "data", "result", "items", "history"], "position details");
       for (const row of rows) {
+        if (isExplicitNonFilledZeroVolumeDeal(row)) continue;
         const detail = normalizeDeal(row, "provider");
         if (detail.positionId !== positionId) {
           throw new CTraderSyncError(
@@ -3025,6 +3043,7 @@ export class CTraderMcpSyncEngine {
       const responseAccountVerified = historyResponseHasVerifiedAccount(raw, accountId);
       const rows = unwrapArray(raw, ["deals", "data", "result", "items", "history"], "deal history");
       for (const row of rows) {
+        if (isExplicitNonFilledZeroVolumeDeal(row)) continue;
         if (splitIncompletePages) {
           budget.processedDeals += 1;
           enforcePreviewBudget(depth);
