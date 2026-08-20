@@ -1653,7 +1653,49 @@ describe("CTraderMcpSyncEngine", () => {
     });
   });
 
-  it("withholds estimated net for an overnight trade when swap is not observed", async () => {
+  it("estimates net for a short overnight trade when commission is observed and swap is absent", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T04:00:00.000Z"));
+    const { engine, clientQueries } = harness([
+      deal({
+        dealId: "6775120", positionId: "4626156", tradeSide: "SELL", dealType: undefined,
+        symbolName: "XAUUSD", filledVolume: "200", executionPrice: 4_369.45, commission: -9,
+        executionTimestamp: new Date("2026-08-18T16:22:00.893Z").getTime(),
+      }),
+      deal({
+        dealId: "6776753", positionId: "4626156", tradeSide: "BUY", dealType: undefined,
+        symbolName: "XAUUSD", filledVolume: "200", executionPrice: 4_348.57, commission: -9,
+        executionTimestamp: new Date("2026-08-18T19:48:05.800Z").getTime(),
+      }),
+    ], {
+      balanceResponse: { accountId: "5032134", depositAssetId: "15", moneyDigits: 2 },
+      assetsResponse: [{ assetId: "15", name: "USD" }, { assetId: "17", name: "XAU" }],
+      symbolsResponse: [{
+        id: "41", name: "XAU/USD", baseAssetId: "17", quoteAssetId: "15",
+        lotSize: 100, lotSizeScale: "base_units_per_lot_v1", symbolCategory: "Metals",
+      }],
+    });
+
+    await engine.syncConnection(connectionId);
+
+    const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
+    expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
+      calculatedGrossPnl: "41.76",
+      estimatedCommission: "-0.18",
+      estimatedSwap: "0",
+      estimatedFeesAndCharges: "-0.18",
+      estimatedNetPnl: "41.58",
+      estimatedNetProvenance: {
+        swap: {
+          source: "short_duration_no_observed_swap_assumption",
+          assumedZero: true,
+          maxDurationHours: 12,
+        },
+      },
+    });
+  });
+
+  it("withholds estimated net for a long overnight trade when swap is not observed", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, clientQueries } = harness([
