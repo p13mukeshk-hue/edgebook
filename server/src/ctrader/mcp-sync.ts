@@ -2001,10 +2001,7 @@ function projectMcpPosition(
   const estimatedCommissionComplete = deals.every((deal) => deal.remoteCommissionRawUnits !== null);
   const observedSwapComplete = deals.every((deal) => deal.remoteSwapRawUnits !== null);
   const sameProviderCalendarDay = exitLocal !== null && entryLocal.date === exitLocal.date;
-  const shortHeldWithoutObservedSwap = lastClose !== null
-    && lastClose.executionTimestamp >= first.executionTimestamp
-    && lastClose.executionTimestamp - first.executionTimestamp <= 12 * 60 * 60 * 1_000;
-  const estimatedSwapComplete = observedSwapComplete || sameProviderCalendarDay || shortHeldWithoutObservedSwap;
+  const estimatedSwapComplete = observedSwapComplete || sameProviderCalendarDay || closing.length > 0;
   const estimateDigits = currency.accountMoneyDigits;
   let estimatedCommission: string | null = null;
   let estimatedSwap: string | null = null;
@@ -2204,9 +2201,8 @@ function projectMcpPosition(
           : {
               source: sameProviderCalendarDay
                 ? "same_provider_calendar_day_assumption"
-                : "short_duration_no_observed_swap_assumption",
+                : "remote_mcp_swap_not_provided_assumption",
               assumedZero: true,
-              maxDurationHours: sameProviderCalendarDay ? null : 12,
             },
         conversionFee: { source: "quote_deposit_currency_identity_assumption", assumedZero: true },
         otherCharges: { source: "not_exposed_by_remote_mcp", assumedZero: true },

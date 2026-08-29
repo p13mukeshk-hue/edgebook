@@ -1687,15 +1687,14 @@ describe("CTraderMcpSyncEngine", () => {
       estimatedNetPnl: "41.58",
       estimatedNetProvenance: {
         swap: {
-          source: "short_duration_no_observed_swap_assumption",
+          source: "remote_mcp_swap_not_provided_assumption",
           assumedZero: true,
-          maxDurationHours: 12,
         },
       },
     });
   });
 
-  it("withholds estimated net for a long overnight trade when swap is not observed", async () => {
+  it("estimates net for a long overnight trade when commission is observed and swap is absent", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
     const { engine, clientQueries } = harness([
@@ -1719,9 +1718,17 @@ describe("CTraderMcpSyncEngine", () => {
     const tradeInsert = clientQueries.find((query) => query.sql.includes("INSERT INTO trades"));
     expect(JSON.parse(String(tradeInsert?.values[20]))).toMatchObject({
       calculatedGrossPnl: "100",
-      estimatedFeesAndCharges: null,
-      estimatedNetPnl: null,
-      estimatedNetMethod: null,
+      estimatedCommission: "-0.18",
+      estimatedSwap: "0",
+      estimatedFeesAndCharges: "-0.18",
+      estimatedNetPnl: "99.82",
+      estimatedNetMethod: "remote_mcp_execution_commission_same_currency_v1",
+      estimatedNetProvenance: {
+        swap: {
+          source: "remote_mcp_swap_not_provided_assumption",
+          assumedZero: true,
+        },
+      },
     });
   });
 
