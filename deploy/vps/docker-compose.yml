@@ -1,0 +1,328 @@
+name: edgebook
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in /etc/edgebook/edgebook.env}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:?set POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD}
+      EDGEBOOK_DB_OWNER: ${EDGEBOOK_DB_OWNER:?set EDGEBOOK_DB_OWNER}
+      EDGEBOOK_DB_OWNER_PASSWORD: ${EDGEBOOK_DB_OWNER_PASSWORD:?set EDGEBOOK_DB_OWNER_PASSWORD}
+      EDGEBOOK_APP_USER: ${EDGEBOOK_APP_USER:?set EDGEBOOK_APP_USER}
+      EDGEBOOK_APP_PASSWORD: ${EDGEBOOK_APP_PASSWORD:?set EDGEBOOK_APP_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/vps/postgres/init/001-bootstrap.sh:/docker-entrypoint-initdb.d/001-bootstrap.sh:ro
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    shm_size: 256m
+    mem_limit: 1g
+    cpus: 0.75
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/vps/Dockerfile.api
+    image: edgebook-api:${EDGEBOOK_IMAGE_TAG:-local}
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3210
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must use the postgres service hostname}
+      DB_POOL_MAX: ${DB_POOL_MAX:-10}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID}
+      SESSION_PEPPER: ${SESSION_PEPPER:?set SESSION_PEPPER}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-14}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-1440}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      UPLOAD_ROOT: /var/lib/edgebook/uploads
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-524288000}
+      TOTAL_STORAGE_QUOTA_BYTES: ${TOTAL_STORAGE_QUOTA_BYTES:-10737418240}
+      MIN_DISK_FREE_BYTES: ${MIN_DISK_FREE_BYTES:-5368709120}
+      SSE_HEARTBEAT_MS: ${SSE_HEARTBEAT_MS:-20000}
+      # OAuth credentials and the encryption keyring are independently
+      # blank-safe. MCP compatibility is an explicit opt-in and requires the
+      # keyring pair; official OAuth additionally requires its complete trio.
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-}
+      CTRADER_MCP_ENABLED: ${CTRADER_MCP_ENABLED:-false}
+      CTRADER_ENCRYPTION_KEYS: ${CTRADER_ENCRYPTION_KEYS:-}
+      CTRADER_ACTIVE_KEY_VERSION: ${CTRADER_ACTIVE_KEY_VERSION:-}
+      CTRADER_OAUTH_STATE_TTL_SECONDS: ${CTRADER_OAUTH_STATE_TTL_SECONDS:-300}
+      CTRADER_GRANT_TTL_SECONDS: ${CTRADER_GRANT_TTL_SECONDS:-600}
+      CTRADER_REQUEST_TIMEOUT_MS: ${CTRADER_REQUEST_TIMEOUT_MS:-15000}
+      CTRADER_SYNC_INTERVAL_SECONDS: ${CTRADER_SYNC_INTERVAL_SECONDS:-300}
+      CTRADER_STALE_AFTER_SECONDS: ${CTRADER_STALE_AFTER_SECONDS:-900}
+      CTRADER_SYNC_OVERLAP_SECONDS: ${CTRADER_SYNC_OVERLAP_SECONDS:-300}
+      CTRADER_HISTORY_START_TIMESTAMP: ${CTRADER_HISTORY_START_TIMESTAMP:-}
+      CTRADER_REFRESH_SKEW_SECONDS: ${CTRADER_REFRESH_SKEW_SECONDS:-300}
+      CTRADER_MAX_DEALS_PER_REQUEST: ${CTRADER_MAX_DEALS_PER_REQUEST:-1000}
+      CTRADER_SYMBOL_CACHE_SECONDS: ${CTRADER_SYMBOL_CACHE_SECONDS:-86400}
+      CTRADER_TRADING_TIME_ZONE: ${CTRADER_TRADING_TIME_ZONE:-Asia/Kolkata}
+      # The web process never owns scheduling; the separately profiled worker does.
+      SCHEDULER_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Never change this to 0.0.0.0. Port 8787 is already owned by another service.
+      - "127.0.0.1:3210:3210"
+    volumes:
+      - /srv/edgebook-data/uploads:/var/lib/edgebook/uploads
+    networks:
+      - database
+      - outbound
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: 0.75
+    pids_limit: 192
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3210/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Deliberately excluded from ordinary `up`. Before cutover COMPOSE_PROFILES
+  # is blank, so even queued initial/manual work cannot run. At the single-
+  # writer handoff set COMPOSE_PROFILES=writer and SCHEDULER_ENABLED=true, then
+  # start exactly one worker. PostgreSQL advisory locks add a second guard.
+  worker:
+    profiles: ["writer"]
+    image: edgebook-api:${EDGEBOOK_IMAGE_TAG:-local}
+    restart: unless-stopped
+    init: true
+    command: ["node", "dist/ctrader/worker.js"]
+    environment:
+      NODE_ENV: production
+      HOST: 127.0.0.1
+      PORT: 3210
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: "false"
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must use edgebook_app at postgres:5432}
+      DB_POOL_MAX: ${WORKER_DB_POOL_MAX:-4}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set GOOGLE_CLIENT_ID}
+      SESSION_PEPPER: ${SESSION_PEPPER:?set SESSION_PEPPER}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-14}
+      SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-1440}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      UPLOAD_ROOT: /var/lib/edgebook/uploads
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-524288000}
+      TOTAL_STORAGE_QUOTA_BYTES: ${TOTAL_STORAGE_QUOTA_BYTES:-10737418240}
+      MIN_DISK_FREE_BYTES: ${MIN_DISK_FREE_BYTES:-5368709120}
+      SSE_HEARTBEAT_MS: ${SSE_HEARTBEAT_MS:-20000}
+      # Compose interpolates even inactive profiles. These stay blank-safe;
+      # worker.ts fails closed unless encryption and at least one connection
+      # mode (official OAuth or MCP compatibility) are enabled.
+      CTRADER_CLIENT_ID: ${CTRADER_CLIENT_ID:-}
+      CTRADER_CLIENT_SECRET: ${CTRADER_CLIENT_SECRET:-}
+      CTRADER_REDIRECT_URI: ${CTRADER_REDIRECT_URI:-}
+      CTRADER_MCP_ENABLED: ${CTRADER_MCP_ENABLED:-false}
+      CTRADER_ENCRYPTION_KEYS: ${CTRADER_ENCRYPTION_KEYS:-}
+      CTRADER_ACTIVE_KEY_VERSION: ${CTRADER_ACTIVE_KEY_VERSION:-}
+      CTRADER_OAUTH_STATE_TTL_SECONDS: ${CTRADER_OAUTH_STATE_TTL_SECONDS:-300}
+      CTRADER_GRANT_TTL_SECONDS: ${CTRADER_GRANT_TTL_SECONDS:-600}
+      CTRADER_REQUEST_TIMEOUT_MS: ${CTRADER_REQUEST_TIMEOUT_MS:-15000}
+      CTRADER_SYNC_INTERVAL_SECONDS: ${CTRADER_SYNC_INTERVAL_SECONDS:-300}
+      CTRADER_STALE_AFTER_SECONDS: ${CTRADER_STALE_AFTER_SECONDS:-900}
+      CTRADER_SYNC_OVERLAP_SECONDS: ${CTRADER_SYNC_OVERLAP_SECONDS:-300}
+      CTRADER_HISTORY_START_TIMESTAMP: ${CTRADER_HISTORY_START_TIMESTAMP:-}
+      CTRADER_REFRESH_SKEW_SECONDS: ${CTRADER_REFRESH_SKEW_SECONDS:-300}
+      CTRADER_MAX_DEALS_PER_REQUEST: ${CTRADER_MAX_DEALS_PER_REQUEST:-1000}
+      CTRADER_SYMBOL_CACHE_SECONDS: ${CTRADER_SYMBOL_CACHE_SECONDS:-86400}
+      CTRADER_TRADING_TIME_ZONE: ${CTRADER_TRADING_TIME_ZONE:-Asia/Kolkata}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:?set SCHEDULER_ENABLED to true only at cutover}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - database
+      - outbound
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 384m
+    mem_reservation: 128m
+    cpus: 0.35
+    pids_limit: 128
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Explicit one-shot migration job. It is excluded from normal `up` by the
+  # tools profile and uses the owner connection, never the runtime role.
+  migrate:
+    profiles: ["tools"]
+    image: edgebook-api:${EDGEBOOK_IMAGE_TAG:-local}
+    init: true
+    environment:
+      # Blank-safe only so an inactive profile can be rendered for rehearsal;
+      # loadDatabaseConfig fails closed if the tools profile is actually run.
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+      DB_POOL_MAX: "2"
+    command: ["node", "dist/db/migrate.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - database
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+      - /var/lib/edgebook/uploads:rw,nosuid,nodev,noexec,size=1m,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 0.35
+    pids_limit: 96
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Firebase-to-PostgreSQL data tooling. This is separate from the application
+  # schema migrator above and is never part of ordinary stack startup. It gets
+  # only the owner URL/freeze gate, private migration paths and upload tree.
+  migration-tools:
+    profiles: ["migration"]
+    build:
+      context: .
+      dockerfile: deploy/vps/Dockerfile.migration
+    image: edgebook-migration:${EDGEBOOK_IMAGE_TAG:-local}
+    init: true
+    environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+      TARGET_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+      EDGEBOOK_WRITES_FROZEN: ${EDGEBOOK_WRITES_FROZEN:-false}
+    command: ["--help"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - database
+    volumes:
+      - /srv/edgebook-migration/input:/migration-input:ro
+      - /srv/edgebook-migration/output:/migration-output
+      - /srv/edgebook-data/uploads:/srv/edgebook-data/uploads
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 768m
+    cpus: 0.5
+    pids_limit: 128
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Bounded one-shot deletion queue drain, invoked by the dedicated systemd
+  # timer. It receives the app DB URL and upload path, but no PostgreSQL owner,
+  # superuser, cTrader client, or cTrader encryption secrets.
+  cleanup:
+    profiles: ["jobs"]
+    image: edgebook-api:${EDGEBOOK_IMAGE_TAG:-local}
+    init: true
+    command: ["node", "dist/uploads/cleanup.js"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must use edgebook_app at postgres:5432}
+      DB_POOL_MAX: "2"
+      UPLOAD_ROOT: /var/lib/edgebook/uploads
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5242880}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-524288000}
+      TOTAL_STORAGE_QUOTA_BYTES: ${TOTAL_STORAGE_QUOTA_BYTES:-10737418240}
+      MIN_DISK_FREE_BYTES: ${MIN_DISK_FREE_BYTES:-5368709120}
+    networks:
+      - database
+    volumes:
+      - /srv/edgebook-data/uploads:/var/lib/edgebook/uploads
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 384m
+    cpus: 0.35
+    pids_limit: 96
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  postgres-data:
+    name: edgebook-postgres-data
+
+networks:
+  database:
+    name: edgebook-database
+    internal: true
+  outbound:
+    name: edgebook-outbound

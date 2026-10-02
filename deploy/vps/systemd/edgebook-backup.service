@@ -1,0 +1,27 @@
+[Unit]
+Description=Edge Book PostgreSQL and private upload backup
+Requires=docker.service
+After=docker.service edgebook-stack.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/edgebook/backup.env
+ExecStart=/opt/edgebook/current/deploy/vps/scripts/backup-edgebook.sh
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=50%
+MemoryMax=512M
+TasksMax=64
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/edgebook /etc/edgebook /srv/edgebook-data/uploads
+ReadWritePaths=/var/backups/edgebook /run/edgebook
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true

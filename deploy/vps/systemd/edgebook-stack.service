@@ -1,0 +1,39 @@
+[Unit]
+Description=Edge Book isolated Docker Compose stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/edgebook/current
+Environment=COMPOSE_PROJECT_NAME=edgebook
+EnvironmentFile=/etc/edgebook/edgebook.env
+ExecStartPre=/opt/edgebook/current/deploy/vps/scripts/preflight.sh
+ExecStart=/usr/bin/docker compose --project-directory /opt/edgebook/current --env-file /etc/edgebook/edgebook.env -f /opt/edgebook/current/deploy/vps/docker-compose.yml up --detach --remove-orphans --wait
+ExecReload=/usr/bin/docker compose --project-directory /opt/edgebook/current --env-file /etc/edgebook/edgebook.env -f /opt/edgebook/current/deploy/vps/docker-compose.yml up --detach --remove-orphans --wait
+# Always include the profiled worker when stopping. This remains true even if an
+# operator has already cleared COMPOSE_PROFILES in the environment file during
+# an emergency freeze or rollback.
+ExecStop=/usr/bin/docker compose --project-directory /opt/edgebook/current --env-file /etc/edgebook/edgebook.env -f /opt/edgebook/current/deploy/vps/docker-compose.yml --profile writer stop --timeout 30 worker api postgres
+TimeoutStartSec=180
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/edgebook /etc/edgebook
+ReadWritePaths=/srv/edgebook-data /var/backups/edgebook
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+TasksMax=256
+LimitNOFILE=16384
+
+[Install]
+WantedBy=multi-user.target

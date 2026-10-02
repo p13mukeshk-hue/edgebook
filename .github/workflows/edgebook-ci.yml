@@ -1,0 +1,148 @@
+name: Edge Book validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgebook-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            migration/package-lock.json
+
+      - name: Install API dependencies
+        run: npm ci
+        working-directory: server
+
+      - name: Verify API
+        run: npm run check
+        working-directory: server
+
+      - name: Install migration dependencies
+        run: npm ci
+        working-directory: migration
+
+      - name: Verify migration tools and synthetic fixture
+        run: npm run check
+        working-directory: migration
+
+      - name: Verify frontend contracts
+        run: node client/verify-frontend.mjs
+
+      - name: Verify deployment isolation contracts
+        run: node deploy/vps/verify-deployment.mjs
+
+      - name: Verify rendered worker gate syntax
+        run: node --check deploy/vps/scripts/verify-rendered-worker-env.mjs
+
+      - name: Render credentialless rehearsal Compose model
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rendered="$(mktemp)"
+          trap 'rm -f -- "$rendered"' EXIT
+          docker compose \
+            --profile writer \
+            --profile tools \
+            --env-file deploy/vps/env/rehearsal-compose.env.example \
+            -f deploy/vps/docker-compose.yml \
+            config --format json >"$rendered"
+          node - "$rendered" <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const model = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const renderedServices = Object.keys(model.services).sort();
+          const expectedServices = ['api', 'migrate', 'postgres', 'worker'];
+          if (JSON.stringify(renderedServices) !== JSON.stringify(expectedServices)) {
+            throw new Error(`unexpected rendered rehearsal services: ${renderedServices.join(', ')}`);
+          }
+          const unprofiled = Object.entries(model.services)
+            .filter(([, service]) => !Array.isArray(service.profiles) || service.profiles.length === 0)
+            .map(([name]) => name)
+            .sort();
+          if (JSON.stringify(unprofiled) !== JSON.stringify(['api', 'postgres'])) {
+            throw new Error(`unexpected profile-free rehearsal services: ${unprofiled.join(', ')}`);
+          }
+          for (const serviceName of ['api', 'worker']) {
+            const environment = model.services[serviceName].environment;
+            for (const name of ['CTRADER_CLIENT_ID', 'CTRADER_CLIENT_SECRET', 'CTRADER_REDIRECT_URI', 'CTRADER_ENCRYPTION_KEYS', 'CTRADER_ACTIVE_KEY_VERSION']) {
+              if (environment[name] !== '') throw new Error(`${serviceName}.${name} must render blank in rehearsal`);
+            }
+            if (String(environment.CTRADER_MCP_ENABLED).toLowerCase() !== 'false') {
+              throw new Error(`${serviceName}.CTRADER_MCP_ENABLED must render false in rehearsal`);
+            }
+          }
+          if (model.services.migrate.environment.DATABASE_URL !== '') {
+            throw new Error('inactive migrator DATABASE_URL must render blank in rehearsal');
+          }
+          NODE
+
+      - name: Verify deployment script syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for script in deploy/vps/scripts/*.sh deploy/vps/postgres/init/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: Exercise release compatibility gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_id="ci-${GITHUB_SHA::7}"
+          release_dir="/opt/edgebook/releases/$release_id"
+          sudo install -d -m 0755 "$release_dir"
+          sudo chown -R "$(id -u):$(id -g)" /opt/edgebook
+          ./deploy/vps/scripts/build-public.sh \
+            --mode rehearsal \
+            --destination "$release_dir/public"
+          ./deploy/vps/scripts/verify-rollback-candidate.sh \
+            --candidate "$release_dir"
+          node -e "const fs=require('fs'); const marker=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); if(marker.tradeQuantityCompatibility!=='ctrader-quantity-projection-base-units-v1') process.exit(1)" \
+            "$release_dir/public/edgebook-build.json"
+
+      - name: Verify deployment script executable modes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          failed=false
+          for script in deploy/vps/scripts/*.sh deploy/vps/postgres/init/*.sh; do
+            if [[ ! -x "$script" ]]; then
+              echo "Deployment script is not executable in the Git release: $script" >&2
+              failed=true
+            fi
+          done
+          [[ "$failed" == false ]]
+
+      - name: Verify tracked files contain no populated environment files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -vE '\.env\.example$'; then
+            echo 'Tracked populated environment file detected.' >&2
+            exit 1
+          fi
+
+# Deployment is deliberately absent. The old automatic Firebase Hosting and
+# Functions workflow is preserved by the pre-migration Git tag only. VPS
+# releases use the reviewed, single-writer procedure in docs/FIREBASE_TO_VPS_RUNBOOK.md.
