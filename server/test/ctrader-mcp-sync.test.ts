@@ -330,7 +330,10 @@ describe("CTraderMcpSyncEngine", () => {
     };
     const { engine, readClient, clientQueries } = harness([deal(), closing], {
       balanceResponse: { accountId: "5032134", depositAssetId: 15, moneyDigits: 2 },
-      assetsResponse: { assets: [{ assetId: 15, displayName: "USD", name: "USD" }] },
+      assetsResponse: { assets: [
+        { assetId: 15, displayName: "USD", name: "USD" },
+        { assetId: 1024, displayName: "A", name: "A" },
+      ] },
       symbolsResponse: [{
         symbolId: 41,
         symbolName: "XAU/USD",
@@ -362,7 +365,7 @@ describe("CTraderMcpSyncEngine", () => {
       providerReadTelemetry: {
         version: 1,
         assetsAvailable: true,
-        assetCount: 1,
+        assetCount: 2,
         currencyResolved: true,
         pnlEnrichment: {
           version: 1,

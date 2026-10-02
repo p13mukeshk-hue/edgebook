@@ -1445,7 +1445,7 @@ function normalizeAssets(value: unknown): ReadonlyMap<string, string> {
     const name = textValue(firstValue(raw, ["name", "displayName", "display_name"]), "asset name");
     if (name === null) continue;
     const canonical = name.toUpperCase();
-    if (!/^[A-Z0-9.]{2,20}$/.test(canonical)) {
+    if (!/^[A-Z0-9.]{1,20}$/.test(canonical)) {
       throw new CTraderSyncError("CTRADER_MCP_METADATA_INVALID", "cTrader returned an invalid asset name", false);
     }
     const previous = assets.get(id);
