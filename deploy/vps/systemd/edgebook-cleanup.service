@@ -1,0 +1,26 @@
+[Unit]
+Description=Edge Book private screenshot deletion queue cleanup
+Requires=docker.service
+After=docker.service edgebook-stack.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock --nonblock /run/edgebook/maintenance.lock /usr/bin/docker compose --project-directory /opt/edgebook/current --env-file /etc/edgebook/edgebook.env -f /opt/edgebook/current/deploy/vps/docker-compose.yml --profile jobs run --rm --no-deps cleanup
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+CPUQuota=35%
+MemoryMax=448M
+TasksMax=96
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/edgebook /etc/edgebook
+ReadWritePaths=/srv/edgebook-data/uploads /run/edgebook
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true

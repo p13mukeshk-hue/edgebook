@@ -1,0 +1,27 @@
+{
+  "name": "edgebook-firebase-migration-tools",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node test/browser-export-test.mjs && node test/self-test.mjs",
+    "check": "npm run test && node --check browser/export-local-data.js && node --check lib/bundle.mjs && node --check lib/image.mjs && node --check lib/settings.mjs && node --check scripts/export-firebase.mjs && node --check scripts/validate-bundle.mjs && node --check scripts/apply-staging-schema.mjs && node --check scripts/import-staging.mjs && node --check scripts/promote.mjs && node --check scripts/snapshot-target.mjs && node --check scripts/reconcile.mjs",
+    "export": "node scripts/export-firebase.mjs",
+    "validate": "node scripts/validate-bundle.mjs",
+    "schema:staging": "node scripts/apply-staging-schema.mjs",
+    "stage": "node scripts/import-staging.mjs",
+    "promote": "node scripts/promote.mjs",
+    "snapshot": "node scripts/snapshot-target.mjs",
+    "reconcile": "node scripts/reconcile.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "14.2.0",
+    "pg": "8.16.3",
+    "sharp": "0.35.3"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

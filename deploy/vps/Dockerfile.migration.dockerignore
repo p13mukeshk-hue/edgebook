@@ -1,0 +1,12 @@
+**
+!migration/
+!migration/package.json
+!migration/package-lock.json
+!migration/browser/
+!migration/browser/**
+!migration/lib/
+!migration/lib/**
+!migration/postgres/
+!migration/postgres/**
+!migration/scripts/
+!migration/scripts/**
